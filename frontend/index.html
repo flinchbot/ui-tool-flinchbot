@@ -586,11 +586,11 @@ function fillModelSelect(sel, models, cur, pickNewestIfMissing) {
   return models;
 }
 const PROVIDER_INFO = {
-  anthropic: { short: 'Claude', by: 'by Anthropic',
+  anthropic: { short: 'Claude', by: 'by Anthropic', keyExample: 'sk-ant-api03-…',
     keyHelp: 'console.anthropic.com → API Keys',
     modelHelp: 'Sonnet is a good default. Opus and Fable are smarter but cost more per question.',
     pricing: 'https://platform.claude.com/docs/en/about-claude/pricing' },
-  openai: { short: 'ChatGPT', by: 'by OpenAI (GPT models)',
+  openai: { short: 'ChatGPT', by: 'by OpenAI (GPT models)', keyExample: 'sk-proj-…',
     keyHelp: 'platform.openai.com → API keys. A ChatGPT Plus/Pro subscription does not include API use; add API credit under Billing',
     modelHelp: 'GPT-6.1 Sol is a good default. GPT-6 Astra is the most capable and costs more; Terra and Luna are cheaper.',
     pricing: 'https://developers.openai.com/api/docs/pricing' },
@@ -610,7 +610,7 @@ async function openSettings(wizard) {
   const sections = {};
   for (const [name, info] of Object.entries(s.providers)) {
     const pi = PROVIDER_INFO[name] || { short: info.label, by: '', keyHelp: '', modelHelp: '', pricing: '#' };
-    const key = secretInput({ placeholder: info.key_set ? `Saved (${info.key_hint}) — paste a new key to replace` : `${info.key_prefix}…` });
+    const key = secretInput({ placeholder: info.key_set ? `Saved (${info.key_hint}) — paste a new key to replace` : `Paste your key (starts with ${pi.keyExample || info.key_prefix + '…'})` });
     const model = h('select', {}, h('option', { value: info.model }, info.model));
     const out = h('div'), modelNote = h('div');
     const sec = { info, key, model, out, catalogue: [], loaded: false };

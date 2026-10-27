@@ -47,7 +47,7 @@ Pick one. You can add the other later and switch in Settings. Both work the same
 1. Sign in at **https://platform.openai.com**. This is OpenAI's developer site, not chatgpt.com.
 2. Under **Billing**, add credit. **A ChatGPT Plus/Pro subscription does not include API usage;** it's billed separately.
 3. Go to **API keys → Create new secret key** and give it a name like `UniFi app`.
-4. **Copy the key now.** It starts with `sk-` and is shown only once.
+4. **Copy the key now.** It starts with `sk-`, usually `sk-proj-` for new keys, and is shown only once.
 
 Treat any API key like a credit card number. Anyone who has it can spend your credit. If it ever leaks, delete it on the same page and create a new one.
 
