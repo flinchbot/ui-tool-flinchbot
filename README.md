@@ -9,7 +9,7 @@ A local web app for chatting with Claude about a Ubiquiti UniFi network. Claude 
 - **Several networks, switched at runtime.** Save a connection per UniFi console and switch from the header menu. Switching clears the chat so data from different networks never mixes.
 - **Setup and settings in the browser.** The first-run wizard and the ⚙ Settings screen write `.env` for you. Nothing needs editing by hand.
 - **Works with:** UniFi OS consoles (UDM/UDR/UCG/Cloud Key Gen2+), UniFi OS Server, and self-hosted Network Applications. The console type is auto-detected.
-- **Login methods:** local username/password, or a UniFi API key.
+- **Login methods:** a **local-only** console account (username/password), or a UniFi API key. UI.com cloud/SSO accounts with two-factor sign-in can't be used by apps; the app detects this and explains what to do.
 - **Write approval enforced in code.** Claude can request a change, but only the Approve button runs it.
 - **Secrets kept out of files:**
   - UniFi passwords and API keys live in Windows Credential Manager.
@@ -43,6 +43,7 @@ Not committed (see `.gitignore`):
 
 ## Requirements
 
+- A **local-only admin account** on each UniFi console (Admins & Users → *Restrict to local access only*). See [SETUP.md step 3](SETUP.md#3-create-a-local-only-admin-account-for-the-app-required-once-per-network).
 - Python 3.10+. The Anthropic SDK 2.x needs it.
 - Packages: `anthropic`, `keyring` (installed by `start.bat`).
 - Run without the launcher: `python backend/server.py [--port N] [--no-browser]`.

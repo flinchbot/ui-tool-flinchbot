@@ -635,7 +635,9 @@ function openConnectionForm(data, existing, wizard) {
     password: h('button', { type: 'button', onclick: () => setAuth('password') }, 'Username + password'),
     apikey:   h('button', { type: 'button', onclick: () => setAuth('apikey') }, 'UniFi API key'),
   };
-  const userField = field('Username', user, 'A LOCAL admin on the console (Admins & Users → “Restrict to local access only”). Not your UI.com cloud login.');
+  const userField = h('div', {},
+    h('div', { class: 'note warn' }, 'Use a LOCAL account created on this console (Admins & Users → tick “Restrict to local access only”). Your UI.com / Ubiquiti cloud login will not work — it asks for a two-factor code that apps can’t provide. See SETUP.md step 3.'),
+    field('Username', user, 'The local account’s username, e.g. claude-app — not an email address.'));
   const secretLabel = h('label', {});
   const secretField = h('div', { class: 'field' }, secretLabel, secret.wrap, h('div', { class: 'hint' }));
   function setAuth(a) {

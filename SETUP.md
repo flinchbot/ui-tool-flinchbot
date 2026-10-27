@@ -9,7 +9,7 @@ This guide assumes no programming experience. Plan on about 20 minutes the first
 | | |
 |---|---|
 | A Windows 10 or 11 PC | It must be able to reach the UniFi console: plugged into that network, on its Wi-Fi, or connected by VPN. |
-| Admin access to the UniFi console | Used once, to create a dedicated login for this app (step 3). |
+| A **local-only admin account** on the UniFi console | **Required.** Your normal UI.com sign-in won't work (step 3 explains why and how to create one). You need admin access to the console once, to create it. |
 | An Anthropic account with API credits | This is how Claude is paid for (step 2). It is separate from a Claude.ai chat subscription. |
 
 ---
@@ -38,22 +38,28 @@ Python is the language the app is written in. You install it once and never have
 
 Treat this key like a credit card number. Anyone who has it can spend your credits. If it ever leaks, delete it on the same page and create a new one.
 
-## 3. Create a login for the app on the UniFi console (once per network)
+## 3. Create a local-only admin account for the app (required, once per network)
 
-Don't use your own UniFi login. Give the app its own local account. That way you can see what it did, change its password, or remove it without affecting you.
+> ⚠️ **The app can only sign in with a LOCAL account on the console.**
+> The login you normally use (your UI.com / Ubiquiti cloud account) will **not** work, because it uses two-factor sign-in, and apps can't answer the code prompt. If you try it anyway, the app tells you so; UniFi's own wording for this is *"MFA token required to authenticate to SSO"* (HTTP 499).
+>
+> A local account exists only on that one console and has no two-factor prompt, which is why it works. It's also safer: you can see what the app did, change its password, or delete it without touching your own login.
+>
+> Every network you add needs its own local account, created on that network's console.
 
 1. In a browser, open the console by its **IP address**, e.g. `https://192.168.1.1`. Use the console's own address, not unifi.ui.com.
    - A security warning is normal: UniFi uses a self-signed certificate. Click **Advanced → Continue**.
 2. Go to **Admins & Users** (sometimes **Settings → Admins & Users**) and choose **Create New / Add Admin**.
 3. Fill it in:
-   - **Restrict to local access only:** ✅ ticked. This is what makes it a local account. Cloud UI.com accounts with two-factor sign-in cannot be used by apps.
-   - **Username / password:** for example `claude-app` and a long random password.
+   - **Restrict to local access only:** ✅ **must be ticked.** This is what makes it a local account. If you don't see this option, you're probably on unifi.ui.com. Go back to the console's own IP address.
+   - **Username / password:** for example `claude-app` and a long random password. Use a plain username, not an email address. An email address usually means a cloud account.
    - **Role:**
      - **Full Management** (or *Site Admin*) if you want Claude to be able to make changes after your approval.
      - **View Only** if you only ever want answers and never changes. Any change it tries will then simply be refused.
 4. Click **Create**.
+5. Check the new account in the admin list. It should show as **local** (local access only), not as a UI.com account.
 
-**Optional: use a UniFi API key instead of a password.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's **Test** button tells you whether the key works on your console. If it doesn't, use the username and password instead.
+**Alternative: a UniFi API key instead of the local account.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's **Test** button tells you whether the key works on your console. If it doesn't, use the username and password instead.
 
 **Note the console's address and port:**
 
@@ -123,6 +129,7 @@ Moving to a new PC: copy the folder, then re-enter the passwords. Credential Man
 | *"Could not start on 127.0.0.1:8080"* | Another program uses port 8080. Run `start.bat --port 8090`, or change the port in Settings. |
 | *"Timed out reaching https://…"* | This PC can't reach the console. Is it on that network or VPN? Can you open `https://<console IP>` in the browser? |
 | *"refused the connection"* | Wrong port. See the port table in step 3. |
+| *"UI.com cloud account with two-factor sign-in"* (UniFi's raw error: *HTTP 499, MFA token required*) | You entered your own UI.com login. Create the separate **local-only** admin from step 3 and use that instead. |
 | *"Login rejected"* | Check the username and password. The account must be **local-only** (step 3). Too many failed tries locks logins for a few minutes. |
 | *"Permission denied … read-only"* | The UniFi account is *View Only*. Give it Full Management if you want changes to work. |
 | *"rejected the API key"* (UniFi) | That UniFi version doesn't accept API keys for this feature. Switch the connection to username + password. |

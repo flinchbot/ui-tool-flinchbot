@@ -235,6 +235,16 @@ class UniFiClient:
             try:
                 self._raw("POST", path, payload)
             except urllib.error.HTTPError as e:
+                detail = self._http_detail(e)
+                if e.code == 499 or "mfa" in detail.lower():
+                    # UniFi OS answers 499 when the login is a UI.com cloud (SSO)
+                    # account with two-factor sign-in. Apps can't supply an MFA code.
+                    raise UniFiError(
+                        "This login is a UI.com cloud account with two-factor sign-in "
+                        "(UniFi asked for an MFA code). Apps can't use those. On the console "
+                        "create a separate admin under Admins & Users with 'Restrict to local "
+                        "access only' ticked, and use that username and password here "
+                        "(see SETUP.md step 3).", "mfa", e.code)
                 if e.code in (400, 401, 403):
                     raise UniFiError(
                         "Login rejected. Check the username and password. The account "
@@ -474,7 +484,7 @@ def test_connection(profile, secret):
             }
         except UniFiError as e:
             errors.append(e)
-            if e.kind in ("unreachable", "cert", "ratelimit"):
+            if e.kind in ("unreachable", "cert", "ratelimit", "mfa"):
                 break      # same answer for either console type; don't hammer it
     # Prefer the most informative error (a login rejection beats "not found").
     errors.sort(key=lambda e: e.kind == "notfound")

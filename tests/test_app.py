@@ -185,6 +185,14 @@ class UniFiClientTests(unittest.TestCase):
         self.assertEqual(r["kind"], "auth")
         self.assertIn("LOCAL admin", r["error"])
 
+    def test_sso_account_with_mfa_gets_clear_advice(self):
+        m = self.mock()
+        r = test_connection(self.prof(m, username="cloud-user@example.com"), "pw")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["kind"], "mfa")
+        self.assertIn("Restrict to local access only", r["error"])
+        self.assertEqual(sum(1 for _, p, _ in m.calls if p == "/api/auth/login"), 1)   # no retry storm
+
     def test_api_key(self):
         m = self.mock(api_key="K123")
         self.assertTrue(test_connection(self.prof(m, auth="apikey"), "K123")["ok"])

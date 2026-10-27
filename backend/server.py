@@ -335,7 +335,7 @@ def r_settings_save(b):
     if updates:
         cfg.write_env_file(updates)
     res = r_settings_get(None)
-    res["restart_needed"] = res["port"] != HTTP_PORT
+    res["restart_needed"] = "SERVER_PORT" in updates and res["port"] != HTTP_PORT
     return res
 
 

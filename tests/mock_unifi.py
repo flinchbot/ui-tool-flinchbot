@@ -66,6 +66,9 @@ class MockUniFi:
                 if path in ("/api/auth/login", "/api/login"):
                     if path != login_path:
                         return self._json(404, {"error": "not found"})
+                    if body and body.get("username") == "cloud-user@example.com":   # UI.com SSO account
+                        return self._json(499, {"code": "MFA_AUTH_REQUIRED",
+                                                "message": "MFA token required to authenticate to SSO"})
                     if body and body.get("username") == mock.username and body.get("password") == mock.password:
                         sid = os.urandom(8).hex()
                         mock.sessions.add(sid)
