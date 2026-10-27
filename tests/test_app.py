@@ -226,6 +226,20 @@ class UniFiClientTests(unittest.TestCase):
         logins = [x for x in m.calls if x[1] == "/api/auth/login"]
         self.assertEqual(len(logins), 2)
 
+    def test_alerts_new_and_legacy_firmware(self):
+        m = self.mock()                                    # behaves like Network 10.6.109
+        c = UniFiClient(self.prof(m, console_type="unifi_os"), "pw")
+        self.assertEqual(c.get_alerts()[0]["key"], "DEVICE_OFFLINE")
+        c.get_alerts()
+        crit = [x for x in m.calls if x[1].endswith("system-log/critical")]
+        self.assertEqual(len(crit), 2)
+        self.assertFalse([x for x in m.calls if "alarm" in x[1]])      # never touched removed endpoints
+        old = self.mock(legacy_alarms=True)                # 7.x/8.x firmware
+        c2 = UniFiClient(self.prof(old, console_type="unifi_os"), "pw")
+        self.assertEqual(c2.get_alerts()[0]["msg"], "AP disconnected")
+        c2.get_alerts()
+        self.assertEqual(sum(1 for x in old.calls if x[1].endswith("system-log/critical")), 1)  # remembered
+
     def test_events_v2_path(self):
         m = self.mock(mode="standalone")
         c = UniFiClient(self.prof(m, console_type="standalone"), "pw")

@@ -109,6 +109,7 @@ class UniFiClient:
         )
         self.csrf_token = None
         self.logged_in  = False
+        self._routes = {}                    # endpoint variant that worked, per feature
         self._lock = threading.RLock()
 
     # ── plumbing ──────────────────────────────────────────────────────────────
@@ -289,20 +290,41 @@ class UniFiClient:
     def _data(self, resp):
         return resp.get("data", []) if isinstance(resp, dict) else resp
 
-    def _first_ok(self, paths, method="GET", data=None):
-        """Try paths in order; endpoints moved between Network versions."""
+    def _first_ok(self, candidates, cache_key=None):
+        """Try (method, path, body) candidates in order; endpoints move between
+        Network versions. 400 (api.err.InvalidObject = removed object), 404 and
+        405 mean "not on this version". The winner is remembered per client so
+        later calls go straight to it."""
+        remembered = self._routes.get(cache_key) if cache_key else None
+        if remembered is not None:
+            candidates = [candidates[remembered]] + [c for i, c in enumerate(candidates) if i != remembered]
         last = None
-        for p in paths:
+        for method, path, body in candidates:
             try:
-                return self.request(method, p, data)
+                result = self.request(method, path, body)
+                if cache_key:
+                    self._routes[cache_key] = next(i for i, c in enumerate(self._route_defs(cache_key))
+                                                   if c[1] == path and c[0] == method)
+                return result
             except UniFiError as e:
-                if e.status in (400, 404):
+                if e.status in (400, 404, 405):
                     last = e
                     continue
                 raise
         if last:
             raise last
         return {}
+
+    def _route_defs(self, key):
+        if key == "alerts":
+            return [
+                # UniFi Network 9.x/10.x: alerts are the "Critical" system log (v2 API).
+                # Verified on Network 10.6.109, where rest/alarm -> 400 InvalidObject.
+                ("POST", self.v2("system-log/critical"), {"pageNumber": 0, "pageSize": 100}),
+                ("GET",  self.api("rest/alarm?archived=false"), None),   # 7.x/8.x
+                ("GET",  self.api("stat/alarm"), None),                  # older still
+            ]
+        raise KeyError(key)
 
     # ── discovery ─────────────────────────────────────────────────────────────
     def list_sites(self):
@@ -328,9 +350,9 @@ class UniFiClient:
     def get_client(self, mac):     return self._data(self.get(self.api(f"stat/user/{mac.lower()}")))
 
     def get_alerts(self):
-        # rest/alarm on current firmware; stat/alarm on older builds
-        return self._data(self._first_ok([self.api("rest/alarm?archived=false"),
-                                          self.api("stat/alarm")]))
+        """Active alerts. Newer firmware: critical system-log entries; older: alarms."""
+        data = self._data(self._first_ok(self._route_defs("alerts"), "alerts"))
+        return data if isinstance(data, list) else []
 
     def get_events(self, limit=50, within_hours=720, categories=None):
         """System log (v2 API). Legacy stat/event was removed in Network 9.x+."""

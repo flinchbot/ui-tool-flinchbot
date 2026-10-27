@@ -40,7 +40,7 @@ READ_TOOLS = [
     ("get_devices",         "List UniFi devices (gateways, switches, APs) with status, model, IP, firmware, uptime, client count, radio stats. Supports search/paging.", _LIST),
     ("get_clients",         "List connected clients with name, IP, MAC, SSID/port, signal, rates, retries, satisfaction and usage. Supports search/paging.", _LIST),
     ("get_health",          "Network health per subsystem (WAN, LAN, WLAN, VPN).", _EMPTY),
-    ("get_alerts",          "Active (unarchived) alarms.", _EMPTY),
+    ("get_alerts",          "Active alerts. On UniFi Network 9.x+ these are the 'Critical' system-log entries (fields like key, message_raw, severity, status, category); on older firmware, unarchived alarms. For wider history use get_events.", _EMPTY),
     ("get_events",          "Recent system-log entries, newest first. Use within_hours to look further back and categories to filter.", {
         "type": "object", "properties": {
             "limit":        {"type": "integer", "description": "Number of entries (default 50, max 500)", "default": 50},
@@ -108,7 +108,7 @@ WRITE_TOOLS = [
         "required": ["name", "dst_port", "fwd_ip", "fwd_port"]}),
     ("delete_port_forward",  "Delete a port forward.", {
         "type": "object", "properties": {"pf_id": {"type": "string"}}, "required": ["pf_id"]}),
-    ("clear_alerts",         "Archive all active alarms.", _EMPTY),
+    ("clear_alerts",         "Archive all active alarms (legacy alarm system; may have no effect on UniFi Network 9.x+ where alerts are system-log entries).", _EMPTY),
     ("speedtest",            "Start a WAN speed test on the gateway.", _EMPTY),
 ]
 
