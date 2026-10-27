@@ -23,6 +23,7 @@ import threading
 import time
 import traceback
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -496,6 +497,26 @@ def r_reset(_):
     agent.reset()
 
 
+_report_lock = threading.Lock()
+
+
+def r_report(_):
+    """Read-only, whole-network action report (separate from the chat)."""
+    if not _report_lock.acquire(blocking=False):
+        raise AgentError("A report is already being generated. Wait for it to finish.")
+    try:
+        state.client()                       # fail fast with a clear message if not connected
+        p = cfg.active_profile()
+        report = agent.generate_report()
+        report.update(generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                      network=p["name"], host=p["host"], site=p.get("site", "default"),
+                      model=cfg.get_setting("CLAUDE_MODEL"),
+                      report_id=f"{p['id']}-{int(time.time())}")
+        return report
+    finally:
+        _report_lock.release()
+
+
 ROUTES = {
     ("GET",  "/api/status"):                  r_status,
     ("GET",  "/api/settings"):                r_settings_get,
@@ -512,6 +533,7 @@ ROUTES = {
     ("POST", "/api/chat"):                    r_chat,
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/reset"):                   r_reset,
+    ("POST", "/api/report"):                  r_report,
 }
 
 HTTP_PORT = None

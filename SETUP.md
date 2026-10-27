@@ -106,6 +106,10 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 - **Changes:** when Claude wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it.
 - **Another network:** click the connection name at the top → **Add a connection…**. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.
 - **Settings (⚙):** change the API key, the model, or the app's port.
+- **📋 Action report:** Claude reviews the whole network (read-only, about 1–3 minutes, roughly the cost of a few questions) and lists what to fix, most urgent first.
+  - **⤓ Checklist web page:** open it in any browser and tick items off as you fix them. Ticks are remembered in that browser, and **Print / PDF** works.
+  - **⤓ Markdown:** for notes apps. Obsidian, VS Code and GitHub show the `[ ]` boxes as clickable checkboxes.
+- **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
 
 ## 8. Where your information is stored
 

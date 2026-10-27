@@ -338,6 +338,26 @@ class AgentTests(unittest.TestCase):
         FakeAnthropic.script = [[text("Continuing.")]]
         self.assertEqual(self.agent.chat("continue")["reply"], "Continuing.")   # history still valid
 
+    def test_report_is_read_only_sorted_and_validated(self):
+        FakeAnthropic.script = [
+            [tool("r1", "get_health", {}), tool("r2", "restart_device", {"mac": "aa"})],   # write must be refused
+            [text("Done gathering.")],                                                    # forgot to submit -> nudged
+            [tool("r3", "submit_report", {"summary": "ok", "healthy": ["WAN fine"], "items": [
+                {"priority": "low", "category": "Hygiene", "title": "B", "finding": "f", "why": "w", "steps": ["s"]},
+                {"priority": "critical", "category": "Security", "title": "A", "finding": "f", "why": "w", "steps": []},
+                {"priority": "nonsense", "category": "Wi-Fi", "title": "C", "finding": "f", "why": "w", "steps": []},
+                {"title": ""}]})],
+        ]
+        r = self.agent.generate_report()
+        self.assertEqual([(i["priority"], i["title"]) for i in r["items"]],
+                         [("critical", "A"), ("medium", "C"), ("low", "B")])
+        self.assertEqual([i["id"] for i in r["items"]], ["item-1", "item-2", "item-3"])
+        self.assertEqual(self.devmgr_calls(), [])                                     # nothing changed
+        offered = {t["name"] for t in FakeAnthropic.received[0]["tools"]}
+        self.assertIn("submit_report", offered)
+        self.assertFalse(offered & agent_mod.WRITE_NAMES)
+        self.assertEqual(self.agent.history, [])                                      # chat untouched
+
     def test_round_cap(self):
         FakeAnthropic.script = [[tool(f"t{i}", "get_health", {})] for i in range(5)]
         r = self.agent.chat("loop forever")

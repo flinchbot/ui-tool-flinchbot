@@ -188,6 +188,15 @@
   .tag { font-size:10px; font-family:var(--font-mono); padding:2px 6px; border-radius:4px; background:rgba(0,212,255,.1); color:var(--accent); }
   .note { font-size:12px; color:var(--muted); line-height:1.6; padding:10px 12px; border:1px dashed var(--border); border-radius:8px; margin-bottom:14px; }
   .note.warn { color:#ffe9a8; border-color:rgba(255,200,0,.35); }
+  .rep-item { border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin:8px 0; background:var(--bg); }
+  .rep-item .t { font-weight:600; font-size:14px; }
+  .rep-item .s { font-size:12px; color:var(--muted); margin-top:3px; }
+  .badge { display:inline-block; font-size:10px; font-family:var(--font-mono); padding:2px 7px; border-radius:99px; margin-right:6px; text-transform:uppercase; letter-spacing:.5px; }
+  .badge.critical { background:rgba(255,77,109,.18); color:#ff8fa3; } .badge.high { background:rgba(255,107,53,.18); color:#ffa77f; }
+  .badge.medium { background:rgba(255,200,0,.14); color:#ffd866; } .badge.low { background:rgba(0,212,255,.12); color:var(--accent); }
+  .counts { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 4px; }
+  .spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--border); border-top-color:var(--accent); animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border);
            padding:10px 16px; border-radius:8px; font-size:13px; z-index:60; max-width:90vw; }
   .toast.bad { border-color:rgba(255,107,53,.5); color:#ffd2c0; }
@@ -207,6 +216,7 @@
     </div>
     <div class="spacer"></div>
     <div class="header-actions">
+      <button class="btn" id="reportBtn" title="Review the whole network and build a prioritised checklist">📋 Action report</button>
       <button class="btn" id="refreshBtn" title="Reload network data">↻ Refresh</button>
       <button class="btn" id="clearBtn" title="Start a new conversation">✕ Clear chat</button>
       <button class="btn" id="settingsBtn" title="Settings">⚙ Settings</button>
@@ -236,7 +246,16 @@
     <div class="chat-area">
       <div class="chat-toolbar">
         <div><h2>Network Assistant</h2><div class="sub" id="chatSub"></div></div>
-        <div class="muted">Changes always ask for your approval first</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <span class="muted">Changes always ask for your approval first</span>
+          <div style="position:relative">
+            <button class="btn" id="exportBtn" title="Save this conversation" aria-haspopup="true">⤓ Export</button>
+            <div id="exportMenu" class="menu" style="left:auto;right:0;min-width:220px" hidden>
+              <button class="menu-item" id="exportMd"><span class="check">MD</span><span>Markdown (.md)<small>plain text, for notes / git / Obsidian</small></span></button>
+              <button class="menu-item" id="exportHtml"><span class="check">⧉</span><span>Web page (.html)<small>formatted, opens in any browser, printable to PDF</small></span></button>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="messages" id="messages">
         <div class="empty-state"><div class="icon">🛜</div>
@@ -413,8 +432,12 @@ function formatMarkdown(text) {
 function clearEmpty() { const e = $('messages').querySelector('.empty-state'); if (e) e.remove(); }
 function scrollDown() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
 
+// Everything shown in the chat, kept for Export (what you saw, in order).
+let transcript = [];
+
 function addMessage(role, text, opts = {}) {
   clearEmpty();
+  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text, at: new Date() });
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
@@ -436,7 +459,10 @@ function addApproval(pending) {
         ? h('pre', {}, JSON.stringify(p.details, null, 2)) : null)),
     h('div', { class: 'row' }, approve, deny), decided);
   const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, '🛡️'), card);
+  const entry = { kind: 'approval', items: pending, decision: 'Waiting for approval', at: new Date() };
+  transcript.push(entry);
   const decide = async ok => {
+    entry.decision = ok ? 'Approved' : 'Denied';
     approve.disabled = deny.disabled = true;
     decided.textContent = ok ? 'Approved — running…' : 'Denied.';
     await runChat('/api/chat/decide', { approve: ok });
@@ -478,6 +504,7 @@ async function sendMessage() {
   if (!status.active) { openConnections(null, true); return; }
   input.value = ''; autoResize(input);
   document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
+  transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
   addMessage('user', text);
   await runChat('/api/chat', { message: text });
 }
@@ -485,6 +512,7 @@ function sendQuick(msg) { $('chatInput').value = msg; sendMessage(); }
 function autoResize(el) { el.style.height = ''; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
 
 function clearChatView(note) {
+  transcript = [];
   $('messages').replaceChildren(h('div', { class: 'empty-state' }, h('div', { class: 'icon' }, '🛜'),
     h('p', {}, note || 'Chat cleared. Ask me anything about your UniFi network.')));
 }
@@ -693,7 +721,7 @@ function openConnectionForm(data, existing, wizard) {
       toast(`Saved "${v.name}".`);
       if (activateIt || wizard) clearChatView();
       await refreshStatus(); await refreshNetwork();
-      if (wizard) { closeModal(); addMessage('assistant', 'All set! Try one of the quick prompts below, or ask me anything about your network.'); }
+      if (wizard) { closeModal(); addMessage('assistant', 'All set! Try one of the quick prompts below, or ask me anything about your network.', { noRecord: true }); }
       else openConnections();
     } catch (e) { out.replaceChildren(result('bad', e.message)); }
   }
@@ -737,6 +765,281 @@ function openConnectionForm(data, existing, wizard) {
   (existing ? secret.input : host).focus();
 }
 
+// ── export ────────────────────────────────────────────────────────────────
+function exportMeta() {
+  const a = status && status.active;
+  return {
+    network: a ? `${a.name} (${a.host}:${a.port}, site ${a.site})` : 'none',
+    model: (status && status.model) || '',
+    exported: new Date(),
+  };
+}
+const fmtTime = d => d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+function exportFileName(ext) {
+  const a = status && status.active;
+  const d = new Date(), pad = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const net = (a ? a.name : 'chat').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat';
+  return `unifi-claude_${net}_${stamp}.${ext}`;
+}
+function download(name, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const a = h('a', { href: url, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast(`Saved ${name} to your Downloads folder.`);
+}
+const LABEL = { user: '👤 You', assistant: '🤖 Claude', error: '⚠️ Error', approval: '🛡️ Change request' };
+
+function toMarkdown() {
+  const m = exportMeta();
+  const out = [`# UniFi × Claude — chat export`, '',
+    `- **Network:** ${m.network}`, `- **Model:** ${m.model}`, `- **Exported:** ${fmtTime(m.exported)}`, '', '---', ''];
+  for (const t of transcript) {
+    out.push(`### ${LABEL[t.kind]} · ${fmtTime(t.at)}`, '');
+    if (t.kind === 'approval') {
+      for (const it of t.items) {
+        out.push(`- **${it.label}**${it.target ? ` — \`${it.target}\`` : ''}`);
+        const extra = Object.fromEntries(Object.entries(it.details || {}).filter(([k]) => k !== 'mac'));
+        if (Object.keys(extra).length) out.push('', '  ```json', ...JSON.stringify(extra, null, 2).split('\n').map(l => '  ' + l), '  ```');
+      }
+      out.push('', `**Decision:** ${t.decision}`);
+    } else if (t.kind === 'user') {
+      out.push(...t.text.split('\n').map(l => '> ' + l));
+    } else {
+      out.push(t.text);
+    }
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+function toHtml() {
+  const m = exportMeta();
+  const rows = transcript.map(t => {
+    let body;
+    if (t.kind === 'approval') {
+      body = t.items.map(it => {
+        const extra = Object.fromEntries(Object.entries(it.details || {}).filter(([k]) => k !== 'mac'));
+        return `<div class="act"><b>${esc(it.label)}</b>${it.target ? ` <code>${esc(it.target)}</code>` : ''}` +
+               (Object.keys(extra).length ? `<pre>${esc(JSON.stringify(extra, null, 2))}</pre>` : '') + '</div>';
+      }).join('') + `<p class="dec ${t.decision === 'Approved' ? 'ok' : 'no'}">Decision: ${esc(t.decision)}</p>`;
+    } else if (t.kind === 'assistant') {
+      body = formatMarkdown(t.text);               // escapes first, then adds formatting
+    } else {
+      body = esc(t.text).replace(/\n/g, '<br>');
+    }
+    return `<section class="m ${t.kind}"><header>${LABEL[t.kind]}<time>${esc(fmtTime(t.at))}</time></header><div>${body}</div></section>`;
+  }).join('\n');
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UniFi × Claude — ${esc(m.network)} — ${esc(fmtTime(m.exported))}</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1d24;--muted:#667085;--line:#e4e7ec;--you:#eef8fb;--claude:#f8f9fb;--warn:#fff4ed;--accent:#0b7fa5;--ok:#067647;--no:#b42318}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1016;--fg:#e2e8f0;--muted:#8b95a7;--line:#252a36;--you:#0f2530;--claude:#141821;--warn:#2a1a12;--accent:#3cc8f0;--ok:#4ade80;--no:#f87171}}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:860px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:22px;margin:0 0 6px} .meta{color:var(--muted);font-size:13px;margin-bottom:24px} .meta b{color:var(--fg)}
+  section.m{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0;background:var(--claude);break-inside:avoid}
+  section.user{background:var(--you);margin-left:12%} section.approval{background:var(--warn)} section.error{border-color:var(--no)}
+  section header{display:flex;justify-content:space-between;gap:12px;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px}
+  section h3{font-size:14px;margin:10px 0 4px;color:var(--accent)} section ul,section ol{padding-left:20px;margin:6px 0}
+  code{font:12px ui-monospace,Consolas,monospace;background:rgba(127,127,127,.12);padding:1px 5px;border-radius:4px}
+  pre{font:12px ui-monospace,Consolas,monospace;background:rgba(127,127,127,.1);padding:10px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .act{margin:4px 0} .dec{font-weight:600;margin:8px 0 0} .dec.ok{color:var(--ok)} .dec.no{color:var(--no)}
+  @media print{section.user{margin-left:0} body{font-size:12px}}
+</style></head>
+<body><main>
+<h1>UniFi × Claude — chat export</h1>
+<div class="meta"><b>Network:</b> ${esc(m.network)} &nbsp;·&nbsp; <b>Model:</b> ${esc(m.model)} &nbsp;·&nbsp; <b>Exported:</b> ${esc(fmtTime(m.exported))}</div>
+${rows}
+</main></body></html>`;
+}
+
+function exportChat(kind) {
+  $('exportMenu').hidden = true;
+  if (!transcript.length) { toast('Nothing to export yet — ask something first.', true); return; }
+  if (kind === 'md') download(exportFileName('md'), toMarkdown(), 'text/markdown;charset=utf-8');
+  else download(exportFileName('html'), toHtml(), 'text/html;charset=utf-8');
+}
+
+// ── action report ─────────────────────────────────────────────────────────
+const PRI = ['critical', 'high', 'medium', 'low'];
+const PRI_LABEL = { critical: '🔴 Critical', high: '🟠 High', medium: '🟡 Medium', low: '🔵 Low' };
+let lastReport = null;
+
+async function runReport() {
+  if (!status || !status.configured) { openSettings(); return; }
+  if (!status.active) { openConnections(null, true); return; }
+  const started = Date.now();
+  const timer = h('span', {}, '0s');
+  const tick = setInterval(() => timer.textContent = Math.round((Date.now() - started) / 1000) + 's', 1000);
+  openModal(...modalHead('Building your action report', null, false),
+    h('div', { style: 'display:flex;gap:14px;align-items:center;margin:8px 0 6px' }, h('div', { class: 'spinner' }),
+      h('div', {}, h('div', {}, `Claude is reviewing “${status.active.name}” — devices, clients, Wi-Fi, firewall, logs…`),
+        h('div', { class: 'muted' }, 'Read-only: nothing on the network is changed. Usually 1–3 minutes. Elapsed: ', timer))));
+  try {
+    lastReport = await api('POST', '/api/report', {});
+    clearInterval(tick);
+    showReport(lastReport);
+    const c = countBy(lastReport.items);
+    addMessage('assistant', `**Action report ready** for ${lastReport.network}: ` +
+      PRI.filter(p => c[p]).map(p => `${c[p]} ${p}`).join(', ') + (lastReport.items.length ? '.' : ' — no issues found.') +
+      '\n\nUse 📋 Action report → *Download* to save it as a checklist.', { noRecord: false });
+  } catch (e) {
+    clearInterval(tick);
+    openModal(...modalHead('Report failed'), result('bad', e.message),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'), h('button', { class: 'btn primary', onclick: runReport }, 'Try again')));
+  }
+}
+
+function countBy(items) { const c = {}; for (const i of items) c[i.priority] = (c[i.priority] || 0) + 1; return c; }
+
+function showReport(r) {
+  const c = countBy(r.items);
+  openModal(...modalHead('Network action report', `${r.network} · ${new Date(r.generated_at).toLocaleString()} · ${r.model}`),
+    h('p', { style: 'font-size:13px;line-height:1.6' }, r.summary),
+    h('div', { class: 'counts' }, ...PRI.map(p => h('span', { class: `badge ${p}` }, `${c[p] || 0} ${p}`))),
+    h('div', { style: 'max-height:46vh;overflow:auto;margin:10px 0' },
+      r.items.length ? r.items.map(it => h('div', { class: 'rep-item' },
+        h('div', { class: 't' }, h('span', { class: `badge ${it.priority}` }, it.priority), it.title),
+        h('div', { class: 's' }, [it.category, it.affected.length ? it.affected.slice(0, 3).join(', ') + (it.affected.length > 3 ? ` +${it.affected.length - 3} more` : '') : null].filter(Boolean).join(' · '))))
+        : h('div', { class: 'muted' }, 'No issues found.')),
+    h('div', { class: 'note' }, 'Download it to tick items off as you fix them. The web page remembers your ticks; the Markdown file uses standard [ ] checkboxes.'),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn left', onclick: runReport }, '↻ Regenerate'),
+      h('button', { class: 'btn', onclick: () => download(reportFileName(r, 'md'), reportMarkdown(r), 'text/markdown;charset=utf-8') }, '⤓ Markdown'),
+      h('button', { class: 'btn primary', onclick: () => download(reportFileName(r, 'html'), reportHtml(r), 'text/html;charset=utf-8') }, '⤓ Checklist web page')));
+}
+
+function reportFileName(r, ext) {
+  const d = new Date(r.generated_at), pad = n => String(n).padStart(2, '0');
+  const net = r.network.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'network';
+  return `unifi-action-report_${net}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.${ext}`;
+}
+
+function reportMarkdown(r) {
+  const c = countBy(r.items);
+  // one line per field; neutralise HTML, which some Markdown viewers (e.g. Obsidian) would render
+  const md = s => String(s).replace(/\r?\n/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const out = [`# Network action report — ${r.network}`, '',
+    `- **Generated:** ${new Date(r.generated_at).toLocaleString()}`,
+    `- **Console:** ${r.host} · site ${r.site}`, `- **Reviewed by:** ${r.model}`,
+    `- **Open items:** ` + PRI.map(p => `${c[p] || 0} ${p}`).join(' · '), '',
+    '## Summary', '', r.summary, ''];
+  for (const p of PRI) {
+    const items = r.items.filter(i => i.priority === p);
+    if (!items.length) continue;
+    out.push(`## ${PRI_LABEL[p]} (${items.length})`, '');
+    for (const it of items) {
+      out.push(`- [ ] **${md(it.title)}** — _${md(it.category)}_${it.effort ? ` · effort: ${it.effort}` : ''}`);
+      if (it.affected.length) out.push(`  - **Affected:** ${it.affected.map(a => '`' + md(a).replace(/`/g, "'") + '`').join(', ')}`);
+      out.push(`  - **Finding:** ${md(it.finding)}`, `  - **Why it matters:** ${md(it.why)}`);
+      if (it.steps.length) { out.push('  - **How to fix:**'); it.steps.forEach((st, i) => out.push(`    ${i + 1}. ${md(st)}`)); }
+      out.push('');
+    }
+  }
+  if (r.healthy && r.healthy.length) { out.push('## ✅ Looks good', '', ...r.healthy.map(x => `- ${md(x)}`), ''); }
+  out.push('---', '_Generated by UniFi × Claude from live, read-only data. Verify before making changes._', '');
+  return out.join('\n');
+}
+
+function reportHtml(r) {
+  // Data goes in as JSON and is rendered with textContent, so nothing from the network can inject markup.
+  const data = JSON.stringify(r).replace(/</g, '\\u003c');
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Action report — ${esc(r.network)}</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1d24;--muted:#667085;--line:#e4e7ec;--card:#fafbfc;--accent:#0b7fa5;--done:#98a2b3;
+        --critical:#d92d20;--high:#e8590c;--medium:#b58100;--low:#0b7fa5}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1016;--fg:#e2e8f0;--muted:#8b95a7;--line:#252a36;--card:#141821;--accent:#3cc8f0;--done:#5b6474;
+        --critical:#ff6b7f;--high:#ff9a5c;--medium:#ffd166;--low:#3cc8f0}}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:900px;margin:0 auto;padding:28px 18px 64px}
+  h1{font-size:24px;margin:0} .meta{color:var(--muted);font-size:13px;margin:4px 0 18px}
+  .summary{border-left:3px solid var(--accent);padding:4px 0 4px 14px;margin:0 0 18px}
+  .bar{position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:2;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .prog{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin:6px 0}
+  .prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,#00b4d8,#7b61ff);transition:width .3s}
+  .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+  .row label{display:flex;gap:6px;align-items:center;cursor:pointer} button{font:inherit;font-size:13px;padding:5px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+  h2{font-size:17px;margin:26px 0 8px;display:flex;align-items:center;gap:8px} h2 small{color:var(--muted);font-weight:400}
+  .item{border:1px solid var(--line);border-left:4px solid var(--c);border-radius:10px;background:var(--card);margin:10px 0;padding:12px 14px;break-inside:avoid}
+  .item.done{opacity:.55} .item.done .title{text-decoration:line-through;color:var(--done)}
+  .head{display:flex;gap:12px;align-items:flex-start} .head input{width:20px;height:20px;margin-top:2px;flex-shrink:0;cursor:pointer;accent-color:var(--c)}
+  .title{font-weight:650;font-size:15px} .tags{font-size:12px;color:var(--muted);margin-top:2px}
+  .when{font-size:11px;color:var(--ok,#067647);margin-left:6px}
+  details{margin:8px 0 0 32px} summary{cursor:pointer;color:var(--accent);font-size:13px}
+  dl{margin:8px 0 0;font-size:14px} dt{font-weight:600;margin-top:8px} dd{margin:2px 0 0}
+  ol{margin:4px 0 0;padding-left:22px} code{font:12px ui-monospace,Consolas,monospace;background:rgba(127,127,127,.12);padding:1px 5px;border-radius:4px}
+  .healthy li{margin:2px 0} footer{margin-top:30px;color:var(--muted);font-size:12px}
+  body.hide-done .item.done{display:none}
+  @media print{.bar .row button,.bar .row label.hd{display:none} details{display:block} details>summary{display:none} .item{opacity:1!important}}
+</style></head>
+<body><main>
+<h1>Network action report — <span id="net"></span></h1>
+<div class="meta" id="meta"></div>
+<div class="bar"><div class="row"><b id="ptext"></b><span style="flex:1"></span>
+  <label class="hd"><input type="checkbox" id="hide"> Hide done</label>
+  <button id="expand">Expand all</button><button id="reset">Clear ticks</button><button onclick="print()">Print / PDF</button></div>
+  <div class="prog"><i id="pbar"></i></div></div>
+<p class="summary" id="summary"></p>
+<div id="list"></div>
+<footer>Generated by UniFi × Claude from live, read-only data. Your ticks are saved in this browser. Verify before making changes.</footer>
+</main>
+<script type="application/json" id="data">${data}<\/script>
+<script>
+(function(){
+  var r = JSON.parse(document.getElementById('data').textContent);
+  var KEY = 'unifi-action-report:' + r.report_id, state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+  function save(){ try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  function el(t, cls, txt){ var e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  var PRI = ['critical','high','medium','low'], LBL = {critical:'🔴 Critical',high:'🟠 High',medium:'🟡 Medium',low:'🔵 Low'};
+  document.title = 'Action report — ' + r.network;
+  document.getElementById('net').textContent = r.network;
+  document.getElementById('meta').textContent = new Date(r.generated_at).toLocaleString() + ' · ' + r.host + ' · site ' + r.site + ' · reviewed by ' + r.model;
+  document.getElementById('summary').textContent = r.summary;
+  var list = document.getElementById('list');
+  PRI.forEach(function(p){
+    var items = r.items.filter(function(i){ return i.priority === p; });
+    if (!items.length) return;
+    var h2 = el('h2', null, LBL[p] + ' '); h2.appendChild(el('small', null, '(' + items.length + ')')); list.appendChild(h2);
+    items.forEach(function(it){
+      var card = el('div', 'item'); card.style.setProperty('--c', 'var(--' + p + ')');
+      var head = el('div', 'head'), cb = el('input'); cb.type = 'checkbox'; cb.id = it.id;
+      var txt = el('label'); txt.htmlFor = it.id; txt.style.cursor = 'pointer';
+      var title = el('div', 'title', it.title), when = el('span', 'when'); title.appendChild(when);
+      txt.appendChild(title);
+      txt.appendChild(el('div', 'tags', [it.category, it.effort ? 'effort: ' + it.effort : '', it.affected.length ? 'affects ' + it.affected.length : ''].filter(Boolean).join(' · ')));
+      head.appendChild(cb); head.appendChild(txt); card.appendChild(head);
+      var det = el('details'); det.appendChild(el('summary', null, 'Details & how to fix'));
+      var dl = el('dl');
+      function row(k, v){ dl.appendChild(el('dt', null, k)); var dd = el('dd'); if (typeof v === 'string') dd.textContent = v; else dd.appendChild(v); dl.appendChild(dd); }
+      if (it.affected.length){ var a = el('dd'); it.affected.forEach(function(x, i){ if (i) a.appendChild(document.createTextNode(' ')); a.appendChild(el('code', null, x)); }); row('Affected', a); }
+      row('Finding', it.finding); row('Why it matters', it.why);
+      if (it.steps.length){ var ol = el('ol'); it.steps.forEach(function(s){ ol.appendChild(el('li', null, s)); }); row('How to fix', ol); }
+      det.appendChild(dl); card.appendChild(det); list.appendChild(card);
+      function paint(){ var d = state[it.id]; cb.checked = !!d; card.classList.toggle('done', !!d);
+        when.textContent = d ? ' ✓ done ' + new Date(d).toLocaleDateString() : ''; }
+      cb.addEventListener('change', function(){ if (cb.checked) state[it.id] = new Date().toISOString(); else delete state[it.id]; save(); paint(); progress(); });
+      paint();
+    });
+  });
+  if (r.healthy && r.healthy.length){ list.appendChild(el('h2', null, '✅ Looks good')); var ul = el('ul', 'healthy'); r.healthy.forEach(function(x){ ul.appendChild(el('li', null, x)); }); list.appendChild(ul); }
+  if (!r.items.length) list.insertBefore(el('p', null, 'No issues found. 🎉'), list.firstChild);
+  function progress(){ var done = r.items.filter(function(i){ return state[i.id]; }).length, n = r.items.length;
+    document.getElementById('ptext').textContent = done + ' of ' + n + ' done';
+    document.getElementById('pbar').style.width = (n ? 100 * done / n : 100) + '%'; }
+  progress();
+  document.getElementById('hide').addEventListener('change', function(e){ document.body.classList.toggle('hide-done', e.target.checked); });
+  document.getElementById('expand').addEventListener('click', function(){ var all = document.querySelectorAll('details'), open = !all[0] || !all[0].open; all.forEach(function(d){ d.open = open; }); this.textContent = open ? 'Collapse all' : 'Expand all'; });
+  document.getElementById('reset').addEventListener('click', function(){ if (confirm('Clear all ticks?')) { state = {}; save(); location.reload(); } });
+})();
+<\/script></body></html>`;
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 const QUICK = [
   ['🩺 Health check', 'Run a full network health check and identify any issues'],
@@ -755,6 +1058,14 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') { toggleConn
 $('refreshBtn').addEventListener('click', async () => { await refreshStatus(); await refreshNetwork(); });
 $('clearBtn').addEventListener('click', resetChat);
 $('settingsBtn').addEventListener('click', () => openSettings());
+$('reportBtn').addEventListener('click', () => lastReport ? showReportOrNew() : runReport());
+function showReportOrNew() {
+  if (lastReport.network === (status && status.active && status.active.name)) showReport(lastReport); else runReport();
+}
+$('exportBtn').addEventListener('click', e => { e.stopPropagation(); $('exportMenu').hidden = !$('exportMenu').hidden; });
+$('exportMd').addEventListener('click', () => exportChat('md'));
+$('exportHtml').addEventListener('click', () => exportChat('html'));
+document.addEventListener('click', e => { if (!e.target.closest('#exportMenu') && e.target.id !== 'exportBtn') $('exportMenu').hidden = true; });
 
 async function init() {
   const s = await refreshStatus();

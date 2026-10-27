@@ -502,6 +502,52 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             f"_(Stopped after {max_rounds} rounds of tool calls to limit cost. Ask me to continue "
             f"if you want me to keep going.)_"]), "pending": None}
 
+    # ── action report ─────────────────────────────────────────────────────────
+    def generate_report(self, progress=None):
+        """Read-only whole-network review -> structured, prioritised findings.
+
+        Runs separately from the chat (doesn't touch chat history). Only read tools
+        are offered, so nothing can be changed. Claude must finish by calling
+        submit_report, whose input is the report.
+        """
+        settings = self._get_settings()
+        if not settings.get("api_key"):
+            raise AgentError("No Anthropic API key yet. Open Settings (gear icon) to add one.")
+        client = Anthropic(api_key=settings["api_key"])
+        tools = [t for t in TOOLS if t["name"] not in WRITE_NAMES] + [REPORT_TOOL]
+        messages = [{"role": "user", "content": REPORT_REQUEST}]
+        nudged = False
+        for _ in range(max(settings.get("max_rounds", 15), 8)):
+            resp = client.messages.create(
+                model=settings["model"], max_tokens=settings.get("max_tokens", 16000),
+                system=self._system_prompt() + REPORT_SYSTEM_SUFFIX, tools=tools, messages=messages)
+            blocks = [_block_to_dict(b) for b in resp.content] or [{"type": "text", "text": "(no response)"}]
+            messages.append({"role": "assistant", "content": blocks})
+            calls = [b for b in blocks if b.get("type") == "tool_use"]
+            final = next((c for c in calls if c["name"] == "submit_report"), None)
+            if final and resp.stop_reason != "max_tokens":
+                return clean_report(final["input"])
+            if resp.stop_reason == "max_tokens":
+                raise AgentError("The report was longer than the output limit. Raise MAX_OUTPUT_TOKENS "
+                                 "in .env (max 21000) or pick a larger model, then try again.")
+            if not calls:
+                if nudged:
+                    raise AgentError("Claude didn't produce a report. Try again.")
+                nudged = True
+                messages.append({"role": "user", "content": "Now call submit_report with your findings."})
+                continue
+            results = []
+            for c in calls:
+                if c["name"] in EXECUTORS and c["name"] not in WRITE_NAMES:
+                    if progress:
+                        progress(c["name"])
+                    self._executed = False
+                    results.append(self._execute(c["id"], c["name"], c["input"]))
+                else:
+                    results.append(self._tool_result(c["id"], json.dumps({"error": "Not available in report mode"}), True))
+            messages.append({"role": "user", "content": results})
+        raise AgentError("The review took too many steps. Try again, or raise MAX_TOOL_ROUNDS in .env.")
+
     def list_models(self, api_key=None):
         """All models this key can use, newest first, with lifecycle info.
 
@@ -526,3 +572,90 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
                 "context": getattr(m, "max_input_tokens", None),
             })
         return out
+
+
+# ── action report definitions ─────────────────────────────────────────────────
+PRIORITIES = ["critical", "high", "medium", "low"]
+
+REPORT_TOOL = {
+    "name": "submit_report",
+    "description": "Submit the finished network action report. Call exactly once, after gathering data.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "description": "2-4 sentence overall assessment of the network's health."},
+            "items": {
+                "type": "array",
+                "description": "Actionable findings, one per distinct problem. Most urgent first.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "priority": {"type": "string", "enum": PRIORITIES,
+                                     "description": "critical = outage/security exposure now; high = likely user impact or "
+                                                    "real risk soon; medium = worth fixing; low = nice-to-have / hygiene"},
+                        "category": {"type": "string", "description": "e.g. Security, Wi-Fi, Firmware, Switching, WAN, Configuration"},
+                        "title": {"type": "string", "description": "Short imperative action, e.g. 'Update Hall AP firmware'"},
+                        "affected": {"type": "array", "items": {"type": "string"},
+                                     "description": "Device/client/SSID names (with MAC or IP) this applies to"},
+                        "finding": {"type": "string", "description": "What the live data shows - specific numbers/values"},
+                        "why": {"type": "string", "description": "Why it matters / impact if left alone"},
+                        "steps": {"type": "array", "items": {"type": "string"},
+                                  "description": "Concrete steps to fix it in the UniFi UI (menu paths) or physically"},
+                        "effort": {"type": "string", "enum": ["quick", "moderate", "involved"]},
+                    },
+                    "required": ["priority", "category", "title", "finding", "why", "steps"],
+                },
+            },
+            "healthy": {"type": "array", "items": {"type": "string"},
+                        "description": "Short list of things checked that look good"},
+        },
+        "required": ["summary", "items"],
+    },
+}
+
+REPORT_REQUEST = (
+    "Produce an actionable network review. Gather data with the read tools first: at minimum "
+    "get_health, get_system_info, get_devices, get_clients, get_alerts, get_events (last 7 days, "
+    "within_hours=168, limit 200), get_wlans, get_networks, get_port_forwards, get_firewall_rules and "
+    "get_rogue_aps; page through clients if truncated. Then call submit_report.")
+
+REPORT_SYSTEM_SUFFIX = """
+
+REPORT MODE (read-only): You are writing an action checklist, not chatting.
+- Every item must be backed by specific evidence from the tool results (names, MACs/IPs, numbers).
+  Don't include generic advice that the data doesn't support.
+- One item per distinct problem; group identical issues on several devices into one item and list
+  them in "affected". Merge duplicates.
+- Prioritise honestly: reserve "critical" for real outages or security exposure now.
+- Steps must be concrete and doable by a non-expert (UniFi UI menu paths, physical actions).
+- Put things that look fine in "healthy" rather than making low-value items.
+- If a data source was unavailable, mention it in the summary instead of guessing."""
+
+
+def _clip(v, n):
+    return str(v or "").strip()[:n]
+
+
+def clean_report(raw):
+    """Validate/normalise the model's report so the UI can trust its shape."""
+    items = []
+    for i, it in enumerate((raw or {}).get("items") or []):
+        if not isinstance(it, dict) or not it.get("title"):
+            continue
+        pr = str(it.get("priority", "medium")).lower()
+        items.append({
+            "priority": pr if pr in PRIORITIES else "medium",
+            "category": _clip(it.get("category") or "General", 40),
+            "title": _clip(it["title"], 200),
+            "affected": [_clip(a, 120) for a in (it.get("affected") or []) if a][:30],
+            "finding": _clip(it.get("finding"), 2000),
+            "why": _clip(it.get("why"), 1200),
+            "steps": [_clip(st, 500) for st in (it.get("steps") or []) if st][:12],
+            "effort": it.get("effort") if it.get("effort") in ("quick", "moderate", "involved") else None,
+        })
+    items.sort(key=lambda x: PRIORITIES.index(x["priority"]))       # stable: keeps model order within a tier
+    for n, it in enumerate(items, 1):
+        it["id"] = f"item-{n}"
+    return {"summary": _clip((raw or {}).get("summary"), 2000),
+            "items": items[:60],
+            "healthy": [_clip(h, 300) for h in ((raw or {}).get("healthy") or []) if h][:30]}
