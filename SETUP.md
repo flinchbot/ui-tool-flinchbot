@@ -16,9 +16,13 @@ This guide assumes no programming experience. Plan on about 20 minutes the first
 
 ---
 
+<a id="install-python"></a>
+
 ## 1. Install Python (once per computer)
 
-Python is the language the app is written in. You install it once and never have to open it.
+Python is the language the app is written in. You install it once and never have to open it. If it's missing or too old, `start.bat` / `start.command` tells you and offers to open the download page and this section.
+
+<a id="python-mac"></a>
 
 **On a Mac:**
 
@@ -30,6 +34,8 @@ Python is the language the app is written in. You install it once and never have
    python3 --version
    ```
    You should see something like `Python 3.14.3`.
+
+<a id="python-windows"></a>
 
 **On Windows:**
 
@@ -122,7 +128,9 @@ To turn it on later (see step 6 for the form):
 
 The SSH password is stored in Windows Credential Manager or the macOS Keychain, separately from the UniFi login. If you don't use SSH, leave it off on the console: SSH gives full root control, so it's one less password that can leak.
 
-## 5. Get the app onto the PC
+<a id="get-the-app"></a>
+
+## 5. Get the app onto your computer
 
 Use either of these:
 - **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-flinchbot` on Windows or your home folder's `Applications` or `Documents` on a Mac. Avoid running it from inside the ZIP or from Downloads.
@@ -130,9 +138,12 @@ Use either of these:
 
 The folder is self-contained, so you can move it or copy it to another PC later.
 
+<a id="start-it"></a>
+
 ## 6. Start it
 
 1. Double-click **`start.bat`** (Windows) or **`start.command`** (Mac).
+   - It checks this computer first: that Python 3.10+ is installed, that the folder isn't read-only or still inside the ZIP, then the computer and OS, packages, where passwords will be kept, and whether the AI providers can be reached. Anything wrong is explained with the fix, and it offers to open the Python download page and the right part of this guide.
    - The first time, it creates a private Python environment (a `.venv` folder) and downloads the packages the app needs: the Anthropic and OpenAI connectors, a password-storage helper and an SSH library. This needs internet and takes about a minute.
    - **Windows:** SmartScreen may warn about running a downloaded file. Click **More info → Run anyway**. If Windows Firewall asks about Python, you can click **Cancel**: the app only listens on this computer (127.0.0.1) and doesn't need firewall access.
    - **Mac:** the first time, macOS may say *"start.command" can't be opened because Apple cannot check it*. **Right-click** (or Control-click) `start.command` → **Open** → **Open**. You only need to do this once. If it says you don't have permission, open Terminal in the app folder and run `bash start.command` instead.
@@ -194,6 +205,8 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 
 Your settings, connections and passwords aren't touched by an update. `start.bat` / `start.command` notices new requirements and installs them on the next start.
 
+<a id="where-stored"></a>
+
 ## 9. Where your information is stored, and what is sent where
 
 | What | Where |
@@ -219,11 +232,15 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 2. Re-enter the UniFi and SSH passwords. Credential Manager and Keychain entries don't travel with the folder.
 3. Skip copying `.venv`; `start.bat` / `start.command` rebuilds it (and rebuilds it automatically if you copied one from the other kind of computer).
 
+<a id="troubleshooting"></a>
+
 ## 10. Troubleshooting
 
 | Message / symptom | What to do |
 |---|---|
-| *"Python 3.10 or newer was not found"* | Redo step 1, then close and reopen the `start.bat` / `start.command` window. |
+| *"Python isn't installed"* or *"needs Python 3.10 or newer"* | Answer **Y** to open the download page and step 1 of this guide, install Python, then close and reopen the `start.bat` / `start.command` window. |
+| A line marked **XX** in the *Environment check* | The app can't start until that is fixed; the line says how, and the launcher offers to open the right section of this guide. Lines marked **!!** are warnings: the app still starts. |
+| *"running from inside the downloaded ZIP file"* | Right-click the ZIP → **Extract All…** into a permanent folder (step 5) and start it from there. |
 | Mac: *"start.command" can't be opened because Apple cannot check it* | Right-click `start.command` → **Open** → **Open** (once). |
 | Mac: *"permission denied"* when starting | In Terminal, in the app folder, run `bash start.command`, or `chmod +x start.command` once. |
 | *"Could not start on 127.0.0.1:8080"* | Another program uses port 8080. Run `start.bat --port 8090` (Windows) or `./start.command --port 8090` (Mac), or change the port in Settings. |

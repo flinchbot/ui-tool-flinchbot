@@ -1620,6 +1620,7 @@ function openAbout() {
     h('div', { class: 'about-meta' },
       h('div', {}, `UniFi × flinchbot ${st.version ? 'v' + st.version : ''}`),
       h('div', {}, st.provider_label ? `AI: ${st.provider_label} · ${st.model || ''}` : 'AI: not set up yet'),
+      st.env ? h('div', {}, `Running on ${st.env.os} · Python ${st.env.python}`) : null,
       h('div', {}, 'Runs on this PC only. Changes to your network always need your approval.')),
     h('div', { class: 'actions', style: 'justify-content:center;margin-top:16px' },
       h('a', { class: 'btn', href: '/setup', target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, '📖 Setup guide'),

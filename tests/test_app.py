@@ -843,6 +843,58 @@ class AgentTests(unittest.TestCase):
         self.assertIsInstance(a.history[0]["content"], str)
 
 
+class EnvCheckTests(unittest.TestCase):
+    ROOT = os.path.dirname(HERE)
+
+    def test_report_on_this_computer(self):
+        import io
+        import envcheck
+        results = envcheck.run()
+        self.assertEqual([r[0] for r in results], ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet"])
+        self.assertFalse([r for r in results if r[1] == envcheck.FAIL], results)
+        out = io.StringIO()
+        self.assertIn(envcheck.report(results, out), (envcheck.OK, envcheck.WARN))
+        self.assertIn("Environment check", out.getvalue())
+        self.assertRegex(envcheck.describe_os(), r"^(Windows|macOS|Linux)")
+
+    def test_missing_packages_are_explained(self):
+        import envcheck
+        saved = envcheck.PACKAGES
+        try:
+            envcheck.PACKAGES = [("keyring", True), ("no_such_pkg_xyz", False)]
+            status, detail, problem, _ = envcheck.check_packages()
+            self.assertEqual(status, envcheck.WARN)
+            self.assertIn("no_such_pkg_xyz", problem)
+            envcheck.PACKAGES = [("no_such_pkg_xyz", True)]
+            status, _, problem, anchor = envcheck.check_packages()
+            self.assertEqual((status, anchor), (envcheck.FAIL, "start-it"))
+            self.assertIn("Delete the .venv folder", problem)
+        finally:
+            envcheck.PACKAGES = saved
+
+    def test_guide_links_point_at_real_sections(self):
+        """Every '#section' the launchers and envcheck open must exist in SETUP.html."""
+        import re
+        import envcheck
+        read = lambda name: open(os.path.join(self.ROOT, name), encoding="utf-8").read()   # noqa: E731
+        ids = set(re.findall(r'id="([a-z0-9-]+)"', read("SETUP.html")))
+        used = set(re.findall(r"call :openguide ([a-z-]+)", read("start.bat")))
+        used |= set(re.findall(r'open_guide "([a-z-]+)"', read("start.command")))
+        used |= set(re.findall(r'anchor="([a-z-]+)"', read("start.command")))
+        used |= set(re.findall(r'"([a-z]+(?:-[a-z]+)+)"', read("backend/envcheck.py")))
+        self.assertGreaterEqual(used, {"python-mac", "python-windows", "install-python", "get-the-app", "start-it", "where-stored"})
+        self.assertEqual(used - ids, set())
+        page = envcheck.write_redirect("python-mac")
+        self.addCleanup(lambda: page.unlink(missing_ok=True))
+        self.assertIn(envcheck.SETUP_HTML.as_uri() + "#python-mac", page.read_text(encoding="utf-8"))
+
+    def test_launchers_keep_their_line_endings(self):
+        raw = lambda name: open(os.path.join(self.ROOT, name), "rb").read()   # noqa: E731
+        bat, command = raw("start.bat"), raw("start.command")
+        self.assertEqual(bat.count(b"\n"), bat.count(b"\r\n"))      # cmd.exe needs CRLF
+        self.assertNotIn(b"\r", command)                             # bash needs LF
+
+
 class EventFormatTests(unittest.TestCase):
     def test_summarize_event(self):
         s = summarize_event({"key": "DEVICE_OFFLINE", "message_raw": "AP {device} is offline since {TIME}",

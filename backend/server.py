@@ -38,7 +38,9 @@ from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 from ssh_client import SSHClient, SSHError, format_hostkey, test_ssh  # noqa: E402
+import envcheck                                                        # noqa: E402
 import history                                                         # noqa: E402
+import platform                                                        # noqa: E402
 import topology                                                        # noqa: E402
 import wan                                                             # noqa: E402
 from unifi_client import summarize_event                               # noqa: E402
@@ -386,6 +388,7 @@ def r_status(_):
         "connected": False, "error": None, "error_kind": None,
         "secret_storage": cfg.secret_storage_kind(),
         "secret_store_name": cfg.secret_store_name(),
+        "env": {"os": envcheck.describe_os(), "python": platform.python_version()},
         "platform": cfg.platform_name(),
         "launcher": cfg.launcher(),
         "pending": agent.pending_view(),

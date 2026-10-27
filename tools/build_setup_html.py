@@ -58,6 +58,9 @@ def main():
         toc.append((sid, re.sub(r"<[^>]+>", "", inner)))
         return f'<h2 id="{sid}">{inner}</h2>'
     body = re.sub(r"<h2>(.*?)</h2>", add_id, body)
+    # Stable anchors (<a id="python-mac"></a> in SETUP.md, used by the launchers' "open the guide"):
+    # unwrap them from the empty paragraph Markdown puts around them.
+    body = re.sub(r'<p>(<a id="[a-z0-9-]+"></a>)</p>', r"\1", body)
     # Markdown blockquotes that start with a warning sign become callouts
     body = body.replace("<blockquote>\n<p>⚠️", '<blockquote class="warn">\n<p>⚠️')
     # Bare URLs in bold become links

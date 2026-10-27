@@ -34,6 +34,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
 - **Chat export** to Markdown or HTML.
 - **Themes:** Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner and Candle Maker. Each is a full re-skin (colours, fonts, text size, layout) with light and dark versions; the choice is saved per browser, and moving backgrounds respect reduced-motion. Fonts come from Google Fonts on first use.
 - **Windows and macOS:** `start.bat` on Windows, `start.command` on a Mac (also works on Linux). The same folder, `.env` and `data/` work on both.
+- **Startup environment check:** the launcher checks for Python 3.10+, a writable folder and running from inside the ZIP, then `backend/envcheck.py` reports the OS, Python, packages, password store and internet reachability. Problems come with the fix, and the launcher offers to open the Python download page and the matching section of the setup guide.
 - **Locked to this computer:**
   - Listens on `127.0.0.1` only.
   - Every request needs a per-launch token.
@@ -60,6 +61,7 @@ backend/history.py     local change log (data/audit.jsonl) and recorded speed te
 backend/rollback.py    undo snapshots for Wi-Fi / LAN changes (secrets kept in the secret store)
 backend/config_store.py .env + connection profiles + OS password store
 backend/probe_events.py diagnostic: which endpoints the active console answers
+backend/envcheck.py    startup environment report; opens SETUP.html at a section
 frontend/index.html    the whole UI (no build step)
 frontend/static/       themes.css + themes.js (themes), flinchbot icon, favicon, About artwork
 SETUP.md / SETUP.html  setup guide (HTML is generated: python tools/build_setup_html.py)
