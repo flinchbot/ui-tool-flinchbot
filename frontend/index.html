@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="app-token" content="__APP_TOKEN__">
+<title>UniFi × Claude</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0c10; --surface:#111318; --surface2:#161922; --border:#1e2230;
+    --accent:#00d4ff; --accent2:#7b61ff; --warn:#ff6b35; --ok:#00e5a0; --danger:#ff4d6d;
+    --text:#e2e8f0; --muted:#64748b;
+    --font-ui:'Syne',system-ui,sans-serif; --font-mono:'Space Mono',ui-monospace,monospace;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; overflow:hidden; background:var(--bg); color:var(--text); font-family:var(--font-ui); }
+  button { font-family:inherit; }
+  .app { display:grid; grid-template-rows:auto auto 1fr; height:100vh; overflow:hidden; }
+
+  /* header */
+  header { display:flex; align-items:center; gap:16px; padding:14px 24px; border-bottom:1px solid var(--border);
+           background:var(--surface); position:relative; }
+  .logo { display:flex; align-items:center; gap:12px; }
+  .logo-icon { width:34px; height:34px; border-radius:8px; display:flex; align-items:center; justify-content:center;
+               background:linear-gradient(135deg,var(--accent),var(--accent2)); }
+  .logo h1 { font-size:18px; font-weight:800; letter-spacing:-.3px; white-space:nowrap; }
+  .logo span { color:var(--accent); }
+  .spacer { flex:1; }
+
+  .conn-switch { position:relative; }
+  .conn-btn { display:flex; align-items:center; gap:8px; padding:7px 14px; border-radius:99px; cursor:pointer;
+              background:rgba(0,229,160,.08); border:1px solid rgba(0,229,160,.25); color:var(--ok);
+              font-family:var(--font-mono); font-size:12px; max-width:340px; }
+  .conn-btn.offline { background:rgba(255,107,53,.08); border-color:rgba(255,107,53,.3); color:var(--warn); }
+  .conn-btn.none { background:transparent; border-color:var(--border); color:var(--muted); }
+  .conn-btn .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex-shrink:0; animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .menu { position:absolute; top:calc(100% + 6px); left:0; min-width:280px; background:var(--surface2);
+          border:1px solid var(--border); border-radius:10px; padding:6px; z-index:20; box-shadow:0 12px 30px rgba(0,0,0,.5); }
+  .menu[hidden] { display:none; }
+  .menu-item { display:flex; align-items:center; gap:10px; width:100%; padding:9px 10px; border:0; border-radius:6px;
+               background:transparent; color:var(--text); font-size:13px; text-align:left; cursor:pointer; }
+  .menu-item:hover { background:var(--border); }
+  .menu-item small { color:var(--muted); font-family:var(--font-mono); font-size:10px; display:block; }
+  .menu-item .check { width:14px; color:var(--accent); }
+  .menu hr { border:0; border-top:1px solid var(--border); margin:6px 0; }
+
+  .header-actions { display:flex; gap:8px; }
+  .btn { padding:7px 14px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted);
+         font-size:13px; cursor:pointer; transition:all .2s; white-space:nowrap; }
+  .btn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent2)); border:0; color:#fff; font-weight:600; }
+  .btn.primary:hover:not(:disabled) { opacity:.88; color:#fff; }
+  .btn.danger { border-color:rgba(255,77,109,.4); color:var(--danger); }
+  .btn.danger:hover:not(:disabled) { border-color:var(--danger); color:var(--danger); background:rgba(255,77,109,.08); }
+  .btn.ok { border-color:rgba(0,229,160,.4); color:var(--ok); }
+
+  /* banner */
+  .banner { display:flex; align-items:center; gap:12px; padding:10px 24px; font-size:13px;
+            background:rgba(255,107,53,.1); border-bottom:1px solid rgba(255,107,53,.3); color:#ffd2c0; }
+  .banner[hidden] { display:none; }
+  .banner .msg { flex:1; }
+
+  /* layout */
+  main { display:grid; grid-template-columns:300px 1fr; overflow:hidden; min-height:0; }
+  aside { border-right:1px solid var(--border); background:var(--surface); display:flex; flex-direction:column; overflow-y:auto; min-height:0; }
+  .sidebar-section { padding:16px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .sidebar-section.devices-section { flex:1; overflow-y:auto; min-height:0; }
+  .sidebar-section h3 { font-size:10px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .stat-val { font-size:24px; font-weight:800; font-family:var(--font-mono); color:var(--accent); }
+  .stat-val.warn { color:var(--warn); }
+  .stat-label { font-size:11px; color:var(--muted); margin-top:2px; }
+  .device-list { display:flex; flex-direction:column; gap:6px; }
+  .device-item { display:flex; align-items:center; gap:10px; padding:10px; background:var(--bg); border:1px solid var(--border);
+                 border-radius:8px; cursor:pointer; transition:border-color .2s; text-align:left; color:inherit; width:100%; }
+  .device-item:hover { border-color:var(--accent2); }
+  .device-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:var(--ok); }
+  .device-dot.offline { background:var(--warn); }
+  .device-info { flex:1; min-width:0; }
+  .device-name { font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .device-meta { font-size:10px; color:var(--muted); font-family:var(--font-mono); }
+  .device-clients { font-size:10px; font-family:var(--font-mono); color:var(--accent2); background:rgba(123,97,255,.1); padding:2px 6px; border-radius:4px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .side-error { color:var(--warn); font-size:11px; margin-top:8px; }
+
+  /* chat */
+  .chat-area { display:flex; flex-direction:column; background:var(--bg); min-height:0; overflow:hidden; }
+  .chat-toolbar { padding:12px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px;
+                  border-bottom:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .chat-toolbar h2 { font-size:15px; font-weight:600; }
+  .chat-toolbar .sub { font-size:11px; color:var(--muted); font-family:var(--font-mono); }
+  .messages { flex:1; overflow-y:auto; padding:24px 20px; display:flex; flex-direction:column; gap:16px; min-height:0; }
+  .messages::-webkit-scrollbar { width:4px; } .messages::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+  .msg { display:flex; gap:12px; max-width:860px; animation:fadeUp .3s ease; flex-shrink:0; }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+  .msg.user { align-self:flex-end; flex-direction:row-reverse; }
+  .msg-avatar { width:32px; height:32px; border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:14px; }
+  .msg.assistant .msg-avatar { background:linear-gradient(135deg,var(--accent),var(--accent2)); }
+  .msg.user .msg-avatar { background:var(--surface); border:1px solid var(--border); }
+  .msg-bubble { padding:12px 16px; border-radius:12px; font-size:14px; line-height:1.65; max-width:calc(100% - 44px); overflow-wrap:anywhere; }
+  .msg.assistant .msg-bubble { background:var(--surface); border:1px solid var(--border); border-top-left-radius:2px; }
+  .msg.user .msg-bubble { background:rgba(0,212,255,.08); border:1px solid rgba(0,212,255,.2); border-top-right-radius:2px; white-space:pre-wrap; }
+  .msg.error .msg-bubble { border-color:rgba(255,107,53,.4); color:#ffd2c0; }
+  .msg-bubble pre { background:var(--bg); border:1px solid var(--border); padding:10px; border-radius:6px; overflow-x:auto;
+                    font-family:var(--font-mono); font-size:12px; margin:8px 0; white-space:pre-wrap; }
+  .msg-bubble code { background:var(--bg); padding:1px 5px; border-radius:3px; font-family:var(--font-mono); font-size:12px; }
+  .msg-bubble strong { color:var(--accent); }
+  .msg-bubble ul, .msg-bubble ol { padding-left:18px; margin:6px 0; }
+  .msg-bubble li { margin:3px 0; }
+  .msg-bubble h3 { font-size:13px; margin:10px 0 4px; color:var(--accent2); }
+
+  .approval { border:1px solid rgba(255,107,53,.45) !important; background:rgba(255,107,53,.06) !important; }
+  .approval h4 { font-size:13px; color:var(--warn); margin-bottom:8px; }
+  .action { border-top:1px solid var(--border); padding:8px 0; }
+  .action:first-of-type { border-top:0; }
+  .action .label { font-weight:600; font-size:13px; }
+  .action .target { font-family:var(--font-mono); font-size:11px; color:var(--muted); }
+  .approval .row { display:flex; gap:8px; margin-top:10px; }
+  .decided { font-size:12px; color:var(--muted); margin-top:8px; font-family:var(--font-mono); }
+
+  .typing { display:flex; gap:6px; padding:4px 0; }
+  .typing-dot { width:6px; height:6px; border-radius:50%; background:var(--muted); animation:bounce 1.2s infinite; }
+  .typing-dot:nth-child(2){animation-delay:.2s} .typing-dot:nth-child(3){animation-delay:.4s}
+  @keyframes bounce { 0%,60%,100%{transform:none} 30%{transform:translateY(-6px)} }
+
+  .chat-input-area { padding:16px 20px; border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .quick-prompts { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .quick-btn { padding:5px 12px; border-radius:99px; font-size:11px; background:var(--bg); border:1px solid var(--border);
+               color:var(--muted); cursor:pointer; }
+  .quick-btn:hover { border-color:var(--accent2); color:var(--accent2); }
+  .input-row { display:flex; gap:10px; }
+  .chat-input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 16px; color:var(--text);
+                font-family:var(--font-ui); font-size:14px; outline:none; resize:none; line-height:1.5; }
+  .chat-input:focus { border-color:var(--accent); }
+  .send-btn { width:44px; height:44px; border-radius:8px; border:none; background:linear-gradient(135deg,var(--accent),var(--accent2));
+              color:#fff; cursor:pointer; font-size:18px; align-self:flex-end; }
+  .send-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .empty-state { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--muted); gap:12px; padding:40px; text-align:center; }
+  .empty-state .icon { font-size:46px; opacity:.4; }
+  .empty-state p { font-size:14px; max-width:360px; line-height:1.6; }
+
+  /* modal */
+  .overlay { position:fixed; inset:0; background:rgba(3,5,8,.72); display:flex; align-items:flex-start; justify-content:center;
+             padding:5vh 16px; z-index:50; overflow-y:auto; }
+  .overlay[hidden] { display:none; }
+  .modal { width:min(640px,100%); background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:24px;
+           box-shadow:0 24px 60px rgba(0,0,0,.6); }
+  .modal h2 { font-size:20px; font-weight:800; margin-bottom:4px; }
+  .modal .lead { color:var(--muted); font-size:13px; line-height:1.6; margin-bottom:18px; }
+  .modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .x { background:none; border:0; color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
+  .steps { display:flex; gap:6px; margin:4px 0 18px; }
+  .steps span { flex:1; height:4px; border-radius:2px; background:var(--border); }
+  .steps span.on { background:linear-gradient(90deg,var(--accent),var(--accent2)); }
+  .field { margin-bottom:14px; }
+  .field label { display:block; font-size:12px; font-weight:600; margin-bottom:6px; }
+  .field .hint { font-size:11px; color:var(--muted); margin-top:5px; line-height:1.5; }
+  .field input, .field select { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;
+                                color:var(--text); font-family:var(--font-mono); font-size:13px; outline:none; }
+  .field input:focus, .field select:focus { border-color:var(--accent); }
+  .grid2 { display:grid; grid-template-columns:2fr 1fr; gap:12px; }
+  .seg { display:flex; gap:6px; }
+  .seg button { flex:1; padding:9px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--muted); cursor:pointer; font-size:12px; }
+  .seg button.on { border-color:var(--accent); color:var(--accent); background:rgba(0,212,255,.06); }
+  .pw-wrap { position:relative; }
+  .pw-wrap input { padding-right:62px; }
+  .pw-wrap button { position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:0; color:var(--muted);
+                    font-size:11px; cursor:pointer; padding:4px 8px; }
+  .result { border-radius:8px; padding:12px; font-size:12px; line-height:1.6; margin:4px 0 14px; }
+  .result.ok { background:rgba(0,229,160,.07); border:1px solid rgba(0,229,160,.3); }
+  .result.bad { background:rgba(255,107,53,.08); border:1px solid rgba(255,107,53,.35); color:#ffd2c0; }
+  .result.warn { background:rgba(255,200,0,.06); border:1px solid rgba(255,200,0,.35); color:#ffe9a8; }
+  .result code { font-family:var(--font-mono); font-size:11px; word-break:break-all; }
+  .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; flex-wrap:wrap; }
+  .actions .left { margin-right:auto; }
+  .conn-list { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+  .conn-row { display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--border); border-radius:10px; background:var(--bg); }
+  .conn-row.active { border-color:rgba(0,212,255,.45); }
+  .conn-row .info { flex:1; min-width:0; }
+  .conn-row .title { font-weight:600; font-size:14px; }
+  .conn-row .meta { font-family:var(--font-mono); font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tag { font-size:10px; font-family:var(--font-mono); padding:2px 6px; border-radius:4px; background:rgba(0,212,255,.1); color:var(--accent); }
+  .note { font-size:12px; color:var(--muted); line-height:1.6; padding:10px 12px; border:1px dashed var(--border); border-radius:8px; margin-bottom:14px; }
+  .note.warn { color:#ffe9a8; border-color:rgba(255,200,0,.35); }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border);
+           padding:10px 16px; border-radius:8px; font-size:13px; z-index:60; max-width:90vw; }
+  .toast.bad { border-color:rgba(255,107,53,.5); color:#ffd2c0; }
+  .toast[hidden] { display:none; }
+  @media (max-width:820px) { main { grid-template-columns:1fr; } aside { display:none; } .logo h1 { display:none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo"><div class="logo-icon">⚡</div><h1>UniFi <span>×</span> Claude</h1></div>
+    <div class="conn-switch">
+      <button id="connBtn" class="conn-btn none" aria-haspopup="true" aria-expanded="false">
+        <span class="dot"></span><span class="name" id="connName">Starting…</span><span aria-hidden="true">▾</span>
+      </button>
+      <div id="connMenu" class="menu" hidden></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="header-actions">
+      <button class="btn" id="refreshBtn" title="Reload network data">↻ Refresh</button>
+      <button class="btn" id="clearBtn" title="Start a new conversation">✕ Clear chat</button>
+      <button class="btn" id="settingsBtn" title="Settings">⚙ Settings</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden><span class="msg" id="bannerMsg"></span><span id="bannerActions"></span></div>
+
+  <main>
+    <aside>
+      <div class="sidebar-section">
+        <h3>Network Overview</h3>
+        <div class="stat-grid">
+          <div class="stat-card"><div class="stat-val" id="devCount">—</div><div class="stat-label">Devices</div></div>
+          <div class="stat-card"><div class="stat-val" id="clientCount">—</div><div class="stat-label">Clients</div></div>
+          <div class="stat-card"><div class="stat-val warn" id="alertCount">—</div><div class="stat-label">Alerts</div></div>
+          <div class="stat-card"><div class="stat-val" id="wanState">—</div><div class="stat-label">WAN</div></div>
+        </div>
+        <div id="sideErrors"></div>
+      </div>
+      <div class="sidebar-section devices-section">
+        <h3>Devices</h3>
+        <div class="device-list" id="deviceList"><div class="muted">Loading…</div></div>
+      </div>
+    </aside>
+
+    <div class="chat-area">
+      <div class="chat-toolbar">
+        <div><h2>Network Assistant</h2><div class="sub" id="chatSub"></div></div>
+        <div class="muted">Changes always ask for your approval first</div>
+      </div>
+      <div class="messages" id="messages">
+        <div class="empty-state"><div class="icon">🛜</div>
+          <p>Ask anything about your UniFi network. I read live data from the console and can make changes — but only after you approve them.</p></div>
+      </div>
+      <div class="chat-input-area">
+        <div class="quick-prompts" id="quickPrompts"></div>
+        <div class="input-row">
+          <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about your network…"></textarea>
+          <button class="send-btn" id="sendBtn" title="Send">➤</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="overlay" class="overlay" hidden><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+<div id="toast" class="toast" hidden></div>
+
+<script>
+'use strict';
+const TOKEN = document.querySelector('meta[name="app-token"]').content;
+const $ = id => document.getElementById(id);
+let status = null;       // last /api/status
+let busy = false;        // a chat request is in flight
+
+// ── DOM helper: builds elements without innerHTML, so names from the network can't inject markup
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (k === 'class') e.className = v;
+    else if (k === 'html') e.innerHTML = v;            // only used with escaped markdown output
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false)
+    e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return e;
+}
+const esc = t => String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// ── API ───────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  let r;
+  try {
+    r = await fetch(path, { method, headers: { 'X-App-Token': TOKEN, 'Content-Type': 'application/json' },
+                            body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch (e) {
+    throw Object.assign(new Error('The app is not running. Start it again with start.bat.'), { kind: 'down' });
+  }
+  let data = {};
+  try { data = await r.json(); } catch {}
+  if (r.status === 401 && data.kind === 'token') {
+    showBanner('The app was restarted. Reload this page to reconnect.', [h('button', { class: 'btn', onclick: () => location.reload() }, 'Reload')]);
+  }
+  if (!r.ok) throw Object.assign(new Error(data.error || `Request failed (${r.status})`), { kind: data.kind, status: r.status });
+  return data;
+}
+
+function toast(msg, bad) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast' + (bad ? ' bad' : ''); t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, bad ? 6000 : 3000);
+}
+function showBanner(msg, actions) {
+  $('bannerMsg').textContent = msg; $('bannerActions').replaceChildren(...(actions || [])); $('banner').hidden = false;
+}
+function hideBanner() { $('banner').hidden = true; }
+
+// ── status / header ─────────────────────────────────────────────────────────
+async function refreshStatus() {
+  try { status = await api('GET', '/api/status'); }
+  catch (e) { renderConn(null, e.message); return null; }
+  renderConn(status);
+  if (status.error_kind === 'cert') {
+    showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
+  } else if (!status.configured) {
+    showBanner('Add your Anthropic API key to start chatting.', [h('button', { class: 'btn', onclick: openSettings }, 'Open Settings')]);
+  } else if (status.secret_storage === 'file' && status.has_connections) {
+    showBanner('Passwords are being saved in data/secrets.json because Windows Credential Manager is not available. Keep that folder private.', []);
+  } else hideBanner();
+  return status;
+}
+
+function renderConn(s, err) {
+  const b = $('connBtn');
+  if (!s) { b.className = 'conn-btn offline'; $('connName').textContent = err || 'App not running'; return; }
+  if (!s.active) { b.className = 'conn-btn none'; $('connName').textContent = 'No connection — add one'; $('chatSub').textContent = ''; return; }
+  b.className = 'conn-btn' + (s.connected ? '' : ' offline');
+  $('connName').textContent = s.connected ? `${s.active.name} · ${s.active.host}` : `${s.active.name} · offline`;
+  b.title = s.connected ? `${s.active.console_label}, site ${s.active.site}` : (s.error || '');
+  $('chatSub').textContent = `${s.active.name} · site ${s.active.site}`;
+  if (!s.connected && s.error && s.error_kind !== 'cert') renderSideError(s.error);
+}
+
+async function toggleConnMenu(force) {
+  const m = $('connMenu');
+  const open = force !== undefined ? force : m.hidden;
+  if (!open) { m.hidden = true; $('connBtn').setAttribute('aria-expanded', 'false'); return; }
+  let data;
+  try { data = await api('GET', '/api/connections'); } catch (e) { toast(e.message, true); return; }
+  m.replaceChildren(
+    ...data.profiles.map(p => h('button', { class: 'menu-item', onclick: () => activate(p.id) },
+        h('span', { class: 'check' }, p.id === data.active ? '✓' : ''),
+        h('span', {}, p.name, h('small', {}, `${p.host}:${p.port} · ${p.site}`)))),
+    ...(data.profiles.length ? [h('hr')] : []),
+    h('button', { class: 'menu-item', onclick: () => { toggleConnMenu(false); openConnections(null, true); } },
+      h('span', { class: 'check' }, '+'), 'Add a connection…'),
+    h('button', { class: 'menu-item', onclick: () => { toggleConnMenu(false); openConnections(); } },
+      h('span', { class: 'check' }, '⚙'), 'Manage connections…'));
+  m.hidden = false; $('connBtn').setAttribute('aria-expanded', 'true');
+}
+
+async function activate(id) {
+  toggleConnMenu(false);
+  if (status && status.active && status.active.id === id) return;
+  if (status && status.pending && !confirm('Switching networks will discard the action waiting for approval. Continue?')) return;
+  try {
+    await api('POST', '/api/connections/activate', { id });
+    clearChatView('Switched network. The conversation was cleared so nothing from the previous network gets mixed in.');
+    await refreshStatus(); await refreshNetwork();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ── sidebar ───────────────────────────────────────────────────────────────
+function renderSideError(msg) { $('sideErrors').replaceChildren(h('div', { class: 'side-error' }, msg)); }
+
+async function refreshNetwork() {
+  if (!status || !status.active) {
+    ['devCount','clientCount','alertCount','wanState'].forEach(i => $(i).textContent = '—');
+    $('deviceList').replaceChildren(h('div', { class: 'muted' }, 'No connection selected.'));
+    return;
+  }
+  let d;
+  try { d = await api('GET', '/api/network'); }
+  catch (e) { renderSideError(e.message); $('deviceList').replaceChildren(h('div', { class: 'muted' }, 'Not connected.')); return; }
+  $('devCount').textContent = d.device_count; $('clientCount').textContent = d.client_count;
+  $('alertCount').textContent = d.alert_count;
+  const wan = (d.health || []).find(x => x.subsystem === 'wan');
+  $('wanState').textContent = wan ? (wan.status === 'ok' ? '✓ OK' : wan.status) : '—';
+  const errs = Object.entries(d.errors || {});
+  $('sideErrors').replaceChildren(...errs.map(([k, v]) => h('div', { class: 'side-error' }, `${k}: ${v}`)));
+  $('deviceList').replaceChildren(...(d.devices.length ? d.devices.map(dev =>
+    h('button', { class: 'device-item', onclick: () => sendQuick(`Tell me about the device "${dev.name}" (${dev.mac}): status, connected clients, and any issues.`) },
+      h('div', { class: 'device-dot' + (dev.state !== 1 ? ' offline' : '') }),
+      h('div', { class: 'device-info' }, h('div', { class: 'device-name' }, dev.name),
+        h('div', { class: 'device-meta' }, [dev.model || dev.type, dev.ip].filter(Boolean).join(' · '))),
+      dev.num_sta ? h('div', { class: 'device-clients' }, dev.num_sta) : null))
+    : [h('div', { class: 'muted' }, 'No devices found.')]));
+}
+
+// ── chat ──────────────────────────────────────────────────────────────────
+function formatMarkdown(text) {
+  const lines = esc(text).replace(/```([\s\S]*?)```/g, (_, c) => '\u0000' + btoa(unescape(encodeURIComponent(c))) + '\u0000').split('\n');
+  let out = '', list = null;
+  const inline = s => s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>').replace(/_\((.+?)\)_/g, '<em>($1)</em>');
+  const close = () => { if (list) { out += `</${list}>`; list = null; } };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^#{1,4}\s+(.*)$/))) { close(); out += `<h3>${inline(m[1])}</h3>`; }
+    else if ((m = line.match(/^\s*[-*•]\s+(.*)$/))) { if (list !== 'ul') { close(); out += '<ul>'; list = 'ul'; } out += `<li>${inline(m[1])}</li>`; }
+    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { if (list !== 'ol') { close(); out += '<ol>'; list = 'ol'; } out += `<li>${inline(m[1])}</li>`; }
+    else if (!line.trim()) { close(); out += '<br>'; }
+    else { close(); out += inline(line) + '<br>'; }
+  }
+  close();
+  return out.replace(/\u0000([^\u0000]*)\u0000/g, (_, b) => `<pre>${decodeURIComponent(escape(atob(b)))}</pre>`);
+}
+
+function clearEmpty() { const e = $('messages').querySelector('.empty-state'); if (e) e.remove(); }
+function scrollDown() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
+
+function addMessage(role, text, opts = {}) {
+  clearEmpty();
+  const bubble = h('div', { class: 'msg-bubble' });
+  if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
+  const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
+    h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : '🤖')), bubble);
+  $('messages').append(div); scrollDown(); return div;
+}
+
+function addApproval(pending) {
+  clearEmpty();
+  const decided = h('div', { class: 'decided' });
+  const approve = h('button', { class: 'btn primary' }, pending.length > 1 ? `Approve all ${pending.length}` : 'Approve');
+  const deny = h('button', { class: 'btn danger' }, 'Deny');
+  const card = h('div', { class: 'msg-bubble approval' },
+    h('h4', {}, pending.length > 1 ? `Claude wants to make ${pending.length} changes` : 'Claude wants to make a change'),
+    ...pending.map(p => h('div', { class: 'action' },
+      h('div', { class: 'label' }, p.label),
+      p.target ? h('div', { class: 'target' }, p.target) : null,
+      Object.keys(p.details || {}).filter(k => k !== 'mac').length
+        ? h('pre', {}, JSON.stringify(p.details, null, 2)) : null)),
+    h('div', { class: 'row' }, approve, deny), decided);
+  const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, '🛡️'), card);
+  const decide = async ok => {
+    approve.disabled = deny.disabled = true;
+    decided.textContent = ok ? 'Approved — running…' : 'Denied.';
+    await runChat('/api/chat/decide', { approve: ok });
+    decided.textContent = ok ? 'Approved.' : 'Denied.';
+    approve.remove(); deny.remove();
+  };
+  approve.addEventListener('click', () => decide(true));
+  deny.addEventListener('click', () => decide(false));
+  $('messages').append(wrap); scrollDown();
+}
+
+function showTyping() {
+  clearEmpty();
+  $('messages').append(h('div', { class: 'msg assistant', id: 'typing' }, h('div', { class: 'msg-avatar' }, '🤖'),
+    h('div', { class: 'msg-bubble' }, h('div', { class: 'typing' }, h('div', { class: 'typing-dot' }), h('div', { class: 'typing-dot' }), h('div', { class: 'typing-dot' })))));
+  scrollDown();
+}
+
+async function runChat(path, body) {
+  busy = true; $('sendBtn').disabled = true; showTyping();
+  try {
+    const d = await api('POST', path, body);
+    $('typing')?.remove();
+    if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
+    if (d.pending && d.pending.length) addApproval(d.pending);
+    if (path.endsWith('decide')) refreshNetwork();
+  } catch (e) {
+    $('typing')?.remove();
+    addMessage('assistant', e.message, { error: true, plain: true });
+  } finally {
+    busy = false; $('sendBtn').disabled = false; $('chatInput').focus();
+  }
+}
+
+async function sendMessage() {
+  const input = $('chatInput'); const text = input.value.trim();
+  if (!text || busy) return;
+  if (!status || !status.configured) { openSettings(); return; }
+  if (!status.active) { openConnections(null, true); return; }
+  input.value = ''; autoResize(input);
+  document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
+  addMessage('user', text);
+  await runChat('/api/chat', { message: text });
+}
+function sendQuick(msg) { $('chatInput').value = msg; sendMessage(); }
+function autoResize(el) { el.style.height = ''; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
+
+function clearChatView(note) {
+  $('messages').replaceChildren(h('div', { class: 'empty-state' }, h('div', { class: 'icon' }, '🛜'),
+    h('p', {}, note || 'Chat cleared. Ask me anything about your UniFi network.')));
+}
+async function resetChat() {
+  try { await api('POST', '/api/reset', {}); } catch (e) { toast(e.message, true); return; }
+  clearChatView();
+}
+
+// ── modal plumbing ────────────────────────────────────────────────────────
+function openModal(...content) { $('modal').replaceChildren(...content.flat().filter(Boolean)); $('overlay').hidden = false; }
+function closeModal() { $('overlay').hidden = true; $('modal').replaceChildren(); }
+function modalHead(title, lead, closable = true) {
+  return [h('div', { class: 'modal-head' }, h('h2', {}, title), closable ? h('button', { class: 'x', title: 'Close', onclick: closeModal }, '×') : null),
+          lead ? h('p', { class: 'lead' }, lead) : null];
+}
+function field(label, input, hint) { return h('div', { class: 'field' }, h('label', {}, label), input, hint ? h('div', { class: 'hint' }, hint) : null); }
+function secretInput(attrs) {
+  const inp = h('input', Object.assign({ type: 'password', autocomplete: 'new-password', spellcheck: 'false' }, attrs));
+  const btn = h('button', { type: 'button', onclick: () => { inp.type = inp.type === 'password' ? 'text' : 'password'; btn.textContent = inp.type === 'password' ? 'show' : 'hide'; } }, 'show');
+  return { wrap: h('div', { class: 'pw-wrap' }, inp, btn), input: inp };
+}
+function result(kind, ...kids) { return h('div', { class: `result ${kind}` }, ...kids); }
+
+// ── Settings (writes .env) ─────────────────────────────────────────────────
+async function openSettings(wizard) {
+  let s;
+  try { s = await api('GET', '/api/settings'); } catch (e) { toast(e.message, true); return; }
+  const key = secretInput({ placeholder: s.anthropic_key_set ? `Saved (${s.anthropic_key_hint}) — paste a new key to replace` : 'sk-ant-…' });
+  const model = h('select', {}, h('option', { value: s.model }, s.model));
+  const port = h('input', { type: 'number', min: 1024, max: 65535, value: s.port });
+  const out = h('div');
+  const loadModels = async () => {
+    out.replaceChildren(result('warn', 'Checking the key with Anthropic…'));
+    const r = await api('POST', '/api/settings/test-anthropic', { api_key: key.input.value.trim() || undefined }).catch(e => ({ ok: false, error: e.message }));
+    if (!r.ok) { out.replaceChildren(result('bad', r.error)); return false; }
+    const cur = model.value;
+    model.replaceChildren(...r.models.map(m => h('option', { value: m.id, selected: m.id === cur }, `${m.name} (${m.id})`)));
+    if (!r.models.some(m => m.id === cur)) model.prepend(h('option', { value: cur, selected: true }, `${cur} (not offered to this key)`));
+    out.replaceChildren(result('ok', `Key works. ${r.models.length} models available.`));
+    return true;
+  };
+  const save = async (next) => {
+    try {
+      if (!key.input.value.trim() && !s.anthropic_key_set) { out.replaceChildren(result('bad', 'Paste your Anthropic API key first.')); return; }
+      if (key.input.value.trim() && !(await loadModels())) return;
+      const r = await api('POST', '/api/settings', { anthropic_api_key: key.input.value.trim() || undefined, model: model.value,
+                                                     port: wizard ? undefined : port.value });
+      if (r.restart_needed) toast(`Saved. The new port (${r.port}) takes effect after you restart the app.`);
+      else toast('Settings saved.');
+      await refreshStatus();
+      if (next) next(); else closeModal();
+    } catch (e) { out.replaceChildren(result('bad', e.message)); }
+  };
+  const overrides = s.env_overrides.length
+    ? h('div', { class: 'note warn' }, `These are set as Windows environment variables and override this screen: ${s.env_overrides.join(', ')}. Remove them (System Properties → Environment Variables) if you want this screen to control them.`) : null;
+
+  const body = [
+    overrides,
+    field('Anthropic API key', key.wrap, h('span', {}, 'Create one at console.anthropic.com → API Keys. It is saved only in the .env file on this PC.')),
+    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: loadModels }, 'Test key & load models')),
+    out,
+    field('Claude model', model, 'Larger models are smarter but cost more per question. Use "Test key & load models" to see what your key can use.'),
+    wizard ? null : field('App port', port, `This app's web address is http://127.0.0.1:${s.running_port}/. Change only if another program uses this port.`),
+  ];
+  if (wizard) {
+    openModal(...modalHead('Welcome! Let’s get you set up', 'Two quick steps: connect Claude, then connect your UniFi console. Everything stays on this PC.', false),
+      h('div', { class: 'steps' }, h('span', { class: 'on' }), h('span')),
+      h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 1 · Claude'),
+      ...body, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => save(() => openConnections(null, true, true)) }, 'Save & continue →')));
+  } else {
+    openModal(...modalHead('Settings', `Saved to ${s.env_path}`), ...body,
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), h('button', { class: 'btn primary', onclick: () => save() }, 'Save')));
+  }
+}
+
+// ── Connections ─────────────────────────────────────────────────────────────
+async function openConnections(editId, addNew, wizard) {
+  let data;
+  try { data = await api('GET', '/api/connections'); } catch (e) { toast(e.message, true); return; }
+  if (addNew || editId || (wizard && !data.profiles.length)) return openConnectionForm(data, data.profiles.find(p => p.id === editId), wizard);
+
+  const rows = data.profiles.map(p => h('div', { class: 'conn-row' + (p.id === data.active ? ' active' : '') },
+    h('div', { class: 'info' },
+      h('div', { class: 'title' }, p.name, ' ', p.id === data.active ? h('span', { class: 'tag' }, 'in use') : null),
+      h('div', { class: 'meta' }, `${p.host}:${p.port} · site ${p.site} · ${p.console_label} · ${p.auth === 'apikey' ? 'API key' : p.username}`)),
+    p.id !== data.active ? h('button', { class: 'btn ok', onclick: async () => { closeModal(); await activate(p.id); } }, 'Use') : null,
+    h('button', { class: 'btn', onclick: () => openConnectionForm(data, p) }, 'Edit')));
+
+  openModal(...modalHead('UniFi connections', 'Each connection is one UniFi console (one network). Switch between them from the menu at the top.'),
+    data.secret_storage === 'file' ? h('div', { class: 'note warn' }, 'Windows Credential Manager is not available, so passwords are saved in data/secrets.json. Keep that folder private.') : null,
+    h('div', { class: 'conn-list' }, rows.length ? rows : h('div', { class: 'muted' }, 'No connections yet.')),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'),
+      h('button', { class: 'btn primary', onclick: () => openConnectionForm(data) }, '+ Add connection')));
+}
+
+function openConnectionForm(data, existing, wizard) {
+  const p = Object.assign({ name: '', host: '', port: 443, site: 'default', auth: 'password', username: '' }, existing || {});
+  let tested = null;           // last successful test result for the current inputs
+  const name = h('input', { value: p.name, placeholder: 'e.g. Home, Office, Venue' });
+  const host = h('input', { value: p.host, placeholder: 'e.g. 192.168.1.1', spellcheck: 'false' });
+  const port = h('input', { type: 'number', min: 1, max: 65535, value: p.port });
+  const siteInput = h('input', { value: p.site, spellcheck: 'false' });
+  const siteWrap = h('div', {}, siteInput);
+  const user = h('input', { value: p.username || '', autocomplete: 'off', spellcheck: 'false' });
+  const secret = secretInput({ placeholder: existing ? 'Saved — type a new one only to change it' : '' });
+  const out = h('div');
+  let auth = p.auth;
+  const authBtns = {
+    password: h('button', { type: 'button', onclick: () => setAuth('password') }, 'Username + password'),
+    apikey:   h('button', { type: 'button', onclick: () => setAuth('apikey') }, 'UniFi API key'),
+  };
+  const userField = field('Username', user, 'A LOCAL admin on the console (Admins & Users → “Restrict to local access only”). Not your UI.com cloud login.');
+  const secretLabel = h('label', {});
+  const secretField = h('div', { class: 'field' }, secretLabel, secret.wrap, h('div', { class: 'hint' }));
+  function setAuth(a) {
+    auth = a; tested = null;
+    Object.entries(authBtns).forEach(([k, b]) => b.className = k === a ? 'on' : '');
+    userField.hidden = a !== 'password';
+    secretLabel.textContent = a === 'password' ? 'Password' : 'API key';
+    secretField.querySelector('.hint').textContent = a === 'password'
+      ? 'Stored in Windows Credential Manager, not in any file in this folder.'
+      : 'Create in UniFi Network → Settings → Control Plane → Integrations (name varies by version). Not every UniFi version accepts keys for everything this app does — Test will tell you.';
+  }
+  setAuth(auth);
+  [name, host, port, siteInput, user, secret.input].forEach(i => i.addEventListener('input', () => { if (i !== name) tested = null; }));
+
+  const values = () => ({ id: existing && existing.id, name: name.value.trim() || host.value.trim(), host: host.value.trim(),
+    port: Number(port.value) || 443, site: (siteWrap.querySelector('select') || siteInput).value.trim() || 'default',
+    auth, username: auth === 'password' ? user.value.trim() : undefined, secret: secret.input.value });
+
+  async function runTest() {
+    const v = values();
+    if (!v.host) { out.replaceChildren(result('bad', 'Enter the console’s address first.')); return null; }
+    out.replaceChildren(result('warn', `Connecting to ${v.host}:${v.port}…`));
+    let r;
+    try { r = await api('POST', '/api/connections/test', v); } catch (e) { r = { ok: false, error: e.message }; }
+    if (!r.ok) { tested = null; out.replaceChildren(result('bad', r.error)); return r; }
+    tested = r;
+    if (r.sites.length > 1 || !r.site_found) {
+      const cur = v.site;
+      const sel = h('select', {}, ...r.sites.map(s => h('option', { value: s.name, selected: s.name === cur }, `${s.desc} (${s.name})`)));
+      if (!r.site_found && r.sites[0]) sel.value = r.sites[0].name;
+      siteWrap.replaceChildren(sel);
+    }
+    out.replaceChildren(result(r.cert_changed ? 'warn' : 'ok',
+      h('div', {}, `✓ Logged in to a ${r.console_label}. ${r.sites.length} site${r.sites.length === 1 ? '' : 's'} found` +
+        (r.site_found ? '.' : ` — "${v.site}" wasn’t one of them, so pick a site above.`)),
+      h('div', {}, 'Certificate fingerprint (saved so the app can tell if the console is ever swapped): ', h('code', {}, r.fingerprint_display)),
+      r.cert_changed ? h('div', { style: 'margin-top:6px' }, '⚠ This is a DIFFERENT certificate from the one saved before. Only save if you know the console was reset or replaced.') : null));
+    return r;
+  }
+
+  async function save(activateIt) {
+    let r = tested;
+    if (!r) r = await runTest();
+    if (!r || !r.ok) {
+      if (!r || !confirm('The connection test failed. Save these details anyway? (You can fix and test again later.)')) return;
+    }
+    const v = values();
+    if (r && r.ok) { v.console_type = r.console_type; v.fingerprint = r.fingerprint; }
+    if (!v.secret) delete v.secret;
+    v.activate = !!activateIt;
+    try {
+      await api('POST', '/api/connections', v);
+      toast(`Saved "${v.name}".`);
+      if (activateIt || wizard) clearChatView();
+      await refreshStatus(); await refreshNetwork();
+      if (wizard) { closeModal(); addMessage('assistant', 'All set! Try one of the quick prompts below, or ask me anything about your network.'); }
+      else openConnections();
+    } catch (e) { out.replaceChildren(result('bad', e.message)); }
+  }
+
+  async function del() {
+    if (!confirm(`Delete the connection "${p.name}"? Its saved password/API key is removed too.`)) return;
+    try { await api('POST', '/api/connections/delete', { id: existing.id }); clearChatView(); await refreshStatus(); await refreshNetwork(); openConnections(); }
+    catch (e) { toast(e.message, true); }
+  }
+  async function trust() {
+    if (!confirm('Trust the certificate the console presents right now? Do this only if you know the console was reset, replaced or had its certificate changed.')) return;
+    const r = await api('POST', '/api/connections/trust-cert', { id: existing.id }).catch(e => ({ ok: false, error: e.message }));
+    if (r.ok) { toast('New certificate trusted.'); await refreshStatus(); await refreshNetwork(); openConnections(); }
+    else out.replaceChildren(result('bad', r.error));
+  }
+
+  const certNote = existing && status && status.active && status.active.id === existing.id && status.error_kind === 'cert'
+    ? h('div', { class: 'note warn' }, status.error, h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn', onclick: trust }, 'Trust new certificate'))) : null;
+
+  openModal(
+    ...modalHead(wizard ? 'Welcome! Let’s get you set up' : (existing ? `Edit “${p.name}”` : 'Add a UniFi connection'),
+      wizard ? null : 'Enter how this PC reaches the UniFi console. Press Test to check it before saving.', !wizard),
+    wizard ? h('div', { class: 'steps' }, h('span', { class: 'on' }), h('span', { class: 'on' })) : null,
+    wizard ? h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 2 · Your UniFi console') : null,
+    certNote,
+    field('Name', name, 'Any label you like, so you can tell networks apart.'),
+    h('div', { class: 'grid2' },
+      field('Console address', host, 'The IP you type in the browser to open UniFi, e.g. 192.168.1.1'),
+      field('Port', port, '443 = UDM / UCG / Cloud Key Gen2+. 8443 = self-hosted. 11443 = UniFi OS Server.')),
+    field('Login method', h('div', { class: 'seg' }, authBtns.password, authBtns.apikey)),
+    userField, secretField,
+    field('Site', siteWrap, 'Leave as "default" unless the console manages several sites — Test lists them.'),
+    out,
+    h('div', { class: 'actions' },
+      existing ? h('button', { class: 'btn danger left', onclick: del }, 'Delete') : null,
+      wizard ? null : h('button', { class: 'btn', onclick: () => openConnections() }, 'Back'),
+      h('button', { class: 'btn', onclick: runTest }, 'Test'),
+      wizard ? h('button', { class: 'btn primary', onclick: () => save(true) }, 'Test, save & finish')
+        : h('button', { class: 'btn', onclick: () => save(false) }, 'Save'),
+      wizard || (existing && existing.id === data.active) ? null : h('button', { class: 'btn primary', onclick: () => save(true) }, 'Save & use now')));
+  (existing ? secret.input : host).focus();
+}
+
+// ── wiring ──────────────────────────────────────────────────────────────────
+const QUICK = [
+  ['🩺 Health check', 'Run a full network health check and identify any issues'],
+  ['📶 Wi-Fi quality', 'Which wireless clients have poor signal or high retries?'],
+  ['🔒 Security scan', 'Are there any security concerns or unusual activity?'],
+  ['⚡ Optimize', 'Suggest optimizations for better Wi-Fi coverage and performance'],
+  ['🚨 Active alerts', 'Show me all active alerts and how to fix them'],
+];
+$('quickPrompts').append(...QUICK.map(([l, m]) => h('button', { class: 'quick-btn', onclick: () => sendQuick(m) }, l)));
+$('sendBtn').addEventListener('click', sendMessage);
+$('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+$('chatInput').addEventListener('input', e => autoResize(e.target));
+$('connBtn').addEventListener('click', e => { e.stopPropagation(); toggleConnMenu(); });
+document.addEventListener('click', e => { if (!$('connMenu').hidden && !e.target.closest('.conn-switch')) toggleConnMenu(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { toggleConnMenu(false); if (!$('modal').querySelector('.steps')) closeModal(); } });
+$('refreshBtn').addEventListener('click', async () => { await refreshStatus(); await refreshNetwork(); });
+$('clearBtn').addEventListener('click', resetChat);
+$('settingsBtn').addEventListener('click', () => openSettings());
+
+async function init() {
+  const s = await refreshStatus();
+  if (!s) return;
+  if (!s.configured) openSettings(true);
+  else if (!s.has_connections) openConnections(null, true, true);
+  await refreshNetwork();
+  if (s.pending && s.pending.length) addApproval(s.pending);
+}
+init();
+setInterval(() => { if (!document.hidden) refreshStatus(); }, 30000);
+setInterval(() => { if (!document.hidden && status && status.connected) refreshNetwork(); }, 60000);
+</script>
+</body>
+</html>
