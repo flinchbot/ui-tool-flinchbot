@@ -1,0 +1,19 @@
+# Secrets and per-machine data - never commit these
+.env
+data/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local leftovers
+_backup*/
+UnifiOptimizer/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
