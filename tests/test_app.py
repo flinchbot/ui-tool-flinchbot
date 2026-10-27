@@ -1,0 +1,422 @@
+"""
+End-to-end tests against a fake UniFi console and a fake Anthropic API.
+Nothing real is contacted.
+
+Run from the project folder:
+    .venv\\Scripts\\python -m unittest discover -s tests -v      (Windows)
+    python -m unittest discover -s tests -v                     (anywhere)
+"""
+
+import http.client
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import types
+import unittest
+from http.server import ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "backend"))
+sys.path.insert(0, HERE)
+
+import config_store as cfg          # noqa: E402
+
+TMP = tempfile.mkdtemp(prefix="unifi-claude-test-")
+cfg.ENV_PATH = os.path.join(TMP, ".env")
+cfg.DATA_DIR = os.path.join(TMP, "data")
+cfg.PROFILES_PATH = os.path.join(cfg.DATA_DIR, "connections.json")
+cfg.SECRETS_PATH = os.path.join(cfg.DATA_DIR, "secrets.json")
+cfg._keyring = lambda: None          # use the file fallback; never touch a real keychain
+for k in cfg.DEFAULTS:
+    os.environ.pop(k, None)
+
+import agent as agent_mod           # noqa: E402
+import server as srv                # noqa: E402
+from unifi_client import UniFiClient, UniFiError, test_connection  # noqa: E402
+
+try:
+    from mock_unifi import MockUniFi
+    MockUniFi(n_clients=0).stop()
+    HAVE_OPENSSL = True
+except Exception:
+    HAVE_OPENSSL = False
+
+
+def reset_store():
+    shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+    if os.path.exists(cfg.ENV_PATH):
+        os.remove(cfg.ENV_PATH)
+
+
+# ── fake Anthropic ────────────────────────────────────────────────────────────
+class _Block(types.SimpleNamespace):
+    def model_dump(self, exclude_none=True):
+        return dict(self.__dict__)
+
+
+def text(t):
+    return _Block(type="text", text=t)
+
+
+def tool(id_, name, inp):
+    return _Block(type="tool_use", id=id_, name=name, input=inp)
+
+
+class FakeAnthropic:
+    script = []          # list of lists of blocks, one per API call
+    received = []        # messages sent on each call
+
+    def __init__(self, api_key=None):
+        self.messages = self
+
+    def create(self, **kw):
+        FakeAnthropic.received.append(kw)
+        blocks = FakeAnthropic.script.pop(0)
+        stop = "tool_use" if any(b.type == "tool_use" for b in blocks) else "end_turn"
+        return types.SimpleNamespace(content=blocks, stop_reason=stop)
+
+
+agent_mod.Anthropic = FakeAnthropic
+
+
+# ── tests ─────────────────────────────────────────────────────────────────────
+class ConfigStoreTests(unittest.TestCase):
+    def setUp(self):
+        reset_store()
+
+    def test_env_roundtrip_preserves_comments_and_quotes(self):
+        with open(cfg.ENV_PATH, "w") as f:
+            f.write("# my comment\nOTHER=keep me\nCLAUDE_MODEL=old\n")
+        cfg.write_env_file({"CLAUDE_MODEL": "claude-x", "ANTHROPIC_API_KEY": 'sk-ant-a"b c#d'})
+        content = open(cfg.ENV_PATH).read()
+        self.assertIn("# my comment", content)
+        vals = cfg.read_env_file()
+        self.assertEqual(vals["OTHER"], "keep me")
+        self.assertEqual(vals["CLAUDE_MODEL"], "claude-x")
+        self.assertEqual(vals["ANTHROPIC_API_KEY"], 'sk-ant-a"b c#d')
+
+    def test_env_var_overrides_file(self):
+        cfg.write_env_file({"CLAUDE_MODEL": "from-file"})
+        os.environ["CLAUDE_MODEL"] = "from-env"
+        try:
+            self.assertEqual(cfg.get_setting("CLAUDE_MODEL"), "from-env")
+            self.assertEqual(cfg.env_overrides(), ["CLAUDE_MODEL"])
+        finally:
+            del os.environ["CLAUDE_MODEL"]
+
+    def test_profile_host_parsing(self):
+        p = cfg.clean_profile({"host": "https://192.168.1.1:8443/", "username": "u"})
+        self.assertEqual((p["host"], p["port"]), ("192.168.1.1", 8443))
+        p = cfg.clean_profile({"host": "fe80::1", "username": "u"})
+        self.assertEqual((p["host"], p["port"]), ("fe80::1", 443))
+        p = cfg.clean_profile({"host": "[fd00::1]:11443", "username": "u"})
+        self.assertEqual((p["host"], p["port"]), ("fd00::1", 11443))
+        with self.assertRaises(ValueError):
+            cfg.clean_profile({"host": "10.0.0.1"})       # password auth needs username
+
+    def test_profiles_and_secrets(self):
+        a = cfg.upsert_profile({"name": "Home", "host": "10.0.0.1", "username": "u"}, "pw1")
+        b = cfg.upsert_profile({"name": "Venue", "host": "10.9.0.1", "auth": "apikey"}, "key1")
+        self.assertEqual(cfg.active_profile()["id"], a["id"])          # first one becomes active
+        self.assertEqual(cfg.get_secret(b["id"]), "key1")
+        self.assertNotIn("pw1", open(cfg.PROFILES_PATH).read())        # secrets never in profiles file
+        with self.assertRaises(ValueError):
+            cfg.upsert_profile({"id": a["id"], "auth": "apikey"})     # auth change needs new secret
+        cfg.upsert_profile({"id": a["id"], "fingerprint": "ff"})
+        cfg.upsert_profile({"id": a["id"], "host": "10.0.0.2"})        # address change drops the pin
+        self.assertNotIn("fingerprint", cfg.get_profile(a["id"]))
+        cfg.delete_profile(a["id"])
+        self.assertEqual(cfg.active_profile()["id"], b["id"])
+        self.assertIsNone(cfg.get_secret(a["id"]))
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "openssl needed for the mock console")
+class UniFiClientTests(unittest.TestCase):
+    def setUp(self):
+        self.mocks = []
+
+    def tearDown(self):
+        for m in self.mocks:
+            m.stop()
+
+    def mock(self, **kw):
+        m = MockUniFi(**kw)
+        self.mocks.append(m)
+        return m
+
+    def prof(self, m, **kw):
+        return dict({"host": "127.0.0.1", "port": m.port, "username": "claude", "site": "default",
+                     "auth": "password"}, **kw)
+
+    def test_detects_unifi_os(self):
+        m = self.mock(mode="unifi_os")
+        r = test_connection(self.prof(m), "pw")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["console_type"], "unifi_os")
+        self.assertEqual(len(r["fingerprint"]), 64)
+        self.assertEqual([s["name"] for s in r["sites"]], ["default", "ab12cd"])
+
+    def test_detects_standalone(self):
+        m = self.mock(mode="standalone")
+        r = test_connection(self.prof(m), "pw")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["console_type"], "standalone")
+
+    def test_wrong_password(self):
+        m = self.mock()
+        r = test_connection(self.prof(m), "nope")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["kind"], "auth")
+        self.assertIn("LOCAL admin", r["error"])
+
+    def test_api_key(self):
+        m = self.mock(api_key="K123")
+        self.assertTrue(test_connection(self.prof(m, auth="apikey"), "K123")["ok"])
+        r = test_connection(self.prof(m, auth="apikey"), "wrong")
+        self.assertFalse(r["ok"])
+        self.assertIn("API key", r["error"])
+
+    def test_unreachable_is_friendly_and_fast(self):
+        r = test_connection({"host": "127.0.0.1", "port": 1, "username": "u", "auth": "password"}, "x")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["kind"], "unreachable")
+        self.assertIn("refused", r["error"])
+
+    def test_pinned_certificate_mismatch_blocks(self):
+        m = self.mock()
+        c = UniFiClient(self.prof(m, console_type="unifi_os", fingerprint="00" * 32), "pw")
+        with self.assertRaises(UniFiError) as cm:
+            c.get_health()
+        self.assertEqual(cm.exception.kind, "cert")
+        # right pin works, and test_connection reports a change against a stale pin
+        good = test_connection(self.prof(m), "pw")["fingerprint"]
+        UniFiClient(self.prof(m, console_type="unifi_os", fingerprint=good), "pw").get_health()
+        self.assertTrue(test_connection(self.prof(m, fingerprint="11" * 32), "pw")["cert_changed"])
+
+    def test_relogin_after_session_expiry(self):
+        m = self.mock()
+        c = UniFiClient(self.prof(m, console_type="unifi_os"), "pw")
+        c.get_health()
+        m.expire_sessions()                         # console rebooted / session timed out
+        self.assertEqual(c.get_health()[0]["subsystem"], "wan")
+        logins = [x for x in m.calls if x[1] == "/api/auth/login"]
+        self.assertEqual(len(logins), 2)
+
+    def test_events_v2_path(self):
+        m = self.mock(mode="standalone")
+        c = UniFiClient(self.prof(m, console_type="standalone"), "pw")
+        self.assertEqual(c.get_events(limit=5)[0]["key"], "WAN_DOWN")
+        self.assertTrue(any(p == "/v2/api/site/default/system-log/all" for _, p, _ in m.calls))
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "openssl needed for the mock console")
+class AgentTests(unittest.TestCase):
+    def setUp(self):
+        self.m = MockUniFi(n_clients=2000)
+        self.client = UniFiClient({"host": "127.0.0.1", "port": self.m.port, "username": "claude",
+                                   "auth": "password", "console_type": "unifi_os"}, "pw")
+        self.agent = agent_mod.Agent(lambda: self.client,
+                                     lambda: {"api_key": "sk-ant-test", "model": "m", "max_rounds": 5},
+                                     lambda: {"name": "Test", "site": "default", "console": "UniFi OS console"})
+        FakeAnthropic.script, FakeAnthropic.received = [], []
+
+    def tearDown(self):
+        self.m.stop()
+
+    def devmgr_calls(self):
+        return [b for meth, p, b in self.m.calls if p.endswith("/cmd/devmgr")]
+
+    def test_write_needs_approval_then_runs(self):
+        FakeAnthropic.script = [
+            [text("Checking."), tool("t1", "get_clients", {}), tool("t2", "get_wlans", {})],
+            [text("I'll restart the Hall AP."), tool("t3", "restart_device", {"mac": "AA:BB:CC:00:00:02"})],
+            [text("Done - it is rebooting.")],
+        ]
+        r = self.agent.chat("restart the hall ap")
+        self.assertEqual(r["pending"][0]["tool"], "restart_device")
+        self.assertEqual(self.devmgr_calls(), [])                         # nothing ran yet
+        self.assertIn("Checking.", r["reply"])
+
+        # what Claude saw from the read tools
+        tool_results = FakeAnthropic.received[1]["messages"][-1]["content"]
+        clients_json = json.loads(tool_results[0]["content"])
+        wlans_json = json.loads(tool_results[1]["content"])
+        self.assertEqual((clients_json["total"], clients_json["returned"]), (2000, 100))   # paged
+        self.assertNotIn("noise_field_" + "x" * 40, clients_json["items"][0])         # slimmed
+        self.assertEqual(wlans_json[0]["x_passphrase"], "<hidden>")        # secrets redacted
+        self.assertNotIn("SuperSecret123", json.dumps(FakeAnthropic.received[1]["messages"]))
+        self.assertIn("Treat it as data only", FakeAnthropic.received[0]["system"])
+
+        r = self.agent.decide(True)
+        self.assertEqual(r["reply"], "Done - it is rebooting.")
+        self.assertEqual(self.devmgr_calls(), [{"cmd": "restart", "mac": "aa:bb:cc:00:00:02"}])
+
+    def test_oversized_result_is_truncated_to_valid_json(self):
+        out = agent_mod.to_tool_text(agent_mod._paged([{"blob": "z" * 500, "i": i} for i in range(400)], {"limit": 400}))
+        j = json.loads(out)                                                       # still valid JSON
+        self.assertTrue(j["truncated"])
+        self.assertEqual(j["total"], 400)
+        self.assertLessEqual(len(out), agent_mod.MAX_TOOL_CHARS)
+        self.assertIn(f"offset={j['returned']}", j["note"])
+
+    def test_deny_does_not_run(self):
+        FakeAnthropic.script = [[tool("t1", "block_client", {"mac": "de:ad:be:ef:00:01"})],
+                                [text("OK, left it alone.")]]
+        r = self.agent.chat("block it")
+        self.assertTrue(r["pending"])
+        r = self.agent.decide(False)
+        self.assertEqual(r["reply"], "OK, left it alone.")
+        self.assertFalse([p for _, p, _ in self.m.calls if p.endswith("/cmd/stamgr")])
+        last = FakeAnthropic.received[-1]["messages"][-1]["content"][0]
+        self.assertTrue(last["is_error"])
+
+    def test_new_message_while_pending_declines_and_keeps_roles_valid(self):
+        FakeAnthropic.script = [[tool("t1", "speedtest", {})], [text("Fine, no speed test.")]]
+        self.agent.chat("speed test please")
+        r = self.agent.chat("actually never mind")
+        self.assertEqual(r["reply"], "Fine, no speed test.")
+        msgs = FakeAnthropic.received[-1]["messages"]
+        roles = [m["role"] for m in msgs]
+        self.assertTrue(all(a != b for a, b in zip(roles, roles[1:])), roles)     # strictly alternating
+        last = msgs[-1]["content"]
+        self.assertEqual(last[0]["type"], "tool_result")                           # results first
+        self.assertEqual(last[-1], {"type": "text", "text": "actually never mind"})
+
+    def test_round_cap(self):
+        FakeAnthropic.script = [[tool(f"t{i}", "get_health", {})] for i in range(5)]
+        r = self.agent.chat("loop forever")
+        self.assertIn("Stopped after 5 rounds", r["reply"])
+
+    def test_api_failure_lets_user_resend(self):
+        def boom(**kw):
+            raise RuntimeError("network down")
+        FakeAnthropic.script = []
+        orig = FakeAnthropic.create
+        FakeAnthropic.create = lambda self, **kw: boom()
+        try:
+            with self.assertRaises(RuntimeError):
+                self.agent.chat("hello")
+        finally:
+            FakeAnthropic.create = orig
+        self.assertEqual(self.agent.history, [])                                   # rolled back
+
+    def test_history_trim_keeps_tool_pairs(self):
+        a = self.agent
+        for i in range(60):
+            a.history += [{"role": "user", "content": f"q{i}"},
+                          {"role": "assistant", "content": [{"type": "tool_use", "id": f"x{i}", "name": "get_health", "input": {}}]},
+                          {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"x{i}", "content": "y" * 9000}]},
+                          {"role": "assistant", "content": [{"type": "text", "text": "a"}]}]
+        a._trim()
+        self.assertLessEqual(len(a.history), agent_mod.MAX_MESSAGES)
+        self.assertEqual(a.history[0]["role"], "user")
+        self.assertIsInstance(a.history[0]["content"], str)
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "openssl needed for the mock console")
+class ServerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        reset_store()
+        cls.m = MockUniFi()
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+        cls.port = cls.httpd.server_address[1]
+        srv.HTTP_PORT = cls.port
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.m.stop()
+
+    def req(self, method, path, body=None, token=True, host=None, ctype="application/json", origin=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
+        headers = {"Host": host or f"127.0.0.1:{self.port}"}
+        if token:
+            headers["X-App-Token"] = srv.APP_TOKEN
+        if body is not None:
+            headers["Content-Type"] = ctype
+        if origin:
+            headers["Origin"] = origin
+        c.request(method, path, json.dumps(body) if body is not None else None, headers)
+        r = c.getresponse()
+        raw = r.read()
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = raw.decode()
+        return r.status, data, r
+
+    def test_1_page_has_token_and_security_headers(self):
+        s, page, r = self.req("GET", "/", token=False)
+        self.assertEqual(s, 200)
+        self.assertIn(srv.APP_TOKEN, page)
+        self.assertEqual(r.getheader("X-Frame-Options"), "DENY")
+        self.assertIn("frame-ancestors 'none'", r.getheader("Content-Security-Policy"))
+        self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+
+    def test_2_gatekeeping(self):
+        self.assertEqual(self.req("GET", "/api/status", token=False)[0], 401)
+        self.assertEqual(self.req("GET", "/api/status", host=f"evil.example:{self.port}")[0], 403)   # DNS rebinding
+        self.assertEqual(self.req("GET", "/", token=False, host=f"evil.example:{self.port}")[0], 403)
+        self.assertEqual(self.req("POST", "/api/reset", {}, origin="https://evil.example")[0], 403)
+        self.assertEqual(self.req("POST", "/api/reset", {}, ctype="text/plain")[0], 415)
+        self.assertEqual(self.req("GET", "/api/status", host=f"localhost:{self.port}")[0], 200)
+
+    def test_3_setup_flow(self):
+        s, st, _ = self.req("GET", "/api/status")
+        self.assertFalse(st["configured"])
+        self.assertIsNone(st["active"])
+
+        s, d, _ = self.req("POST", "/api/settings", {"anthropic_api_key": "not-a-key"})
+        self.assertEqual(s, 400)
+        s, d, _ = self.req("POST", "/api/settings", {"anthropic_api_key": "sk-ant-test123456", "model": "claude-x"})
+        self.assertEqual(s, 200, d)
+        self.assertEqual(cfg.read_env_file()["ANTHROPIC_API_KEY"], "sk-ant-test123456")
+        self.assertEqual(d["anthropic_key_hint"], "…3456")
+
+        conn = {"name": "Home", "host": "127.0.0.1", "port": self.m.port, "auth": "password",
+                "username": "claude", "secret": "pw"}
+        s, t, _ = self.req("POST", "/api/connections/test", conn)
+        self.assertTrue(t["ok"], t)
+        s, saved, _ = self.req("POST", "/api/connections",
+                               dict(conn, console_type=t["console_type"], fingerprint=t["fingerprint"]))
+        self.assertEqual(s, 200, saved)
+        self.assertNotIn("pw", json.dumps(saved["profiles"]))
+
+        s, st, _ = self.req("GET", "/api/status")
+        self.assertTrue(st["configured"])
+        self.assertTrue(st["connected"], st)
+
+        s, net, _ = self.req("GET", "/api/network")
+        self.assertEqual(s, 200, net)
+        self.assertEqual(net["device_count"], 2)
+        self.assertEqual(net["errors"], {})
+
+        # chat through the HTTP API with a write that needs approval
+        FakeAnthropic.script = [[text("Locating."), tool("t1", "locate_device", {"mac": "aa:bb:cc:00:00:01"})],
+                                [text("The Gateway LED is blinking.")]]
+        s, r, _ = self.req("POST", "/api/chat", {"message": "where is the gateway?"})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["pending"][0]["label"], "Locate (blink LED) on device")
+        s, st, _ = self.req("GET", "/api/status")
+        self.assertTrue(st["pending"])
+        s, r, _ = self.req("POST", "/api/chat/decide", {"approve": True})
+        self.assertEqual(r["reply"], "The Gateway LED is blinking.")
+
+        # wrong saved password -> friendly error, not a crash
+        sid = saved["saved_id"]
+        self.req("POST", "/api/connections", {"id": sid, "secret": "bad"})
+        s, st, _ = self.req("GET", "/api/status")
+        self.assertFalse(st["connected"])
+        self.assertEqual(st["error_kind"], "auth")
+
+
+if __name__ == "__main__":
+    try:
+        unittest.main(verbosity=2)
+    finally:
+        shutil.rmtree(TMP, ignore_errors=True)
