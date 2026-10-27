@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UniFi × flinchbot — Setup guide</title>
+<link rel="icon" href="data:image/png;base64,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">
+<!-- Generated from SETUP.md by tools/build_setup_html.py. Edit SETUP.md, then rebuild. -->
+<style>
+  :root { --bg:#fff; --fg:#1a1d24; --muted:#667085; --line:#e4e7ec; --card:#f7f8fa; --accent:#d6283f;
+          --link:#0b7fa5; --warn-bg:#fff4ed; --warn-line:#f79009; --code:#f2f4f7; }
+  @media (prefers-color-scheme:dark) { :root { --bg:#0d1016; --fg:#e2e8f0; --muted:#8b95a7; --line:#252a36; --card:#141821;
+          --accent:#ff6b81; --link:#3cc8f0; --warn-bg:#2a1a12; --warn-line:#ff9a5c; --code:#1b202b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:28px 20px 80px; }
+  header { display:flex; align-items:center; gap:16px; margin-bottom:8px; }
+  header img { width:64px; height:64px; border-radius:12px; }
+  h1 { font-size:28px; margin:0; line-height:1.2; } h1 span { color:var(--accent); }
+  .sub { color:var(--muted); font-size:14px; }
+  nav { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 18px; margin:20px 0 8px; }
+  nav b { font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); }
+  nav ol { margin:6px 0 0; padding-left:20px; columns:2; column-gap:28px; font-size:14px; }
+  h2 { font-size:21px; margin:38px 0 10px; padding-top:12px; border-top:1px solid var(--line); scroll-margin-top:12px; }
+  a { color:var(--link); }
+  table { border-collapse:collapse; width:100%; margin:12px 0; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--card); }
+  code { font:13px ui-monospace,Consolas,monospace; background:var(--code); padding:1px 6px; border-radius:4px; }
+  pre { background:var(--code); padding:12px 14px; border-radius:8px; overflow-x:auto; } pre code { padding:0; background:none; }
+  blockquote { margin:14px 0; padding:10px 16px; border-left:4px solid var(--link); background:var(--card); border-radius:0 8px 8px 0; }
+  blockquote.warn { border-left-color:var(--warn-line); background:var(--warn-bg); }
+  blockquote p { margin:6px 0; }
+  hr { border:0; border-top:1px solid var(--line); margin:24px 0; }
+  li { margin:3px 0; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; }
+  @media (max-width:640px) { nav ol { columns:1; } }
+  @media print { nav { display:none; } body { font-size:12px; } h2 { break-after:avoid; } table, blockquote { break-inside:avoid; } }
+</style></head>
+<body><main>
+<header><img src="data:image/png;base64,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" alt="flinchbot robot">
+<div><h1>UniFi <span>×</span> flinchbot</h1><div class="sub">Setup guide · AI-powered UniFi assistant (Claude or ChatGPT)</div></div></header>
+<nav><b>Contents</b><ol><li><a href="#s-1-install-python-once-per-pc">1. Install Python (once per PC)</a></li><li><a href="#s-2-get-an-ai-api-key-once-claude-or-chatgpt">2. Get an AI API key (once): Claude or ChatGPT</a></li><li><a href="#s-3-create-a-local-only-admin-account-for-the-app-required-once-per-network">3. Create a local-only admin account for the app (required, once per network)</a></li><li><a href="#s-4-do-you-need-to-enable-ssh-on-the-unifi-gear-no">4. Do you need to enable SSH on the UniFi gear? No.</a></li><li><a href="#s-5-get-the-app-onto-the-pc">5. Get the app onto the PC</a></li><li><a href="#s-6-start-it">6. Start it</a></li><li><a href="#s-7-everyday-use">7. Everyday use</a></li><li><a href="#s-8-updating-the-app">8. Updating the app</a></li><li><a href="#s-9-where-your-information-is-stored-and-what-is-sent-where">9. Where your information is stored, and what is sent where</a></li><li><a href="#s-10-troubleshooting">10. Troubleshooting</a></li></ol></nav>
+<p>This guide assumes no programming experience. Plan on about 20 minutes the first time.</p>
+<p><strong>What you'll end up with:</strong> a small app on your Windows PC. You double-click it, it opens in your web browser, and you ask an AI questions about a UniFi network, e.g. "why is the Wi-Fi slow in the hall?". The AI can be <strong>Claude</strong> (Anthropic) or <strong>ChatGPT</strong> (OpenAI). It can also make changes, but only after you click <strong>Approve</strong>.</p>
+<blockquote>
+<p>This guide is also inside the app: click the robot logo (top left) → <strong>📖 Setup guide</strong>.</p>
+</blockquote>
+<p><strong>What you need</strong></p>
+<table>
+<thead>
+<tr>
+<th>You need</th>
+<th>Why / notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A Windows 10 or 11 PC</td>
+<td>It must be able to reach the UniFi console: plugged into that network, on its Wi-Fi, or connected by VPN.</td>
+</tr>
+<tr>
+<td>A <strong>local-only admin account</strong> on the UniFi console</td>
+<td><strong>Required.</strong> Your normal UI.com sign-in won't work. Step 3 explains why and how to create one. You need admin access to the console once, to create it.</td>
+</tr>
+<tr>
+<td>An API account with credit at <strong>Anthropic</strong> (Claude) <strong>or OpenAI</strong> (ChatGPT)</td>
+<td>This is how the AI is paid for (step 2). It's separate from a Claude.ai or ChatGPT chat subscription.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="s-1-install-python-once-per-pc">1. Install Python (once per PC)</h2>
+<p>Python is the language the app is written in. You install it once and never have to open it.</p>
+<ol>
+<li>Go to <strong><a href="https://www.python.org/downloads/" target="_blank" rel="noopener">https://www.python.org/downloads/</a></strong>. Download the Windows installer for the newest version (3.10 or newer is required).<ul>
+<li>On current releases, the download is the <strong>Python install manager</strong>. Run it, accept the defaults, and when it asks whether to run its configuration check, say <strong>yes</strong>.</li>
+<li>If you get the older-style installer instead, <strong>tick "Add python.exe to PATH"</strong> on the first screen before clicking <em>Install Now</em>.</li>
+</ul>
+</li>
+<li>Check it worked. Press <strong>Win + R</strong>, type <code>cmd</code>, press Enter, and in the black window type:
+   <code>py --version</code>
+   You should see something like <code>Python 3.14.3</code>.</li>
+</ol>
+<blockquote>
+<p><strong>"python" opens the Microsoft Store instead?</strong> Windows ships a fake <code>python</code> shortcut. Open <strong>Settings → Apps → Advanced app settings → App execution aliases</strong> and switch off the two <em>App Installer python</em> entries. <code>start.bat</code> tries the <code>py</code> command first, so you usually won't hit this.</p>
+</blockquote>
+<h2 id="s-2-get-an-ai-api-key-once-claude-or-chatgpt">2. Get an AI API key (once): Claude or ChatGPT</h2>
+<p>Pick one. You can add the other later and switch in Settings. Both work the same way in the app: same tools, same approval step, same reports.</p>
+<p><strong>Option A: Claude (Anthropic)</strong></p>
+<ol>
+<li>Sign in at <strong><a href="https://console.anthropic.com" target="_blank" rel="noopener">https://console.anthropic.com</a></strong>.</li>
+<li>Under <strong>Billing</strong>, add some credit.</li>
+<li>Go to <strong>API Keys → Create Key</strong> and give it a name like <code>UniFi app</code>.</li>
+<li><strong>Copy the key now.</strong> It starts with <code>sk-ant-</code> and is shown only once. You'll paste it into the app in step 6.</li>
+</ol>
+<p><strong>Option B: ChatGPT (OpenAI)</strong></p>
+<ol>
+<li>Sign in at <strong><a href="https://platform.openai.com" target="_blank" rel="noopener">https://platform.openai.com</a></strong>. This is OpenAI's developer site, not chatgpt.com.</li>
+<li>Under <strong>Billing</strong>, add credit. <strong>A ChatGPT Plus/Pro subscription does not include API usage;</strong> it's billed separately.</li>
+<li>Go to <strong>API keys → Create new secret key</strong> and give it a name like <code>UniFi app</code>.</li>
+<li><strong>Copy the key now.</strong> It starts with <code>sk-</code> and is shown only once.</li>
+</ol>
+<p>Treat any API key like a credit card number. Anyone who has it can spend your credit. If it ever leaks, delete it on the same page and create a new one.</p>
+<p><strong>Which model?</strong> The app lists the models your key can use, straight from the provider.</p>
+<table>
+<thead>
+<tr>
+<th>AI</th>
+<th>Good default</th>
+<th>Smarter, costs more</th>
+<th>Cheaper, less thorough</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claude</td>
+<td>Claude Sonnet 5.5</td>
+<td>Claude Opus 5.5, Claude Fable 5.1</td>
+<td>Claude Haiku 5.5</td>
+</tr>
+<tr>
+<td>ChatGPT</td>
+<td>GPT-6.1 Sol</td>
+<td>GPT-6 Astra</td>
+<td>GPT-6.1 Terra, GPT-6 Luna</td>
+</tr>
+</tbody>
+</table>
+<p>The two defaults cost about the same, roughly 5–15¢ for a typical health check; prices change, so check each provider's pricing page. The cheapest models are fine for quick lookups like "how many clients?" but tend to miss things in real troubleshooting.</p>
+<h2 id="s-3-create-a-local-only-admin-account-for-the-app-required-once-per-network">3. Create a local-only admin account for the app (required, once per network)</h2>
+<blockquote class="warn">
+<p>⚠️ <strong>The app can only sign in with a LOCAL account on the console.</strong>
+The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>not</strong> work. It uses two-factor sign-in, and apps can't answer the code prompt. If you try it anyway, the app tells you so; UniFi's own wording is <em>"MFA token required to authenticate to SSO"</em> (HTTP 499).</p>
+<p>A local account exists only on that one console and has no two-factor prompt, which is why it works. It's also safer: you can see what the app did, change its password, or delete it without touching your own login.</p>
+<p>Every network you add needs its own local account, created on that network's console.</p>
+</blockquote>
+<ol>
+<li>In a browser, open the console by its <strong>IP address</strong>, e.g. <code>https://192.168.1.1</code>. Use the console's own address, not unifi.ui.com.<ul>
+<li>A security warning is normal: UniFi uses a self-signed certificate. Click <strong>Advanced → Continue</strong>.</li>
+</ul>
+</li>
+<li>Go to <strong>Admins &amp; Users</strong> (sometimes <strong>Settings → Admins &amp; Users</strong>) and choose <strong>Create New / Add Admin</strong>.</li>
+<li>Fill it in:<ul>
+<li><strong>Restrict to local access only:</strong> ✅ <strong>must be ticked.</strong> This is what makes it a local account. If you don't see this option, you're probably on unifi.ui.com; go back to the console's own IP address.</li>
+<li><strong>Username / password:</strong> for example <code>unifi-assistant</code> and a long random password. Use a plain username, not an email address. An email address usually means a cloud account.</li>
+<li><strong>Role:</strong><ul>
+<li><strong>Full Management</strong> (or <em>Site Admin</em>) if you want the AI to be able to make changes after your approval.</li>
+<li><strong>View Only</strong> if you only ever want answers and never changes. Any change the AI tries will simply be refused.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>Click <strong>Create</strong>.</li>
+<li>Check the new account in the admin list. It should show as <strong>local</strong> (local access only), not as a UI.com account.</li>
+</ol>
+<p><strong>Alternative: a UniFi API key instead of the local account.</strong> Newer UniFi Network versions can create API keys under <strong>Settings → Control Plane → Integrations</strong> (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's <strong>Test</strong> button tells you whether the key works on your console. If it doesn't, use the local username and password instead.</p>
+<p><strong>Note the console's address and port:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Console type</th>
+<th>Port</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>UDM, UDM-Pro/SE, UDR, UCG (Cloud Gateway), Cloud Key Gen2+, UX</td>
+<td><strong>443</strong></td>
+</tr>
+<tr>
+<td>Self-hosted UniFi Network Application (Windows/Linux/Docker)</td>
+<td><strong>8443</strong></td>
+</tr>
+<tr>
+<td>UniFi OS Server</td>
+<td><strong>11443</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The app works out which type it is talking to automatically.</p>
+<h2 id="s-4-do-you-need-to-enable-ssh-on-the-unifi-gear-no">4. Do you need to enable SSH on the UniFi gear? <strong>No.</strong></h2>
+<p>This app talks to UniFi through the same secure web connection the UniFi web page uses. It never uses SSH.</p>
+<p>Leave SSH turned off. SSH gives full root control of the console, so it's one less password that can leak. If you previously turned it on for this app, you can turn it off again under <strong>Settings → Control Plane → Console</strong> (wording varies).</p>
+<h2 id="s-5-get-the-app-onto-the-pc">5. Get the app onto the PC</h2>
+<p>Use either of these:</p>
+<ul>
+<li><strong>Download:</strong> on the GitHub page click <strong>Code → Download ZIP</strong>, then unzip it somewhere permanent, e.g. <code>C:\Apps\unifi-flinchbot</code>. Avoid running it from inside the ZIP or from Downloads.</li>
+<li><strong>Git</strong> (if you use it): <code>git clone https://github.com/flinchbot/ui-tool-claude.git</code></li>
+</ul>
+<p>The folder is self-contained, so you can move it or copy it to another PC later.</p>
+<h2 id="s-6-start-it">6. Start it</h2>
+<ol>
+<li>Double-click <strong><code>start.bat</code></strong>.<ul>
+<li>The first time, it creates a private Python environment (a <code>.venv</code> folder) and downloads the packages the app needs: the Anthropic and OpenAI connectors and a password-storage helper. This needs internet and takes about a minute.</li>
+<li>Windows SmartScreen may warn about running a downloaded file. Click <strong>More info → Run anyway</strong>.</li>
+<li>If Windows Firewall asks about Python, you can click <strong>Cancel</strong>. The app only listens on this PC (127.0.0.1) and doesn't need firewall access.</li>
+</ul>
+</li>
+<li>
+<p>Your browser opens at <code>http://127.0.0.1:8080/</code> and shows a <strong>Welcome</strong> screen:</p>
+<ul>
+<li>
+<p><strong>Step 1, Choose your AI:</strong></p>
+<ol>
+<li>Pick <strong>Claude</strong> or <strong>ChatGPT</strong>.</li>
+<li>Paste the key and click <strong>Test key &amp; load models</strong>.</li>
+<li>Pick a model, then <strong>Save &amp; continue</strong>.</li>
+</ol>
+<p>This writes the <code>.env</code> settings file for you; you never need to edit it by hand.</p>
+</li>
+<li>
+<p><strong>Step 2, Your UniFi console:</strong> enter the following, then click <strong>Test, save &amp; finish</strong>:</p>
+<ul>
+<li>a name (e.g. <code>Home</code>)</li>
+<li>the console's IP address</li>
+<li>the port</li>
+<li>the local username and password from step 3</li>
+</ul>
+<p><strong>Test</strong> also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Keep the black <code>start.bat</code> window open while you use the app. Close it (or press <strong>Ctrl+C</strong> in it) to stop the app.</p>
+</li>
+</ol>
+<h2 id="s-7-everyday-use">7. Everyday use</h2>
+<ul>
+<li><strong>Ask questions</strong> in the chat, or click a quick prompt such as <em>Health check</em>.</li>
+<li><strong>Changes:</strong> when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click <strong>Approve</strong>. <strong>Deny</strong> cancels it.</li>
+<li><strong>Another network:</strong> click the connection name at the top → <strong>Add a connection…</strong>. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.</li>
+<li>
+<p><strong>⚙ Settings:</strong></p>
+<ul>
+<li>switch between <strong>Claude</strong> and <strong>ChatGPT</strong> (switching starts a new conversation)</li>
+<li>change API keys or models</li>
+<li>change the app's port</li>
+</ul>
+<p>The model list is live from the provider. If your chosen model is ever deprecated, a banner tells you its retirement date.</p>
+</li>
+<li>
+<p><strong>📋 Action report:</strong> the AI reviews the whole network and lists what to fix, most urgent first. It's read-only, takes about 1–3 minutes, and costs roughly as much as a few questions.</p>
+<ul>
+<li><strong>⤓ Checklist web page:</strong> open it in any browser and tick items off as you fix them. Ticks are remembered in that browser, and <strong>Print / PDF</strong> works.</li>
+<li><strong>⤓ Markdown:</strong> for notes apps. Obsidian, VS Code and GitHub show the <code>[ ]</code> boxes as clickable checkboxes.</li>
+<li><strong>↻ Regenerate</strong> gives a fresh snapshot with an empty checklist, which is handy to confirm your fixes took.</li>
+</ul>
+</li>
+<li><strong>⤓ Export</strong> (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.</li>
+<li><strong>About:</strong> click the robot logo for the version, the AI in use, and this guide.</li>
+</ul>
+<h2 id="s-8-updating-the-app">8. Updating the app</h2>
+<ul>
+<li><strong>Downloaded ZIP:</strong><ol>
+<li>Download the new ZIP.</li>
+<li>Unzip it over the old folder (or into a new one).</li>
+<li>Copy across your <code>.env</code> file and <code>data</code> folder.</li>
+</ol>
+</li>
+<li><strong>Git:</strong> run <code>git pull</code> in the app folder.</li>
+</ul>
+<p>Your settings, connections and passwords aren't touched by an update. <code>start.bat</code> notices new requirements and installs them on the next start.</p>
+<h2 id="s-9-where-your-information-is-stored-and-what-is-sent-where">9. Where your information is stored, and what is sent where</h2>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AI choice, API key(s), models, port</td>
+<td><code>.env</code> file in the app folder</td>
+</tr>
+<tr>
+<td>Connection details (name, address, port, site, username)</td>
+<td><code>data\connections.json</code></td>
+</tr>
+<tr>
+<td>UniFi passwords / API keys</td>
+<td>Windows Credential Manager (Control Panel → Credential Manager → Windows Credentials → entries named <code>unifi-claude</code>, the app's original name, kept so saved passwords keep working)</td>
+</tr>
+</tbody>
+</table>
+<p>If Credential Manager isn't available, passwords fall back to <code>data\secrets.json</code> and the app shows a warning.</p>
+<p><code>.env</code> and <code>data\</code> are excluded from git, so they're never uploaded to GitHub. Don't email or share them.</p>
+<p><strong>What leaves this PC:</strong></p>
+<ul>
+<li>When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.</li>
+<li>Wi-Fi passwords and other secret fields are <strong>removed first</strong>.</li>
+<li>ChatGPT requests are sent with OpenAI's "don't store" option.</li>
+<li>Nothing is sent anywhere else, and the app can't be reached from other computers.</li>
+</ul>
+<p><strong>Moving to a new PC:</strong></p>
+<ol>
+<li>Copy the folder.</li>
+<li>Re-enter the UniFi passwords. Credential Manager entries don't travel with the folder.</li>
+<li>Skip copying <code>.venv</code>; <code>start.bat</code> rebuilds it.</li>
+</ol>
+<h2 id="s-10-troubleshooting">10. Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Message / symptom</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><em>"Python 3.10 or newer was not found"</em></td>
+<td>Redo step 1, then close and reopen the <code>start.bat</code> window.</td>
+</tr>
+<tr>
+<td><em>"Could not start on 127.0.0.1:8080"</em></td>
+<td>Another program uses port 8080. Run <code>start.bat --port 8090</code>, or change the port in Settings.</td>
+</tr>
+<tr>
+<td><em>"Timed out reaching https://…"</em></td>
+<td>This PC can't reach the console. Is it on that network or VPN? Can you open <code>https://&lt;console IP&gt;</code> in the browser?</td>
+</tr>
+<tr>
+<td><em>"refused the connection"</em></td>
+<td>Wrong port. See the port table in step 3.</td>
+</tr>
+<tr>
+<td><em>"UI.com cloud account with two-factor sign-in"</em> (UniFi's raw error: <em>HTTP 499, MFA token required</em>)</td>
+<td>You entered your own UI.com login. Create the separate <strong>local-only</strong> admin from step 3 and use that instead.</td>
+</tr>
+<tr>
+<td><em>"Login rejected"</em></td>
+<td>Check the username and password. The account must be <strong>local-only</strong> (step 3). Too many failed tries locks logins for a few minutes.</td>
+</tr>
+<tr>
+<td><em>"Permission denied … read-only"</em></td>
+<td>The UniFi account is <em>View Only</em>. Give it Full Management if you want changes to work.</td>
+</tr>
+<tr>
+<td><em>"rejected the API key"</em> (UniFi)</td>
+<td>That UniFi version doesn't accept API keys for this feature. Switch the connection to username + password.</td>
+</tr>
+<tr>
+<td><em>"DIFFERENT security certificate"</em></td>
+<td>The address now answers with a different console certificate. Typical causes: a factory reset, a replaced console, or being on a different network where that IP belongs to something else. If you're sure it's your console, open the connection and click <strong>Trust new certificate</strong>.</td>
+</tr>
+<tr>
+<td><em>"…rejected the API key"</em> / <em>"out of credits"</em> / <em>"no API credit"</em> (AI)</td>
+<td>Fix the key in Settings. Or add API credit at console.anthropic.com (Claude) or platform.openai.com → Billing (ChatGPT).</td>
+</tr>
+<tr>
+<td><em>"…model … wasn't found"</em> or a <em>deprecated</em> banner</td>
+<td>Open Settings and pick a current model from the list.</td>
+</tr>
+<tr>
+<td><em>"Reply hit the …-token output limit"</em></td>
+<td>Say "continue", ask a narrower question, or raise <code>MAX_OUTPUT_TOKENS</code> in <code>.env</code> (max 21000).</td>
+</tr>
+<tr>
+<td><em>"The app was restarted. Reload this page"</em></td>
+<td>Press F5. The page's security token changes each time the app starts.</td>
+</tr>
+<tr>
+<td>Firewall rules the AI creates don't seem to work</td>
+<td>Newer UniFi versions use <strong>Zone-Based Firewall</strong>. This app creates classic rules, which may not apply there. Check in the UniFi UI.</td>
+</tr>
+</tbody>
+</table>
+<p>Still stuck? Run the diagnostic and send its output to whoever is helping you. It contains no passwords.</p>
+<pre><code>.venv\Scripts\python backend\probe_events.py
+</code></pre>
+<footer>flinchbot · This page is generated from SETUP.md.</footer>
+</main></body></html>

@@ -1,8 +1,10 @@
-# UniFi × AI
+# UniFi × flinchbot
 
-A local web app for chatting with an AI — **Claude** (Anthropic) or **ChatGPT** (OpenAI) — about a Ubiquiti UniFi network. The AI reads live data from the console (devices, clients, Wi-Fi, alerts, logs, firewall, port forwards) and can make changes. Every change waits for you to click **Approve**.
+<img src="frontend/static/flinchbot-icon.png" alt="flinchbot" width="96" align="right">
 
-**New here? Read [SETUP.md](SETUP.md).** It walks through installing Python, getting an API key, and preparing the UniFi console. Quick start: double-click `start.bat`, and the app opens in your browser with a setup wizard.
+A local web app for chatting with **flinchbot**, an AI network assistant, about a Ubiquiti UniFi network. flinchbot is powered by your choice of **Claude** (Anthropic) or **ChatGPT** (OpenAI). It reads live data from the console (devices, clients, Wi-Fi, alerts, logs, firewall, port forwards) and can make changes. Every change waits for you to click **Approve**.
+
+**New here? Read [SETUP.md](SETUP.md)** (also as [SETUP.html](SETUP.html), and inside the app under the robot logo → *Setup guide*). It walks through installing Python, getting an API key, and preparing the UniFi console. Quick start: double-click `start.bat`, and the app opens in your browser with a setup wizard.
 
 ## Features
 
@@ -10,6 +12,7 @@ A local web app for chatting with an AI — **Claude** (Anthropic) or **ChatGPT*
 - **Setup and settings in the browser.** The first-run wizard and the ⚙ Settings screen write `.env` for you. Nothing needs editing by hand.
 - **Works with:** UniFi OS consoles (UDM/UDR/UCG/Cloud Key Gen2+), UniFi OS Server, and self-hosted Network Applications. The console type is auto-detected.
 - **Login methods:** a **local-only** console account (username/password), or a UniFi API key. UI.com cloud/SSO accounts with two-factor sign-in can't be used by apps; the app detects this and explains what to do.
+- **flinchbot, powered by Claude or ChatGPT.** In the chat the assistant is always *flinchbot*; About, exports and reports show which provider and model answered.
 - **Claude or ChatGPT.** Save an API key for either or both and switch in Settings. Both get the same tools, approval gate, redaction and reports. OpenAI calls are sent with `store=false`, so OpenAI doesn't keep the conversation.
 - **Write approval enforced in code.** The AI can request a change, but only the Approve button runs it.
 - **Secrets kept out of files:**
@@ -40,6 +43,9 @@ backend/unifi_client.py UniFi API client (UniFi OS + standalone, pinning, re-log
 backend/config_store.py .env + connection profiles + Credential Manager
 backend/probe_events.py diagnostic: which endpoints the active console answers
 frontend/index.html    the whole UI (no build step)
+frontend/static/       flinchbot icon, favicon and About artwork
+SETUP.md / SETUP.html  setup guide (HTML is generated: python tools/build_setup_html.py)
+tools/                 doc build script
 ```
 
 Not committed (see `.gitignore`):
@@ -58,9 +64,24 @@ Not committed (see `.gitignore`):
 ## Known limitations
 
 - **ChatGPT support is new.** It's built on OpenAI's documented Responses API and tested against a simulated API, but hasn't yet been run against the live OpenAI API.
-- **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it in GitHub settings is safe; GitHub redirects the old URL.
+- **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it (e.g. to `unifi-flinchbot`) in GitHub settings is safe; GitHub redirects the old URL.
 
 - **Unofficial UniFi API.** Most calls use the private Network API that the UniFi web UI itself uses. Ubiquiti can change it between versions. `probe_events.py` shows which endpoints a given console answers.
 - **Legacy firewall rules.** `create_firewall_rule` writes classic `LAN_IN` rules. On consoles using Zone-Based Firewall they may not apply.
 - **UniFi API keys.** Not every UniFi version accepts them on the private endpoints. The Test button reports this.
 - **Server-side chat history.** The conversation lives in the running app (one per app instance), not per browser tab.
+
+## Editing the docs
+
+`SETUP.md` is the source; `SETUP.html` is generated from it. After editing SETUP.md:
+
+```
+pip install markdown
+python tools/build_setup_html.py
+```
+
+Commit both files. The app serves the HTML guide at `/setup`.
+
+## Credits
+
+Robot artwork: the flinchbot linocut print.

@@ -127,7 +127,7 @@ def write_env_file(updates):
             with open(ENV_PATH, encoding="utf-8-sig") as f:
                 lines = f.read().splitlines()
         else:
-            lines = ["# UniFi x AI settings - created by the Settings screen.",
+            lines = ["# UniFi x flinchbot settings - created by the Settings screen.",
                      "# Keep this file private: it contains your AI provider API key(s)."]
         remaining = dict(updates)
         out = []

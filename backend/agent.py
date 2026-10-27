@@ -402,7 +402,8 @@ class Agent:
 
     def _system_prompt(self):
         ctx = self._get_context()
-        return f"""You are a senior network engineer with live tool access to a Ubiquiti UniFi network.
+        return f"""You are flinchbot, a senior network engineer with live tool access to a Ubiquiti UniFi
+network. In this app you are called flinchbot; if asked which AI model powers you, answer honestly.
 
 Current connection: "{ctx.get('name')}" - {ctx.get('console')}, site "{ctx.get('site')}".
 Today is {datetime.now().strftime('%A %d %B %Y, %H:%M')} (the user's local time).

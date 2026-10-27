@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="app-token" content="__APP_TOKEN__">
-<title>UniFi × AI</title>
+<title>UniFi × flinchbot</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
@@ -23,6 +25,12 @@
   header { display:flex; align-items:center; gap:16px; padding:14px 24px; border-bottom:1px solid var(--border);
            background:var(--surface); position:relative; }
   .logo { display:flex; align-items:center; gap:12px; }
+  .logo-btn { display:flex; align-items:center; gap:12px; background:none; border:0; color:inherit; cursor:pointer; padding:0; text-align:left; }
+  .logo-img { width:36px; height:36px; border-radius:8px; display:block; box-shadow:0 0 0 1px rgba(255,255,255,.08); transition:transform .2s; }
+  .logo-btn:hover .logo-img { transform:rotate(-6deg) scale(1.06); }
+  .about-art { display:block; width:min(360px,100%); margin:4px auto 0; border-radius:6px; box-shadow:0 10px 30px rgba(0,0,0,.45); }
+  .about-caption { text-align:center; font-family:var(--font-mono); font-size:15px; letter-spacing:3px; margin:12px 0 2px; color:#ff4d6d; }
+  .about-meta { text-align:center; font-size:12px; color:var(--muted); line-height:1.7; }
   .logo-icon { width:34px; height:34px; border-radius:8px; display:flex; align-items:center; justify-content:center;
                background:linear-gradient(135deg,var(--accent),var(--accent2)); }
   .logo h1 { font-size:18px; font-weight:800; letter-spacing:-.3px; white-space:nowrap; }
@@ -101,9 +109,14 @@
   @keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
   .msg.user { align-self:flex-end; flex-direction:row-reverse; }
   .msg-avatar { width:32px; height:32px; border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:14px; }
-  .msg.assistant .msg-avatar { background:linear-gradient(135deg,var(--accent),var(--accent2)); }
+  .msg.assistant .msg-avatar { background:linear-gradient(135deg,var(--accent),var(--accent2)); overflow:hidden; }
+  .msg-avatar img { width:100%; height:100%; display:block; }
+  .msg-body { display:flex; flex-direction:column; gap:3px; min-width:0; max-width:calc(100% - 44px); }
+  .msg.user .msg-body { align-items:flex-end; }
+  .msg-name { font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.3px; padding:0 4px; }
+  .msg.assistant .msg-name { color:#ff6b81; }
   .msg.user .msg-avatar { background:var(--surface); border:1px solid var(--border); }
-  .msg-bubble { padding:12px 16px; border-radius:12px; font-size:14px; line-height:1.65; max-width:calc(100% - 44px); overflow-wrap:anywhere; }
+  .msg-bubble { padding:12px 16px; border-radius:12px; font-size:14px; line-height:1.65; max-width:100%; overflow-wrap:anywhere; }
   .msg.assistant .msg-bubble { background:var(--surface); border:1px solid var(--border); border-top-left-radius:2px; }
   .msg.user .msg-bubble { background:rgba(0,212,255,.08); border:1px solid rgba(0,212,255,.2); border-top-right-radius:2px; white-space:pre-wrap; }
   .msg.error .msg-bubble { border-color:rgba(255,107,53,.4); color:#ffd2c0; }
@@ -207,7 +220,10 @@
 <body>
 <div class="app">
   <header>
-    <div class="logo"><div class="logo-icon">⚡</div><h1>UniFi <span>×</span> AI</h1></div>
+    <button class="logo logo-btn" id="aboutBtn" title="About UniFi × flinchbot">
+      <img class="logo-img" src="/static/flinchbot-icon.png" alt="flinchbot robot" width="36" height="36">
+      <h1>UniFi <span>×</span> flinchbot</h1>
+    </button>
     <div class="conn-switch">
       <button id="connBtn" class="conn-btn none" aria-haspopup="true" aria-expanded="false">
         <span class="dot"></span><span class="name" id="connName">Starting…</span><span aria-hidden="true">▾</span>
@@ -441,7 +457,8 @@ function addMessage(role, text, opts = {}) {
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
-    h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : '🤖')), bubble);
+    h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : botAvatar())),
+    h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, role === 'user' ? 'You' : (opts.error ? 'Error' : BOT_NAME)), bubble));
   $('messages').append(div); scrollDown(); return div;
 }
 
@@ -458,7 +475,8 @@ function addApproval(pending) {
       Object.keys(p.details || {}).filter(k => k !== 'mac').length
         ? h('pre', {}, JSON.stringify(p.details, null, 2)) : null)),
     h('div', { class: 'row' }, approve, deny), decided);
-  const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, '🛡️'), card);
+  const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, botAvatar()),
+    h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, `${BOT_NAME} · needs your approval`), card));
   const entry = { kind: 'approval', items: pending, decision: 'Waiting for approval', at: new Date() };
   transcript.push(entry);
   const decide = async ok => {
@@ -476,7 +494,7 @@ function addApproval(pending) {
 
 function showTyping() {
   clearEmpty();
-  $('messages').append(h('div', { class: 'msg assistant', id: 'typing' }, h('div', { class: 'msg-avatar' }, '🤖'),
+  $('messages').append(h('div', { class: 'msg assistant', id: 'typing' }, h('div', { class: 'msg-avatar' }, botAvatar()),
     h('div', { class: 'msg-bubble' }, h('div', { class: 'typing' }, h('div', { class: 'typing-dot' }), h('div', { class: 'typing-dot' }), h('div', { class: 'typing-dot' })))));
   scrollDown();
 }
@@ -577,7 +595,11 @@ const PROVIDER_INFO = {
     modelHelp: 'GPT-6.1 Sol is a good default. GPT-6 Astra is the most capable and costs more; Terra and Luna are cheaper.',
     pricing: 'https://developers.openai.com/api/docs/pricing' },
 };
-const aiName = () => (status && status.provider_label) || 'AI';
+// The assistant is always "flinchbot" in the chat; which AI powers it is shown in About/exports/reports.
+const BOT_NAME = 'flinchbot';
+const aiName = () => BOT_NAME;
+const providerName = () => (status && status.provider_label) || 'AI';
+function botAvatar() { return h('img', { src: '/static/flinchbot-icon.png', alt: '' }); }
 
 async function openSettings(wizard) {
   let s;
@@ -831,7 +853,7 @@ function exportFileName(ext) {
   const d = new Date(), pad = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
   const net = (a ? a.name : 'chat').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat';
-  return `unifi-ai_${net}_${stamp}.${ext}`;
+  return `unifi-flinchbot_${net}_${stamp}.${ext}`;
 }
 function download(name, content, type) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -840,12 +862,12 @@ function download(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
   toast(`Saved ${name} to your Downloads folder.`);
 }
-const LABEL = { user: '👤 You', assistant: '🤖 Assistant', error: '⚠️ Error', approval: '🛡️ Change request' };
-const labelFor = t => t.kind === 'assistant' ? `🤖 ${t.ai || 'Assistant'}` : LABEL[t.kind];
+const LABEL = { user: '👤 You', assistant: '🤖 flinchbot', error: '⚠️ Error', approval: '🛡️ Change request' };
+const labelFor = t => t.kind === 'assistant' ? `🤖 ${BOT_NAME}` : LABEL[t.kind];
 
 function toMarkdown() {
   const m = exportMeta();
-  const out = [`# UniFi × AI — chat export`, '',
+  const out = [`# UniFi × flinchbot — chat export`, '',
     `- **Network:** ${m.network}`, `- **Model:** ${m.model}`, `- **Exported:** ${fmtTime(m.exported)}`, '', '---', ''];
   for (const t of transcript) {
     out.push(`### ${labelFor(t)} · ${fmtTime(t.at)}`, '');
@@ -885,7 +907,7 @@ function toHtml() {
   }).join('\n');
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>UniFi × AI — ${esc(m.network)} — ${esc(fmtTime(m.exported))}</title>
+<title>UniFi × flinchbot — ${esc(m.network)} — ${esc(fmtTime(m.exported))}</title>
 <style>
   :root{--bg:#fff;--fg:#1a1d24;--muted:#667085;--line:#e4e7ec;--you:#eef8fb;--ai:#f8f9fb;--warn:#fff4ed;--accent:#0b7fa5;--ok:#067647;--no:#b42318}
   @media (prefers-color-scheme:dark){:root{--bg:#0d1016;--fg:#e2e8f0;--muted:#8b95a7;--line:#252a36;--you:#0f2530;--ai:#141821;--warn:#2a1a12;--accent:#3cc8f0;--ok:#4ade80;--no:#f87171}}
@@ -902,7 +924,7 @@ function toHtml() {
   @media print{section.user{margin-left:0} body{font-size:12px}}
 </style></head>
 <body><main>
-<h1>UniFi × AI — chat export</h1>
+<h1>UniFi × flinchbot — chat export</h1>
 <div class="meta"><b>Network:</b> ${esc(m.network)} &nbsp;·&nbsp; <b>Model:</b> ${esc(m.model)} &nbsp;·&nbsp; <b>Exported:</b> ${esc(fmtTime(m.exported))}</div>
 ${rows}
 </main></body></html>`;
@@ -992,7 +1014,7 @@ function reportMarkdown(r) {
     }
   }
   if (r.healthy && r.healthy.length) { out.push('## ✅ Looks good', '', ...r.healthy.map(x => `- ${md(x)}`), ''); }
-  out.push('---', '_Generated by UniFi × AI from live, read-only data. Verify before making changes._', '');
+  out.push('---', '_Generated by UniFi × flinchbot from live, read-only data. Verify before making changes._', '');
   return out.join('\n');
 }
 
@@ -1038,7 +1060,7 @@ function reportHtml(r) {
   <div class="prog"><i id="pbar"></i></div></div>
 <p class="summary" id="summary"></p>
 <div id="list"></div>
-<footer>Generated by UniFi × AI from live, read-only data. Your ticks are saved in this browser. Verify before making changes.</footer>
+<footer>Generated by UniFi × flinchbot from live, read-only data. Your ticks are saved in this browser. Verify before making changes.</footer>
 </main>
 <script type="application/json" id="data">${data}<\/script>
 <script>
@@ -1092,6 +1114,21 @@ function reportHtml(r) {
 <\/script></body></html>`;
 }
 
+// ── about ────────────────────────────────────────────────────────────────
+function openAbout() {
+  const st = status || {};
+  openModal(...modalHead('About'),
+    h('img', { class: 'about-art', src: '/static/flinchbot.jpg', alt: 'flinchbot — linocut print of a robot with a broken heart' }),
+    h('div', { class: 'about-caption' }, 'flinchbot'),
+    h('div', { class: 'about-meta' },
+      h('div', {}, `UniFi × flinchbot ${st.version ? 'v' + st.version : ''}`),
+      h('div', {}, st.provider_label ? `AI: ${st.provider_label} · ${st.model || ''}` : 'AI: not set up yet'),
+      h('div', {}, 'Runs on this PC only. Changes to your network always need your approval.')),
+    h('div', { class: 'actions', style: 'justify-content:center;margin-top:16px' },
+      h('a', { class: 'btn', href: '/setup', target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, '📖 Setup guide'),
+      h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 const QUICK = [
   ['🩺 Health check', 'Run a full network health check and identify any issues'],
@@ -1110,6 +1147,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') { toggleConn
 $('refreshBtn').addEventListener('click', async () => { await refreshStatus(); await refreshNetwork(); });
 $('clearBtn').addEventListener('click', resetChat);
 $('settingsBtn').addEventListener('click', () => openSettings());
+$('aboutBtn').addEventListener('click', openAbout);
 $('reportBtn').addEventListener('click', () => lastReport ? showReportOrNew() : runReport());
 function showReportOrNew() {
   if (lastReport.network === (status && status.active && status.active.name)) showReport(lastReport); else runReport();

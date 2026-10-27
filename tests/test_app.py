@@ -538,7 +538,7 @@ class ServerTests(unittest.TestCase):
         try:
             data = json.loads(raw)
         except ValueError:
-            data = raw.decode()
+            data = raw.decode(errors="replace")
         return r.status, data, r
 
     def test_1_page_has_token_and_security_headers(self):
@@ -548,6 +548,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(r.getheader("X-Frame-Options"), "DENY")
         self.assertIn("frame-ancestors 'none'", r.getheader("Content-Security-Policy"))
         self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+
+    def test_1b_static_files_and_setup_guide(self):
+        s, _, r = self.req("GET", "/static/flinchbot-icon.png", token=False)
+        self.assertEqual((s, r.getheader("Content-Type")), (200, "image/png"))
+        s, _, r = self.req("GET", "/favicon.ico", token=False)
+        self.assertEqual(s, 200)
+        s, page, r = self.req("GET", "/setup", token=False)
+        self.assertEqual(s, 200)
+        self.assertIn("UniFi <span>×</span> flinchbot", page)
+        self.assertIn("script-src 'none'", r.getheader("Content-Security-Policy"))
+        for bad in ("/static/../server.py", "/static/x.py", "/static/%2e%2e/.env"):
+            self.assertEqual(self.req("GET", bad, token=False)[0], 404, bad)
+        self.assertEqual(self.req("GET", "/static/favicon.png", token=False, host=f"evil.example:{self.port}")[0], 403)
 
     def test_2_gatekeeping(self):
         self.assertEqual(self.req("GET", "/api/status", token=False)[0], 401)

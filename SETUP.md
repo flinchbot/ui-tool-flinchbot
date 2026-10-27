@@ -1,16 +1,18 @@
-# Setup guide (start here)
+# UniFi × flinchbot — Setup guide
 
 This guide assumes no programming experience. Plan on about 20 minutes the first time.
 
-**What you'll end up with:** a small app on your Windows PC. You double-click it, it opens in your web browser, and you can ask an AI (Claude or ChatGPT) questions about a UniFi network ("why is the Wi-Fi slow in the hall?"). Claude can also make changes, but only after you click **Approve**.
+**What you'll end up with:** a small app on your Windows PC. You double-click it, it opens in your web browser, and you ask an AI questions about a UniFi network, e.g. "why is the Wi-Fi slow in the hall?". The AI can be **Claude** (Anthropic) or **ChatGPT** (OpenAI). It can also make changes, but only after you click **Approve**.
+
+> This guide is also inside the app: click the robot logo (top left) → **📖 Setup guide**.
 
 **What you need**
 
-| | |
+| You need | Why / notes |
 |---|---|
 | A Windows 10 or 11 PC | It must be able to reach the UniFi console: plugged into that network, on its Wi-Fi, or connected by VPN. |
-| A **local-only admin account** on the UniFi console | **Required.** Your normal UI.com sign-in won't work (step 3 explains why and how to create one). You need admin access to the console once, to create it. |
-| An API account with credit at **Anthropic** (Claude) **or OpenAI** (ChatGPT) | This is how the AI is paid for (step 2). It is separate from a Claude.ai or ChatGPT chat subscription. |
+| A **local-only admin account** on the UniFi console | **Required.** Your normal UI.com sign-in won't work. Step 3 explains why and how to create one. You need admin access to the console once, to create it. |
+| An API account with credit at **Anthropic** (Claude) **or OpenAI** (ChatGPT) | This is how the AI is paid for (step 2). It's separate from a Claude.ai or ChatGPT chat subscription. |
 
 ---
 
@@ -31,13 +33,12 @@ Python is the language the app is written in. You install it once and never have
 
 ## 2. Get an AI API key (once): Claude or ChatGPT
 
-Pick one. You can add the other later and switch in Settings. Both work the same way in the app, and the cost per question is similar for the recommended default models (Claude Sonnet 5.5, GPT-6.1 Sol).
+Pick one. You can add the other later and switch in Settings. Both work the same way in the app: same tools, same approval step, same reports.
 
 **Option A: Claude (Anthropic)**
 
-
 1. Sign in at **https://console.anthropic.com**.
-2. Under **Billing**, add some credits. A few dollars lasts a long time for occasional questions. Each question costs a fraction of a cent to a few cents, depending on the model and how much network data Claude reads.
+2. Under **Billing**, add some credit.
 3. Go to **API Keys → Create Key** and give it a name like `UniFi app`.
 4. **Copy the key now.** It starts with `sk-ant-` and is shown only once. You'll paste it into the app in step 6.
 
@@ -48,12 +49,21 @@ Pick one. You can add the other later and switch in Settings. Both work the same
 3. Go to **API keys → Create new secret key** and give it a name like `UniFi app`.
 4. **Copy the key now.** It starts with `sk-` and is shown only once.
 
-Treat any API key like a credit card number. Anyone who has it can spend your credits. If it ever leaks, delete it on the same page and create a new one.
+Treat any API key like a credit card number. Anyone who has it can spend your credit. If it ever leaks, delete it on the same page and create a new one.
+
+**Which model?** The app lists the models your key can use, straight from the provider.
+
+| AI | Good default | Smarter, costs more | Cheaper, less thorough |
+|---|---|---|---|
+| Claude | Claude Sonnet 5.5 | Claude Opus 5.5, Claude Fable 5.1 | Claude Haiku 5.5 |
+| ChatGPT | GPT-6.1 Sol | GPT-6 Astra | GPT-6.1 Terra, GPT-6 Luna |
+
+The two defaults cost about the same, roughly 5–15¢ for a typical health check; prices change, so check each provider's pricing page. The cheapest models are fine for quick lookups like "how many clients?" but tend to miss things in real troubleshooting.
 
 ## 3. Create a local-only admin account for the app (required, once per network)
 
 > ⚠️ **The app can only sign in with a LOCAL account on the console.**
-> The login you normally use (your UI.com / Ubiquiti cloud account) will **not** work, because it uses two-factor sign-in, and apps can't answer the code prompt. If you try it anyway, the app tells you so; UniFi's own wording for this is *"MFA token required to authenticate to SSO"* (HTTP 499).
+> The login you normally use (your UI.com / Ubiquiti cloud account) will **not** work. It uses two-factor sign-in, and apps can't answer the code prompt. If you try it anyway, the app tells you so; UniFi's own wording is *"MFA token required to authenticate to SSO"* (HTTP 499).
 >
 > A local account exists only on that one console and has no two-factor prompt, which is why it works. It's also safer: you can see what the app did, change its password, or delete it without touching your own login.
 >
@@ -63,15 +73,15 @@ Treat any API key like a credit card number. Anyone who has it can spend your cr
    - A security warning is normal: UniFi uses a self-signed certificate. Click **Advanced → Continue**.
 2. Go to **Admins & Users** (sometimes **Settings → Admins & Users**) and choose **Create New / Add Admin**.
 3. Fill it in:
-   - **Restrict to local access only:** ✅ **must be ticked.** This is what makes it a local account. If you don't see this option, you're probably on unifi.ui.com. Go back to the console's own IP address.
-   - **Username / password:** for example `unifi-ai` and a long random password. Use a plain username, not an email address. An email address usually means a cloud account.
+   - **Restrict to local access only:** ✅ **must be ticked.** This is what makes it a local account. If you don't see this option, you're probably on unifi.ui.com; go back to the console's own IP address.
+   - **Username / password:** for example `unifi-assistant` and a long random password. Use a plain username, not an email address. An email address usually means a cloud account.
    - **Role:**
      - **Full Management** (or *Site Admin*) if you want the AI to be able to make changes after your approval.
-     - **View Only** if you only ever want answers and never changes. Any change it tries will then simply be refused.
+     - **View Only** if you only ever want answers and never changes. Any change the AI tries will simply be refused.
 4. Click **Create**.
 5. Check the new account in the admin list. It should show as **local** (local access only), not as a UI.com account.
 
-**Alternative: a UniFi API key instead of the local account.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's **Test** button tells you whether the key works on your console. If it doesn't, use the username and password instead.
+**Alternative: a UniFi API key instead of the local account.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's **Test** button tells you whether the key works on your console. If it doesn't, use the local username and password instead.
 
 **Note the console's address and port:**
 
@@ -92,7 +102,7 @@ Leave SSH turned off. SSH gives full root control of the console, so it's one le
 ## 5. Get the app onto the PC
 
 Use either of these:
-- **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-ai`. Avoid running it from inside the ZIP or from Downloads.
+- **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-flinchbot`. Avoid running it from inside the ZIP or from Downloads.
 - **Git** (if you use it): `git clone https://github.com/flinchbot/ui-tool-claude.git`
 
 The folder is self-contained, so you can move it or copy it to another PC later.
@@ -100,16 +110,23 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 ## 6. Start it
 
 1. Double-click **`start.bat`**.
-   - The first time, it creates a private Python environment (a `.venv` folder) and downloads two packages. This needs internet and takes about a minute.
+   - The first time, it creates a private Python environment (a `.venv` folder) and downloads the packages the app needs: the Anthropic and OpenAI connectors and a password-storage helper. This needs internet and takes about a minute.
    - Windows SmartScreen may warn about running a downloaded file. Click **More info → Run anyway**.
    - If Windows Firewall asks about Python, you can click **Cancel**. The app only listens on this PC (127.0.0.1) and doesn't need firewall access.
 2. Your browser opens at `http://127.0.0.1:8080/` and shows a **Welcome** screen:
-   - **Step 1, Choose your AI:** pick **Claude** or **ChatGPT**, paste the key, and click **Test key & load models**. Pick a model, then **Save & continue**. This writes the `.env` file for you; you never need to edit it by hand.
-   - **Step 2, your UniFi console:** enter the following, then click **Test, save & finish**:
+   - **Step 1, Choose your AI:**
+     1. Pick **Claude** or **ChatGPT**.
+     2. Paste the key and click **Test key & load models**.
+     3. Pick a model, then **Save & continue**.
+
+     This writes the `.env` settings file for you; you never need to edit it by hand.
+   - **Step 2, Your UniFi console:** enter the following, then click **Test, save & finish**:
      - a name (e.g. `Home`)
      - the console's IP address
      - the port
-     - the username and password from step 3
+     - the local username and password from step 3
+
+     **Test** also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).
 3. Keep the black `start.bat` window open while you use the app. Close it (or press **Ctrl+C** in it) to stop the app.
 
 ## 7. Everyday use
@@ -117,27 +134,53 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 - **Ask questions** in the chat, or click a quick prompt such as *Health check*.
 - **Changes:** when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it.
 - **Another network:** click the connection name at the top → **Add a connection…**. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.
-- **Settings (⚙):** switch between Claude and ChatGPT, change API keys or models, or change the app's port. Switching AI starts a new conversation.
-- **📋 Action report:** the AI reviews the whole network (read-only, about 1–3 minutes, roughly the cost of a few questions) and lists what to fix, most urgent first.
+- **⚙ Settings:**
+  - switch between **Claude** and **ChatGPT** (switching starts a new conversation)
+  - change API keys or models
+  - change the app's port
+  
+  The model list is live from the provider. If your chosen model is ever deprecated, a banner tells you its retirement date.
+- **📋 Action report:** the AI reviews the whole network and lists what to fix, most urgent first. It's read-only, takes about 1–3 minutes, and costs roughly as much as a few questions.
   - **⤓ Checklist web page:** open it in any browser and tick items off as you fix them. Ticks are remembered in that browser, and **Print / PDF** works.
   - **⤓ Markdown:** for notes apps. Obsidian, VS Code and GitHub show the `[ ]` boxes as clickable checkboxes.
+  - **↻ Regenerate** gives a fresh snapshot with an empty checklist, which is handy to confirm your fixes took.
 - **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
+- **About:** click the robot logo for the version, the AI in use, and this guide.
 
-## 8. Where your information is stored
+## 8. Updating the app
+
+- **Downloaded ZIP:**
+  1. Download the new ZIP.
+  2. Unzip it over the old folder (or into a new one).
+  3. Copy across your `.env` file and `data` folder.
+- **Git:** run `git pull` in the app folder.
+
+Your settings, connections and passwords aren't touched by an update. `start.bat` notices new requirements and installs them on the next start.
+
+## 9. Where your information is stored, and what is sent where
 
 | What | Where |
 |---|---|
 | AI choice, API key(s), models, port | `.env` file in the app folder |
 | Connection details (name, address, port, site, username) | `data\connections.json` |
-| UniFi passwords / API keys | Windows Credential Manager (Control Panel → Credential Manager → Windows Credentials → entries named `unifi-claude`) |
+| UniFi passwords / API keys | Windows Credential Manager (Control Panel → Credential Manager → Windows Credentials → entries named `unifi-claude`, the app's original name, kept so saved passwords keep working) |
 
 If Credential Manager isn't available, passwords fall back to `data\secrets.json` and the app shows a warning.
 
 `.env` and `data\` are excluded from git, so they're never uploaded to GitHub. Don't email or share them.
 
-Moving to a new PC: copy the folder, then re-enter the passwords. Credential Manager entries don't travel with the folder. Skip copying `.venv`; `start.bat` rebuilds it.
+**What leaves this PC:**
+- When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
+- Wi-Fi passwords and other secret fields are **removed first**.
+- ChatGPT requests are sent with OpenAI's "don't store" option.
+- Nothing is sent anywhere else, and the app can't be reached from other computers.
 
-## 9. Troubleshooting
+**Moving to a new PC:**
+1. Copy the folder.
+2. Re-enter the UniFi passwords. Credential Manager entries don't travel with the folder.
+3. Skip copying `.venv`; `start.bat` rebuilds it.
+
+## 10. Troubleshooting
 
 | Message / symptom | What to do |
 |---|---|
@@ -149,8 +192,10 @@ Moving to a new PC: copy the folder, then re-enter the passwords. Credential Man
 | *"Login rejected"* | Check the username and password. The account must be **local-only** (step 3). Too many failed tries locks logins for a few minutes. |
 | *"Permission denied … read-only"* | The UniFi account is *View Only*. Give it Full Management if you want changes to work. |
 | *"rejected the API key"* (UniFi) | That UniFi version doesn't accept API keys for this feature. Switch the connection to username + password. |
-| *"DIFFERENT security certificate"* | The address now answers with a different console certificate, e.g. after a factory reset, a replaced console, or being on a different network where that IP is something else. If you're sure it's your console, open the connection and click **Trust new certificate**. |
-| *"…rejected the API key"* / *"out of credits"* / *"no API credit"* | Fix the key in Settings, or add API credit at console.anthropic.com (Claude) or platform.openai.com → Billing (ChatGPT). |
+| *"DIFFERENT security certificate"* | The address now answers with a different console certificate. Typical causes: a factory reset, a replaced console, or being on a different network where that IP belongs to something else. If you're sure it's your console, open the connection and click **Trust new certificate**. |
+| *"…rejected the API key"* / *"out of credits"* / *"no API credit"* (AI) | Fix the key in Settings. Or add API credit at console.anthropic.com (Claude) or platform.openai.com → Billing (ChatGPT). |
+| *"…model … wasn't found"* or a *deprecated* banner | Open Settings and pick a current model from the list. |
+| *"Reply hit the …-token output limit"* | Say "continue", ask a narrower question, or raise `MAX_OUTPUT_TOKENS` in `.env` (max 21000). |
 | *"The app was restarted. Reload this page"* | Press F5. The page's security token changes each time the app starts. |
 | Firewall rules the AI creates don't seem to work | Newer UniFi versions use **Zone-Based Firewall**. This app creates classic rules, which may not apply there. Check in the UniFi UI. |
 

@@ -1,5 +1,5 @@
 """
-UniFi x AI - local web app (Claude or ChatGPT).
+UniFi x flinchbot - local web app (AI: Claude or ChatGPT).
 
 Run:  start.bat   (Windows)   or   python backend/server.py [--port N] [--no-browser]
 
@@ -34,7 +34,7 @@ from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -159,18 +159,18 @@ class HttpError(Exception):
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    server_version = "UniFiAI"
+    server_version = "UniFiFlinchbot"
     sys_version = ""
 
     def log_message(self, fmt, *args):
         pass   # quiet; errors are printed explicitly
 
     # responses
-    def _headers(self, status, ctype, length):
+    def _headers(self, status, ctype, length, cache=False):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(length))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "max-age=86400" if cache else "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -183,6 +183,28 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
             pass
+
+    STATIC_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+
+    def send_static(self, name):
+        """Images for the UI. Only plain file names in frontend/static, no subfolders."""
+        import re
+        ext = os.path.splitext(name)[1].lower()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or ext not in self.STATIC_TYPES:
+            raise HttpError(404, "Not found")
+        return self.send_file(os.path.join(cfg.FRONTEND_DIR, "static", name), self.STATIC_TYPES[ext], cache=True)
+
+    def send_file(self, path, ctype, cache=False):
+        if not os.path.isfile(path):
+            raise HttpError(404, "Not found")
+        with open(path, "rb") as f:
+            body = f.read()
+        self._headers(200, ctype, len(body), cache=cache)
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; "
+                             "style-src 'self' 'unsafe-inline'; script-src 'none'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_page(self):
         path = os.path.join(cfg.FRONTEND_DIR, "index.html")
@@ -238,9 +260,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._check(api=False)
                 return self.send_page()
             if self.command == "GET" and path == "/favicon.ico":
-                self.send_response(204)
-                self.end_headers()
-                return
+                self._check(api=False)
+                return self.send_static("favicon.png")
+            if self.command == "GET" and path.startswith("/static/"):
+                self._check(api=False)
+                return self.send_static(path[len("/static/"):])
+            if self.command == "GET" and path in ("/setup", "/setup.html"):
+                self._check(api=False)
+                return self.send_file(os.path.join(cfg.BASE_DIR, "SETUP.html"), "text/html; charset=utf-8")
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
             self._check(api=True)
@@ -552,7 +579,7 @@ HTTP_PORT = None
 
 def main():
     global HTTP_PORT
-    ap = argparse.ArgumentParser(description="UniFi x AI")
+    ap = argparse.ArgumentParser(description="UniFi x flinchbot")
     ap.add_argument("--port", type=int, help="override SERVER_PORT from .env")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser window")
     args = ap.parse_args()
@@ -571,7 +598,7 @@ def main():
     url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "127.0.0.1") else host
     url = f"http://{url_host}:{HTTP_PORT}/"
     print("")
-    print("  UniFi x AI", APP_VERSION)
+    print("  UniFi x flinchbot", APP_VERSION)
     print(f"  Open:  {url}")
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"  WARNING: listening on {host} - other machines on this network can reach the app.")
