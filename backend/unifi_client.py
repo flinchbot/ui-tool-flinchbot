@@ -111,6 +111,11 @@ class UniFiClient:
         self.logged_in  = False
         self._routes = {}                    # endpoint variant that worked, per feature
         self._lock = threading.RLock()
+        # Sign-in circuit breaker. UniFi locks sign-ins after repeated failures, so a
+        # rejected login is NEVER retried automatically: it stays blocked until the
+        # credentials change (new client) or the user presses Retry. A rate-limit
+        # lockout blocks for at least RATE_LIMIT_PAUSE seconds.
+        self.login_block = None              # {"error": UniFiError, "until": epoch or None}
 
     # ── plumbing ──────────────────────────────────────────────────────────────
     @property
@@ -218,11 +223,39 @@ class UniFiClient:
                           (f": {detail}" if detail else ""), "http", e.code)
 
     # ── auth ──────────────────────────────────────────────────────────────────
+    RATE_LIMIT_PAUSE = 600
+
+    def login_blocked(self):
+        b = self.login_block
+        if not b:
+            return None
+        if b["until"] is not None and time.time() >= b["until"]:
+            self.login_block = None
+            return None
+        return b
+
+    def clear_login_block(self):
+        self.login_block = None
+
     def login(self):
         """Password login. API-key profiles have nothing to log in to."""
         if self.auth == "apikey":
             self.logged_in = True
             return True
+        with self._lock:
+            blocked = self.login_blocked()
+            if blocked:
+                raise blocked["error"]       # don't touch the console again
+            try:
+                return self._login_once()
+            except UniFiError as e:
+                if e.kind in ("auth", "mfa"):
+                    self.login_block = {"error": e, "until": None}
+                elif e.kind == "ratelimit":
+                    self.login_block = {"error": e, "until": time.time() + self.RATE_LIMIT_PAUSE}
+                raise
+
+    def _login_once(self):
         with self._lock:
             self.cookie_jar.clear()
             self.csrf_token = None
@@ -252,8 +285,10 @@ class UniFiClient:
                         "must be a LOCAL admin on the console (UniFi cloud/UI.com accounts "
                         "with two-factor sign-in can't be used here).", "auth", e.code)
                 if e.code == 429:
-                    raise UniFiError("Too many login attempts - UniFi has paused logins "
-                                     "for a few minutes. Wait, then try again.", "ratelimit", 429)
+                    raise UniFiError(
+                        "UniFi has temporarily locked sign-ins after too many failed attempts. "
+                        "UniFi doesn't say for how long (usually minutes). flinchbot will not try "
+                        "again for 10 minutes; use Retry after that.", "ratelimit", 429)
                 if e.code in (404, 405):
                     raise UniFiError("This doesn't look like a "
                                      f"{CONSOLE_LABELS[self.console_type]}.", "notfound", e.code)
@@ -269,7 +304,7 @@ class UniFiClient:
                 return self._raw(method, path, data)
             except urllib.error.HTTPError as e:
                 # Session expired or console rebooted: log in again once and retry.
-                if _retry and self.auth == "password" and e.code in (401, 403):
+                if _retry and self.auth == "password" and e.code == 401:
                     self.logged_in = False
                     self.login()
                     return self.request(method, path, data, _retry=False)
@@ -506,8 +541,8 @@ def test_connection(profile, secret):
             }
         except UniFiError as e:
             errors.append(e)
-            if e.kind in ("unreachable", "cert", "ratelimit", "mfa"):
-                break      # same answer for either console type; don't hammer it
+            if e.kind != "notfound":
+                break      # a real answer (rejected, locked, unreachable): never make a 2nd attempt
     # Prefer the most informative error (a login rejection beats "not found").
     errors.sort(key=lambda e: e.kind == "notfound")
     last_err = errors[0] if errors else None

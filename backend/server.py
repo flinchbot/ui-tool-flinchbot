@@ -13,6 +13,7 @@ Security
 """
 
 import argparse
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -328,6 +329,13 @@ def r_status(_):
             out["connected"] = True
         except UniFiError as e:
             out["error"], out["error_kind"] = str(e), e.kind
+        try:
+            b = state.client().login_blocked()
+            if b:
+                out["login_blocked"] = True
+                out["retry_after"] = int(b["until"] - time.time()) if b["until"] else None
+        except UniFiError:
+            pass
     return out
 
 
@@ -469,7 +477,39 @@ def r_connection_test(b):
     profile = cfg.clean_profile(merged)
     if stored:
         profile["fingerprint"] = stored.get("fingerprint")
-    return test_connection(profile, secret)
+
+    # Never resend credentials the console just rejected, and never contact a
+    # console that just locked sign-ins: each attempt can extend UniFi's lockout.
+    now = time.time()
+    host_key = (profile["host"].lower(), profile["port"])
+    cred_key = host_key + (profile.get("auth"), profile.get("username", ""),
+                           hashlib.sha256(secret.encode()).hexdigest())
+    for key in (host_key, cred_key):
+        hit = _test_failures.get(key)
+        if hit and now < hit["until"]:
+            wait = int(hit["until"] - now)
+            return {"ok": False, "kind": hit["kind"], "error": hit["error"] +
+                    f" (Not sent again: {'try again in about ' + str(max(1, wait // 60)) + ' min' if hit['kind'] == 'ratelimit' else 'change the username or password first'}.)"}
+    result = test_connection(profile, secret)
+    if not result["ok"]:
+        if result["kind"] == "ratelimit":
+            _test_failures[host_key] = {"kind": "ratelimit", "error": result["error"], "until": now + 600}
+        elif result["kind"] in ("auth", "mfa"):
+            _test_failures[cred_key] = {"kind": result["kind"], "error": result["error"], "until": now + 3600}
+    else:
+        _test_failures.pop(host_key, None)
+    return result
+
+
+_test_failures = {}     # recent failed tests: (host,port) for lockouts, (+creds) for rejections
+
+
+def r_connection_retry(_):
+    """User pressed Retry: allow exactly one new sign-in attempt for the active connection."""
+    c = state.client()
+    c.clear_login_block()
+    c.verified = False
+    return r_status(None)
 
 
 def r_connection_activate(b):
@@ -566,6 +606,7 @@ ROUTES = {
     ("POST", "/api/connections/test"):        r_connection_test,
     ("POST", "/api/connections/activate"):    r_connection_activate,
     ("POST", "/api/connections/trust-cert"):  r_connection_trust,
+    ("POST", "/api/connections/retry"):       r_connection_retry,
     ("POST", "/api/connections/delete"):      r_connection_delete,
     ("GET",  "/api/network"):                 r_network,
     ("POST", "/api/chat"):                    r_chat,

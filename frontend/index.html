@@ -346,7 +346,17 @@ async function refreshStatus() {
   try { status = await api('GET', '/api/status'); }
   catch (e) { renderConn(null, e.message); return null; }
   renderConn(status);
-  if (status.error_kind === 'cert') {
+  if (status.login_blocked) {
+    const mins = status.retry_after ? Math.max(1, Math.ceil(status.retry_after / 60)) : 0;
+    showBanner(`Sign-in to “${status.active.name}” failed, so flinchbot has stopped trying (repeated attempts make UniFi lock sign-ins). ` +
+      (mins ? `It will try once more in about ${mins} min.` : 'Fix the username/password, or press Retry.'), [
+      h('button', { class: 'btn', onclick: () => openConnections(status.active.id) }, 'Edit connection'),
+      mins ? null : h('button', { class: 'btn', onclick: async e => {
+        e.target.disabled = true; e.target.textContent = 'Signing in…';
+        try { status = await api('POST', '/api/connections/retry', {}); } catch (err) { toast(err.message, true); }
+        await refreshStatus(); if (status && status.connected) refreshNetwork();
+      } }, 'Retry once')].filter(Boolean));
+  } else if (status.error_kind === 'cert') {
     showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
   } else if (!status.configured) {
     showBanner('Add an AI API key (Claude or ChatGPT) to start chatting.', [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
@@ -738,7 +748,7 @@ function openConnectionForm(data, existing, wizard) {
   };
   const userField = h('div', {},
     h('div', { class: 'note warn' }, 'Use a LOCAL account created on this console (Admins & Users → tick “Restrict to local access only”). Your UI.com / Ubiquiti cloud login will not work — it asks for a two-factor code that apps can’t provide. See SETUP.md step 3.'),
-    field('Username', user, 'The local account’s username, e.g. unifi-ai — not an email address.'));
+    field('Username', user, 'The local account’s username, e.g. unifi-assistant — not an email address.'));
   const secretLabel = h('label', {});
   const secretField = h('div', { class: 'field' }, secretLabel, secret.wrap, h('div', { class: 'hint' }));
   function setAuth(a) {
@@ -748,10 +758,11 @@ function openConnectionForm(data, existing, wizard) {
     secretLabel.textContent = a === 'password' ? 'Password' : 'API key';
     secretField.querySelector('.hint').textContent = a === 'password'
       ? 'Stored in Windows Credential Manager, not in any file in this folder.'
-      : 'Create in UniFi Network → Settings → Control Plane → Integrations (name varies by version). Not every UniFi version accepts keys for everything this app does — Test will tell you.';
+      : 'Create in UniFi Network → Settings → Control Plane → Integrations (name varies by version). Not every UniFi version accepts keys for everything this app does — the sign-in check when you save will tell you.';
   }
   setAuth(auth);
-  [name, host, port, siteInput, user, secret.input].forEach(i => i.addEventListener('input', () => { if (i !== name) tested = null; }));
+  // Changing anything that affects sign-in invalidates the last successful test (site/name don't).
+  [host, port, user, secret.input].forEach(i => i.addEventListener('input', () => { tested = null; }));
 
   const values = () => ({ id: existing && existing.id, name: name.value.trim() || host.value.trim(), host: host.value.trim(),
     port: Number(port.value) || 443, site: (siteWrap.querySelector('select') || siteInput).value.trim() || 'default',
@@ -779,24 +790,52 @@ function openConnectionForm(data, existing, wizard) {
     return r;
   }
 
-  async function save(activateIt) {
-    let r = tested;
-    if (!r) r = await runTest();
-    if (!r || !r.ok) {
-      if (!r || !confirm('The connection test failed. Save these details anyway? (You can fix and test again later.)')) return;
-    }
+  // Does saving need a fresh sign-in test? Only when something that affects sign-in changed.
+  function needsTest() {
+    if (!existing || !existing.fingerprint) return true;
     const v = values();
-    if (r && r.ok) { v.console_type = r.console_type; v.fingerprint = r.fingerprint; }
-    if (!v.secret) delete v.secret;
-    v.activate = !!activateIt;
+    return v.host !== existing.host || v.port !== existing.port || v.auth !== existing.auth ||
+           (v.auth === 'password' && v.username !== existing.username) || !!v.secret;
+  }
+
+  let busy = false;
+  async function save(activateIt) {
+    if (busy) return;                          // one click = at most one sign-in attempt
+    busy = true;
+    const buttons = [...$('modal').querySelectorAll('.actions button')];
+    const labels = buttons.map(b => b.textContent);
+    buttons.forEach(b => b.disabled = true);
+    const primary = buttons[buttons.length - 1];
     try {
+      let r = tested;
+      if (needsTest() && !r) {
+        primary.textContent = 'Signing in…';
+        r = await runTest();
+        // Failed sign-in: stay here, save nothing, and don't retry automatically.
+        if (!r || !r.ok) return;
+        if (!r.site_found && r.sites.length > 1) {
+          out.append(result('warn', 'Pick the right site above, then press the button again (it won’t sign in again).'));
+          return;
+        }
+      }
+      if (r && r.cert_changed && !confirm('The console presented a DIFFERENT certificate from the one saved before. Save and trust it?')) return;
+      const v = values();
+      if (r && r.ok) { v.console_type = r.console_type; v.fingerprint = r.fingerprint; }
+      if (!v.secret) delete v.secret;
+      v.activate = !!activateIt;
+      primary.textContent = 'Saving…';
       await api('POST', '/api/connections', v);
       toast(`Saved "${v.name}".`);
       if (activateIt || wizard) clearChatView();
       await refreshStatus(); await refreshNetwork();
       if (wizard) { closeModal(); addMessage('assistant', 'All set! Try one of the quick prompts below, or ask me anything about your network.', { noRecord: true }); }
       else openConnections();
-    } catch (e) { out.replaceChildren(result('bad', e.message)); }
+    } catch (e) {
+      out.replaceChildren(result('bad', e.message));
+    } finally {
+      busy = false;
+      buttons.forEach((b, k) => { if (b.isConnected) { b.disabled = false; b.textContent = labels[k]; } });
+    }
   }
 
   async function del() {
@@ -816,7 +855,7 @@ function openConnectionForm(data, existing, wizard) {
 
   openModal(
     ...modalHead(wizard ? 'Welcome! Let’s get you set up' : (existing ? `Edit “${p.name}”` : 'Add a UniFi connection'),
-      wizard ? null : 'Enter how this PC reaches the UniFi console. Press Test to check it before saving.', !wizard),
+      wizard ? null : 'Enter how this PC reaches the UniFi console. Saving signs in once to check the details; nothing is saved if that fails.', !wizard),
     wizard ? h('div', { class: 'steps' }, h('span', { class: 'on' }), h('span', { class: 'on' })) : null,
     wizard ? h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 2 · Your UniFi console') : null,
     certNote,
@@ -826,15 +865,14 @@ function openConnectionForm(data, existing, wizard) {
       field('Port', port, '443 = UDM / UCG / Cloud Key Gen2+. 8443 = self-hosted. 11443 = UniFi OS Server.')),
     field('Login method', h('div', { class: 'seg' }, authBtns.password, authBtns.apikey)),
     userField, secretField,
-    field('Site', siteWrap, 'Leave as "default" unless the console manages several sites — Test lists them.'),
+    field('Site', siteWrap, 'Leave as "default" unless the console manages several sites — the sign-in check lists them.'),
     out,
     h('div', { class: 'actions' },
       existing ? h('button', { class: 'btn danger left', onclick: del }, 'Delete') : null,
       wizard ? null : h('button', { class: 'btn', onclick: () => openConnections() }, 'Back'),
-      h('button', { class: 'btn', onclick: runTest }, 'Test'),
-      wizard ? h('button', { class: 'btn primary', onclick: () => save(true) }, 'Test, save & finish')
-        : h('button', { class: 'btn', onclick: () => save(false) }, 'Save'),
-      wizard || (existing && existing.id === data.active) ? null : h('button', { class: 'btn primary', onclick: () => save(true) }, 'Save & use now')));
+      // One button: signs in once to check, saves only if that works, otherwise stays here.
+      h('button', { class: 'btn primary', onclick: () => save(!existing || existing.id === data.active) },
+        wizard ? 'Sign in & finish' : existing ? 'Check & save' : 'Sign in, save & use')));
   (existing ? secret.input : host).focus();
 }
 

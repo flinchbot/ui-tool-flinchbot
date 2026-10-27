@@ -81,7 +81,7 @@ The two defaults cost about the same, roughly 5–15¢ for a typical health chec
 4. Click **Create**.
 5. Check the new account in the admin list. It should show as **local** (local access only), not as a UI.com account.
 
-**Alternative: a UniFi API key instead of the local account.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's **Test** button tells you whether the key works on your console. If it doesn't, use the local username and password instead.
+**Alternative: a UniFi API key instead of the local account.** Newer UniFi Network versions can create API keys under **Settings → Control Plane → Integrations** (the menu name varies by version). Some versions only accept these keys for part of what this app does. When you save the connection, the app's sign-in check tells you whether the key works on your console. If it doesn't, use the local username and password instead.
 
 **Note the console's address and port:**
 
@@ -120,13 +120,13 @@ The folder is self-contained, so you can move it or copy it to another PC later.
      3. Pick a model, then **Save & continue**.
 
      This writes the `.env` settings file for you; you never need to edit it by hand.
-   - **Step 2, Your UniFi console:** enter the following, then click **Test, save & finish**:
+   - **Step 2, Your UniFi console:** enter the following, then click **Sign in & finish**:
      - a name (e.g. `Home`)
      - the console's IP address
      - the port
      - the local username and password from step 3
 
-     **Test** also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).
+     That button signs in **once** to check the details. If the sign-in fails you stay on this screen with the reason, and nothing is saved. Fix it and press the button again. Pressing it again with the same rejected password does nothing, to protect you from UniFi's lockout. The check also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).
 3. Keep the black `start.bat` window open while you use the app. Close it (or press **Ctrl+C** in it) to stop the app.
 
 ## 7. Everyday use
@@ -189,7 +189,8 @@ If Credential Manager isn't available, passwords fall back to `data\secrets.json
 | *"Timed out reaching https://…"* | This PC can't reach the console. Is it on that network or VPN? Can you open `https://<console IP>` in the browser? |
 | *"refused the connection"* | Wrong port. See the port table in step 3. |
 | *"UI.com cloud account with two-factor sign-in"* (UniFi's raw error: *HTTP 499, MFA token required*) | You entered your own UI.com login. Create the separate **local-only** admin from step 3 and use that instead. |
-| *"Login rejected"* | Check the username and password. The account must be **local-only** (step 3). Too many failed tries locks logins for a few minutes. |
+| *"Login rejected"* | Check the username and password. The account must be **local-only** (step 3). |
+| *"UniFi has temporarily locked sign-ins"*, or a banner saying flinchbot **stopped trying** | Too many failed sign-ins (from any app or browser) make UniFi lock sign-ins for a while; Ubiquiti doesn't say how long. flinchbot never retries a rejected password by itself, and after a lockout it waits at least 10 minutes. Fix the password (**Edit connection**), wait, then press **Retry once**. Closing the app also guarantees no more attempts. |
 | *"Permission denied … read-only"* | The UniFi account is *View Only*. Give it Full Management if you want changes to work. |
 | *"rejected the API key"* (UniFi) | That UniFi version doesn't accept API keys for this feature. Switch the connection to username + password. |
 | *"DIFFERENT security certificate"* | The address now answers with a different console certificate. Typical causes: a factory reset, a replaced console, or being on a different network where that IP belongs to something else. If you're sure it's your console, open the connection and click **Trust new certificate**. |

@@ -38,6 +38,7 @@ class MockUniFi:
         self.calls = []                 # (method, path, body) of every API call
         self.n_clients = n_clients
         self.legacy_alarms = legacy_alarms     # False = Network 9.x/10.x behaviour
+        self.locked = False                    # True = answer every login with 429 (sign-in lockout)
         self.tmp = tempfile.mkdtemp()
         crt, key = make_cert(self.tmp, cn)
         mock = self
@@ -72,6 +73,8 @@ class MockUniFi:
                 if path in ("/api/auth/login", "/api/login"):
                     if path != login_path:
                         return self._json(404, {"error": "not found"})
+                    if mock.locked:
+                        return self._json(429, {"code": "AUTHENTICATION_FAILED_LIMIT_REACHED"})
                     if body and body.get("username") == "cloud-user@example.com":   # UI.com SSO account
                         return self._json(499, {"code": "MFA_AUTH_REQUIRED",
                                                 "message": "MFA token required to authenticate to SSO"})
@@ -147,6 +150,9 @@ class MockUniFi:
         if tail == "system-log/all":
             return {"data": [{"key": "WAN_DOWN", "timestamp": 1}], "totalCount": 1}
         return {"meta": {"rc": "ok"}, "data": [{"ok": True, "echo": body}]}
+
+    def login_attempts(self):
+        return sum(1 for _, p, _ in self.calls if p in ("/api/auth/login", "/api/login"))
 
     def expire_sessions(self):
         self.sessions.clear()

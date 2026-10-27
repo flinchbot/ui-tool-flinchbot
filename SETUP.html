@@ -151,7 +151,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <li>Click <strong>Create</strong>.</li>
 <li>Check the new account in the admin list. It should show as <strong>local</strong> (local access only), not as a UI.com account.</li>
 </ol>
-<p><strong>Alternative: a UniFi API key instead of the local account.</strong> Newer UniFi Network versions can create API keys under <strong>Settings → Control Plane → Integrations</strong> (the menu name varies by version). Some versions only accept these keys for part of what this app does. The app's <strong>Test</strong> button tells you whether the key works on your console. If it doesn't, use the local username and password instead.</p>
+<p><strong>Alternative: a UniFi API key instead of the local account.</strong> Newer UniFi Network versions can create API keys under <strong>Settings → Control Plane → Integrations</strong> (the menu name varies by version). Some versions only accept these keys for part of what this app does. When you save the connection, the app's sign-in check tells you whether the key works on your console. If it doesn't, use the local username and password instead.</p>
 <p><strong>Note the console's address and port:</strong></p>
 <table>
 <thead>
@@ -207,14 +207,14 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <p>This writes the <code>.env</code> settings file for you; you never need to edit it by hand.</p>
 </li>
 <li>
-<p><strong>Step 2, Your UniFi console:</strong> enter the following, then click <strong>Test, save &amp; finish</strong>:</p>
+<p><strong>Step 2, Your UniFi console:</strong> enter the following, then click <strong>Sign in &amp; finish</strong>:</p>
 <ul>
 <li>a name (e.g. <code>Home</code>)</li>
 <li>the console's IP address</li>
 <li>the port</li>
 <li>the local username and password from step 3</li>
 </ul>
-<p><strong>Test</strong> also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).</p>
+<p>That button signs in <strong>once</strong> to check the details. If the sign-in fails you stay on this screen with the reason, and nothing is saved. Fix it and press the button again. Pressing it again with the same rejected password does nothing, to protect you from UniFi's lockout. The check also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).</p>
 </li>
 </ul>
 </li>
@@ -327,7 +327,11 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 </tr>
 <tr>
 <td><em>"Login rejected"</em></td>
-<td>Check the username and password. The account must be <strong>local-only</strong> (step 3). Too many failed tries locks logins for a few minutes.</td>
+<td>Check the username and password. The account must be <strong>local-only</strong> (step 3).</td>
+</tr>
+<tr>
+<td><em>"UniFi has temporarily locked sign-ins"</em>, or a banner saying flinchbot <strong>stopped trying</strong></td>
+<td>Too many failed sign-ins (from any app or browser) make UniFi lock sign-ins for a while; Ubiquiti doesn't say how long. flinchbot never retries a rejected password by itself, and after a lockout it waits at least 10 minutes. Fix the password (<strong>Edit connection</strong>), wait, then press <strong>Retry once</strong>. Closing the app also guarantees no more attempts.</td>
 </tr>
 <tr>
 <td><em>"Permission denied … read-only"</em></td>

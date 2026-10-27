@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from http.server import ThreadingHTTPServer
@@ -262,6 +263,41 @@ class UniFiClientTests(unittest.TestCase):
         good = test_connection(self.prof(m), "pw")["fingerprint"]
         UniFiClient(self.prof(m, console_type="unifi_os", fingerprint=good), "pw").get_health()
         self.assertTrue(test_connection(self.prof(m, fingerprint="11" * 32), "pw")["cert_changed"])
+
+    def test_wrong_password_is_tried_once_then_never_again(self):
+        m = self.mock()
+        c = UniFiClient(self.prof(m, console_type="unifi_os"), "wrong")
+        for _ in range(5):                                   # e.g. five status polls
+            with self.assertRaises(UniFiError) as cm:
+                c.get_health()
+            self.assertEqual(cm.exception.kind, "auth")
+        self.assertEqual(m.login_attempts(), 1)
+        c.clear_login_block()                                # the Retry button
+        with self.assertRaises(UniFiError):
+            c.get_health()
+        self.assertEqual(m.login_attempts(), 2)
+
+    def test_lockout_pauses_sign_in(self):
+        m = self.mock()
+        m.locked = True
+        c = UniFiClient(self.prof(m, console_type="unifi_os"), "pw")
+        for _ in range(4):
+            with self.assertRaises(UniFiError) as cm:
+                c.get_devices()
+            self.assertEqual(cm.exception.kind, "ratelimit")
+        self.assertEqual(m.login_attempts(), 1)
+        self.assertGreater(c.login_blocked()["until"], time.time() + 500)
+        m.locked = False
+        c.login_block["until"] = time.time() - 1             # pause over
+        self.assertEqual(c.get_health()[0]["subsystem"], "wan")
+        self.assertEqual(m.login_attempts(), 2)
+
+    def test_a_test_makes_exactly_one_sign_in_attempt(self):
+        m = self.mock()
+        self.assertFalse(test_connection(self.prof(m), "wrong")["ok"])
+        self.assertEqual(m.login_attempts(), 1)            # no second try on the other console type
+        m2 = self.mock(mode="standalone")
+        self.assertTrue(test_connection(self.prof(m2), "pw")["ok"])  # detection still falls through on 404
 
     def test_relogin_after_session_expiry(self):
         m = self.mock()
@@ -646,12 +682,40 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(r["reply"], "WAN is fine.")
         self.req("POST", "/api/settings", {"provider": "anthropic"})
 
-        # wrong saved password -> friendly error, not a crash
+        # wrong saved password -> friendly error, ONE sign-in attempt, no matter how often the page polls
         sid = saved["saved_id"]
         self.req("POST", "/api/connections", {"id": sid, "secret": "bad"})
-        s, st, _ = self.req("GET", "/api/status")
+        before = self.m.login_attempts()
+        for _ in range(4):
+            s, st, _ = self.req("GET", "/api/status")
+            self.req("GET", "/api/network")
         self.assertFalse(st["connected"])
         self.assertEqual(st["error_kind"], "auth")
+        self.assertTrue(st["login_blocked"])
+        self.assertIsNone(st["retry_after"])
+        self.assertEqual(self.m.login_attempts() - before, 1)
+        self.req("POST", "/api/connections/retry", {})                 # explicit Retry = one more
+        self.req("GET", "/api/status")
+        self.assertEqual(self.m.login_attempts() - before, 2)
+
+        # the Test endpoint won't resend credentials the console just rejected
+        bad = {"name": "Home", "host": "127.0.0.1", "port": self.m.port, "auth": "password",
+               "username": "claude", "secret": "nope"}
+        n = self.m.login_attempts()
+        r1 = self.req("POST", "/api/connections/test", dict(bad))[1]
+        r2 = self.req("POST", "/api/connections/test", dict(bad))[1]
+        self.assertFalse(r1["ok"]); self.assertFalse(r2["ok"])
+        self.assertIn("Not sent again", r2["error"])
+        self.assertEqual(self.m.login_attempts() - n, 1)
+        # ...and stays away from a console that has locked sign-ins
+        self.m.locked = True
+        lk = dict(bad, secret="different-1")
+        self.assertEqual(self.req("POST", "/api/connections/test", lk)[1]["kind"], "ratelimit")
+        n = self.m.login_attempts()
+        r = self.req("POST", "/api/connections/test", dict(bad, secret="different-2"))[1]
+        self.assertIn("try again in about", r["error"])
+        self.assertEqual(self.m.login_attempts(), n)
+        self.m.locked = False
 
 
 if __name__ == "__main__":

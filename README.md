@@ -31,6 +31,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
   - No CORS, and the page can't be framed.
 - **Handles large networks.** Device and client lists are slimmed, searchable and paged, so the AI never gets cut-off JSON.
 - **Session recovery.** If the UniFi session expires or the console reboots, the app re-logs in automatically.
+- **Lockout-safe sign-in.** A connection is only saved after one successful sign-in check. A rejected password is never retried automatically: polling stops, and a banner offers Edit / Retry once. After UniFi's "too many attempts" lockout, the app waits at least 10 minutes. Re-testing identical rejected credentials is refused without contacting the console.
 
 ## Layout
 
@@ -67,7 +68,7 @@ Not committed (see `.gitignore`):
 - **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it (e.g. to `unifi-flinchbot`) in GitHub settings is safe; GitHub redirects the old URL.
 - **Unofficial UniFi API.** Most calls use the private Network API that the UniFi web UI itself uses. Ubiquiti can change it between versions. `probe_events.py` shows which endpoints a given console answers.
 - **Legacy firewall rules.** `create_firewall_rule` writes classic `LAN_IN` rules. On consoles using Zone-Based Firewall they may not apply.
-- **UniFi API keys.** Not every UniFi version accepts them on the private endpoints. The Test button reports this.
+- **UniFi API keys.** Not every UniFi version accepts them on the private endpoints. The sign-in check when saving a connection reports this.
 - **Server-side chat history.** The conversation lives in the running app (one per app instance), not per browser tab.
 
 ## Editing the docs
