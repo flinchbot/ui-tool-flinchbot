@@ -35,7 +35,7 @@ from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -185,7 +185,8 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
             pass
 
-    STATIC_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+    STATIC_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+                    ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 
     def send_static(self, name):
         """Images for the UI. Only plain file names in frontend/static, no subfolders."""
@@ -210,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_page(self):
         path = os.path.join(cfg.FRONTEND_DIR, "index.html")
         with open(path, encoding="utf-8") as f:
-            html = f.read().replace("__APP_TOKEN__", APP_TOKEN)
+            html = f.read().replace("__APP_TOKEN__", APP_TOKEN).replace("__APP_VERSION__", APP_VERSION)
         body = html.encode()
         self._headers(200, "text/html; charset=utf-8", len(body))
         self.send_header("Content-Security-Policy",

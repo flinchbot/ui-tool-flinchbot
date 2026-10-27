@@ -588,6 +588,12 @@ class ServerTests(unittest.TestCase):
     def test_1b_static_files_and_setup_guide(self):
         s, _, r = self.req("GET", "/static/flinchbot-icon.png", token=False)
         self.assertEqual((s, r.getheader("Content-Type")), (200, "image/png"))
+        for name, ctype in (("themes.css", "text/css"), ("themes.js", "text/javascript")):
+            s, body, r = self.req("GET", f"/static/{name}?v=x", token=False)
+            self.assertEqual(s, 200, name)
+            self.assertTrue(r.getheader("Content-Type").startswith(ctype), name)
+        s, page, _ = self.req("GET", "/", token=False)
+        self.assertIn(f"themes.css?v={srv.APP_VERSION}", page)
         s, _, r = self.req("GET", "/favicon.ico", token=False)
         self.assertEqual(s, 200)
         s, page, r = self.req("GET", "/setup", token=False)

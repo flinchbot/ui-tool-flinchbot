@@ -24,6 +24,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
   - Download as an HTML page where ticks are saved, with progress, "hide done" and print/PDF.
   - Or download as Markdown with `- [ ]` task lists.
 - **Chat export** to Markdown or HTML.
+- **Themes:** Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner and Candle Maker. Each is a full re-skin (colours, fonts, text size, layout) with light and dark versions; the choice is saved per browser, and moving backgrounds respect reduced-motion. Fonts come from Google Fonts on first use.
 - **Locked to this PC:**
   - Listens on `127.0.0.1` only.
   - Every request needs a per-launch token.
@@ -44,7 +45,7 @@ backend/unifi_client.py UniFi API client (UniFi OS + standalone, pinning, re-log
 backend/config_store.py .env + connection profiles + Credential Manager
 backend/probe_events.py diagnostic: which endpoints the active console answers
 frontend/index.html    the whole UI (no build step)
-frontend/static/       flinchbot icon, favicon and About artwork
+frontend/static/       themes.css + themes.js (themes), flinchbot icon, favicon, About artwork
 SETUP.md / SETUP.html  setup guide (HTML is generated: python tools/build_setup_html.py)
 tools/                 doc build script
 ```
@@ -64,7 +65,6 @@ Not committed (see `.gitignore`):
 
 ## Known limitations
 
-- **ChatGPT support is new.** It's built on OpenAI's documented Responses API and tested against a simulated API, but hasn't yet been run against the live OpenAI API.
 - **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it (e.g. to `unifi-flinchbot`) in GitHub settings is safe; GitHub redirects the old URL.
 - **Unofficial UniFi API.** Most calls use the private Network API that the UniFi web UI itself uses. Ubiquiti can change it between versions. `probe_events.py` shows which endpoints a given console answers.
 - **Legacy firewall rules.** `create_firewall_rule` writes classic `LAN_IN` rules. On consoles using Zone-Based Firewall they may not apply.

@@ -145,6 +145,7 @@ The folder is self-contained, so you can move it or copy it to another PC later.
   - **⤓ Markdown:** for notes apps. Obsidian, VS Code and GitHub show the `[ ]` boxes as clickable checkboxes.
   - **↻ Regenerate** gives a fresh snapshot with an empty checklist, which is handy to confirm your fixes took.
 - **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
+- **🎨 Theme:** pick a look: Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner or Candle Maker. Each one changes colours, fonts, text size and screen layout, and each has a light and a dark version (or *Auto*, which follows the Windows setting). The choice is remembered in that browser. If Windows has animations turned off, the moving backgrounds stay still. The movie and show themes are fan-inspired: colours and moods only, no logos or characters.
 - **About:** click the robot logo for the version, the AI in use, and this guide.
 
 ## 8. Updating the app
@@ -173,6 +174,7 @@ If Credential Manager isn't available, passwords fall back to `data\secrets.json
 - When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
 - Wi-Fi passwords and other secret fields are **removed first**.
 - ChatGPT requests are sent with OpenAI's "don't store" option.
+- Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the PC). Only the font request goes out; no network data does.
 - Nothing is sent anywhere else, and the app can't be reached from other computers.
 
 **Moving to a new PC:**

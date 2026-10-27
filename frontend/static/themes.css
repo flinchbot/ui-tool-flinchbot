@@ -1,0 +1,422 @@
+/* ==========================================================================
+   UniFi × flinchbot — themes
+   Each theme = palette (light + dark) + skin (fonts, type scale, shapes,
+   layout, background effect). Applied as <html data-theme="…" data-mode="…">.
+
+   * Palettes use [data-theme][data-mode] on ANY element, so the theme picker
+     can render live previews.
+   * Skins use html[data-theme=…] and only restyle; the DOM is the same for all
+     themes, so no theme can break app behaviour.
+   * Themes named after films/shows are "inspired by" (palette, type, mood);
+     they use no logos, characters or copyrighted artwork.
+   ========================================================================== */
+
+/* ── shared helpers ──────────────────────────────────────────────────────── */
+html { background:var(--bg); }
+body { background:transparent; }
+html[data-theme] #fx { background:none; }
+
+/* ======================================================================
+   1. DEFAULT — the original look, plus a light version
+   ====================================================================== */
+[data-theme="default"][data-mode="dark"] {
+  --bg:#0a0c10; --surface:#111318; --surface2:#161922; --border:#1e2230;
+  --accent:#00d4ff; --accent2:#7b61ff; --warn:#ff6b35; --ok:#00e5a0; --danger:#ff4d6d; --medium:#ffc800;
+  --text:#e2e8f0; --muted:#64748b; --bot:#ff6b81; --on-accent:#fff;
+  --font-ui:'Syne',system-ui,sans-serif; --font-mono:'Space Mono',ui-monospace,monospace; --font-head:'Syne',system-ui,sans-serif;
+}
+[data-theme="default"][data-mode="light"] {
+  --bg:#f4f6f9; --surface:#ffffff; --surface2:#ffffff; --border:#dfe4eb;
+  --accent:#0089aa; --accent2:#6248ff; --warn:#d24a12; --ok:#078a5b; --danger:#d22b4d; --medium:#a77a00;
+  --text:#18202b; --muted:#5d6878; --bot:#d1294a; --on-accent:#fff;
+  --overlay:rgba(20,28,40,.45); --shadow:0 18px 50px rgba(20,30,50,.18);
+  --font-ui:'Syne',system-ui,sans-serif; --font-mono:'Space Mono',ui-monospace,monospace; --font-head:'Syne',system-ui,sans-serif;
+}
+
+/* ======================================================================
+   2. MATRIX — green phosphor terminal, digital rain
+   ====================================================================== */
+[data-theme="matrix"] {
+  --font-ui:'Share Tech Mono',ui-monospace,monospace; --font-mono:'Share Tech Mono',ui-monospace,monospace;
+  --font-head:'VT323','Share Tech Mono',monospace;
+  --radius:0px; --radius-lg:0px; --bubble-radius:0px; --pill:0px;
+  --grad:linear-gradient(var(--accent),var(--accent));
+}
+[data-theme="matrix"][data-mode="dark"] {
+  --bg:#000300; --surface:rgba(0,12,3,.88); --surface2:#021006; --border:#0f4a1c;
+  --accent:#00ff41; --accent2:#7dffa1; --warn:#e9ff3b; --ok:#00ff41; --danger:#ff4040; --medium:#d7ff3b;
+  --text:#b4ffc6; --muted:#3fa45b; --bot:#00ff41; --on-accent:#001a06;
+  --overlay:rgba(0,0,0,.8); --shadow:0 0 0 1px #0f4a1c,0 0 30px rgba(0,255,65,.12);
+}
+[data-theme="matrix"][data-mode="light"] {
+  --bg:#e9f6ea; --surface:rgba(246,252,246,.92); --surface2:#f6fcf6; --border:#9fd3a8;
+  --accent:#06782a; --accent2:#2e7d32; --warn:#8a5a00; --ok:#06782a; --danger:#c62828; --medium:#8a6d00;
+  --text:#0b3a16; --muted:#3f7a4c; --bot:#06782a; --on-accent:#fff;
+  --overlay:rgba(10,40,15,.4); --shadow:0 0 0 1px #9fd3a8;
+}
+html[data-theme="matrix"] { --fs:16px; --sidebar-w:300px; --chat-bg:transparent; --chat-max:100%; }
+html[data-theme="matrix"] main { grid-template-columns:minmax(0,1fr) var(--sidebar-w); }
+html[data-theme="matrix"] aside { order:2; border-right:0; border-left:1px solid var(--border); }
+html[data-theme="matrix"] .logo h1 { font-size:1.75rem; font-weight:400; text-transform:uppercase; letter-spacing:.06em; }
+html[data-theme="matrix"] .logo h1::after { content:"█"; margin-left:4px; animation:mx-blink 1s steps(1) infinite; }
+@keyframes mx-blink { 50% { opacity:0; } }
+html[data-theme="matrix"] .chat-toolbar h2 { font-size:1.5rem; font-weight:400; }
+html[data-theme="matrix"] .sidebar-section h3 { font-family:var(--font-head); font-size:1.1rem; letter-spacing:.12em; }
+html[data-theme="matrix"] .stat-val { font-family:var(--font-head); font-size:2rem; white-space:nowrap; font-weight:400; }
+html[data-theme="matrix"] .msg { max-width:none; }
+html[data-theme="matrix"] .msg-avatar { display:none; }
+html[data-theme="matrix"] .msg.user { align-self:stretch; flex-direction:row; }
+html[data-theme="matrix"] .msg.user .msg-body { align-items:flex-start; }
+html[data-theme="matrix"] .msg-name { font-family:var(--font-head); font-size:1.15rem; color:var(--accent) !important; padding:0; }
+html[data-theme="matrix"] .msg-name::before { content:"> "; }
+html[data-theme="matrix"] .msg.user .msg-name { color:var(--accent2) !important; }
+html[data-theme="matrix"] .msg-bubble { background:transparent !important; border:0 !important; border-left:2px solid var(--border) !important; padding:2px 0 2px 14px; }
+html[data-theme="matrix"] .msg.user .msg-bubble { border-left-color:var(--accent2) !important; }
+html[data-theme="matrix"] .approval { border:1px dashed var(--warn) !important; border-left:2px solid var(--warn) !important; padding:10px 14px !important; }
+html[data-theme="matrix"] .input-row::before { content:">"; align-self:center; color:var(--accent); font-family:var(--font-head); font-size:2rem; line-height:1; }
+html[data-theme="matrix"] .chat-input { background:transparent; border-color:var(--border); }
+html[data-theme="matrix"] .btn.primary, html[data-theme="matrix"] .send-btn { color:var(--on-accent); }
+html[data-theme="matrix"][data-mode="dark"] body { text-shadow:0 0 6px rgba(0,255,65,.35); }
+html[data-theme="matrix"][data-mode="dark"] .app::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:100;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px); }
+/* digital rain is drawn on #fx by themes.js */
+
+/* ======================================================================
+   3. WINDOWS 95 — desktop windows, bevels, taskbar at the bottom
+   ====================================================================== */
+[data-theme="win95"] {
+  --font-ui:Tahoma,"MS Sans Serif","Microsoft Sans Serif",Verdana,Geneva,sans-serif;
+  --font-mono:"Courier New",Courier,monospace; --font-head:var(--font-ui);
+  --radius:0px; --radius-lg:0px; --bubble-radius:0px; --pill:0px; --shadow:none;
+}
+[data-theme="win95"][data-mode="light"] {
+  --desktop:#008080; --bg:#ffffff; --surface:#c0c0c0; --surface2:#c0c0c0; --border:#808080;
+  --b-hi:#ffffff; --b-light:#dfdfdf; --b-shade:#808080; --b-lo:#000000;
+  --title1:#000080; --title2:#1084d0; --title-text:#ffffff; --tip:#ffffe1;
+  --accent:#000080; --accent2:#800080; --warn:#a00000; --ok:#007000; --danger:#c00000; --medium:#7a5c00;
+  --text:#000000; --muted:#3c3c3c; --bot:#000080; --on-accent:#000000; --overlay:rgba(0,0,0,.12);
+  --grad:linear-gradient(#c0c0c0,#c0c0c0);
+}
+[data-theme="win95"][data-mode="dark"] {   /* the classic "High Contrast Black" scheme */
+  --desktop:#000000; --bg:#000000; --surface:#000000; --surface2:#000000; --border:#ffffff;
+  --b-hi:#ffffff; --b-light:#c0c0c0; --b-shade:#808080; --b-lo:#ffffff;
+  --title1:#800080; --title2:#800080; --title-text:#ffffff; --tip:#000000;
+  --accent:#ffff00; --accent2:#00ffff; --warn:#ff9c00; --ok:#00ff00; --danger:#ff5050; --medium:#ffff00;
+  --text:#ffffff; --muted:#c0c0c0; --bot:#00ffff; --on-accent:#ffffff; --overlay:rgba(0,0,0,.3);
+  --grad:linear-gradient(#000,#000);
+}
+html[data-theme="win95"] { --fs:13px; --sidebar-w:250px; --chat-bg:var(--surface); --chat-max:100%;
+  background:var(--desktop); -webkit-font-smoothing:none; }
+html[data-theme="win95"] .app { grid-template-areas:'banner' 'main' 'header'; grid-template-rows:auto 1fr auto; }
+html[data-theme="win95"] main { padding:10px; gap:10px; background:transparent; }
+/* windows */
+html[data-theme="win95"] aside, html[data-theme="win95"] .chat-area, html[data-theme="win95"] .modal {
+  background:var(--surface); border:2px solid; border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi);
+  box-shadow:inset -1px -1px var(--b-shade),inset 1px 1px var(--b-light); padding:2px; }
+html[data-theme="win95"] aside::before, html[data-theme="win95"] .chat-area::before {
+  display:block; flex-shrink:0; padding:3px 6px; font-weight:bold; font-size:.95rem; color:var(--title-text);
+  background:linear-gradient(90deg,var(--title1),var(--title2)); }
+html[data-theme="win95"] aside::before { content:"Network Neighborhood"; }
+html[data-theme="win95"] .chat-area::before { content:"flinchbot - Network Assistant"; }
+html[data-theme="win95"] .sidebar-section { border-bottom:0; padding:10px; }
+html[data-theme="win95"] .sidebar-section h3 { color:var(--text); letter-spacing:0; text-transform:none; font-size:.95rem; font-weight:bold; }
+/* sunken wells */
+html[data-theme="win95"] .stat-card, html[data-theme="win95"] .messages, html[data-theme="win95"] .device-list,
+html[data-theme="win95"] .chat-input, html[data-theme="win95"] .field input, html[data-theme="win95"] .field select,
+html[data-theme="win95"] .conn-btn, html[data-theme="win95"] .rep-item, html[data-theme="win95"] .conn-row {
+  background:var(--bg); border:2px solid; border-color:var(--b-shade) var(--b-hi) var(--b-hi) var(--b-shade);
+  box-shadow:inset 1px 1px var(--b-lo); border-radius:0; color:var(--text); }
+html[data-theme="win95"] .messages { margin:4px 6px; padding:14px; }
+html[data-theme="win95"] .stat-val { color:var(--accent); font-size:1.7rem; font-family:var(--font-ui); }
+html[data-theme="win95"] .device-list { gap:0; padding:2px; }
+html[data-theme="win95"] .device-item { border:0; border-radius:0; background:transparent; padding:4px 6px; }
+html[data-theme="win95"] .device-item:hover { background:var(--title1); color:var(--title-text); }
+html[data-theme="win95"] .device-item:hover .device-meta { color:var(--title-text); }
+html[data-theme="win95"] .chat-toolbar, html[data-theme="win95"] .chat-input-area { background:var(--surface); border:0; }
+html[data-theme="win95"] .chat-toolbar h2 { font-size:1rem; font-weight:bold; }
+/* buttons: raised bevel, pressed when active */
+html[data-theme="win95"] .btn, html[data-theme="win95"] .quick-btn, html[data-theme="win95"] .send-btn,
+html[data-theme="win95"] .seg button, html[data-theme="win95"] .x, html[data-theme="win95"] .logo-btn,
+html[data-theme="win95"] .menu-item, html[data-theme="win95"] .pw-wrap button {
+  background:var(--surface); color:var(--text); border:2px solid; border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi);
+  box-shadow:inset -1px -1px var(--b-shade),inset 1px 1px var(--b-light); border-radius:0; font-weight:normal; opacity:1; }
+html[data-theme="win95"] .btn:active, html[data-theme="win95"] .quick-btn:active, html[data-theme="win95"] .send-btn:active,
+html[data-theme="win95"] .seg button.on, html[data-theme="win95"] .logo-btn:active {
+  border-color:var(--b-lo) var(--b-hi) var(--b-hi) var(--b-lo); box-shadow:inset 1px 1px var(--b-shade); }
+html[data-theme="win95"] .btn:hover:not(:disabled), html[data-theme="win95"] .quick-btn:hover { color:var(--text); border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi); }
+html[data-theme="win95"] .btn.primary { outline:1px solid var(--b-lo); outline-offset:0; font-weight:bold; color:var(--text); }
+html[data-theme="win95"] .btn.primary:hover:not(:disabled) { color:var(--text); opacity:1; }
+html[data-theme="win95"] .btn:disabled { color:var(--b-shade); text-shadow:1px 1px var(--b-hi); }
+html[data-theme="win95"] .seg button.on { color:var(--text); background:var(--b-light); }
+html[data-theme="win95"][data-mode="dark"] .seg button.on { color:var(--on-accent); background:var(--accent); }
+html[data-theme="win95"] .send-btn { width:auto; padding:0 14px; height:auto; }
+html[data-theme="win95"] .pw-wrap button { padding:1px 6px; }
+/* chat bubbles: assistant = tooltip yellow, user = plain */
+html[data-theme="win95"] .msg-avatar { border-radius:0; }
+html[data-theme="win95"] .msg.assistant .msg-bubble { background:var(--tip); border:1px solid var(--b-lo); }
+html[data-theme="win95"] .msg.user .msg-bubble { background:var(--bg); border:1px solid var(--b-shade); }
+html[data-theme="win95"] .msg-name { color:var(--text) !important; font-weight:bold; }
+html[data-theme="win95"] .approval { background:var(--surface) !important; border:2px solid !important; border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi) !important; }
+html[data-theme="win95"] .approval h4 { color:var(--text); }
+html[data-theme="win95"] .approval h4::before { content:"⚠ "; color:var(--medium); }
+/* taskbar */
+html[data-theme="win95"] header { background:var(--surface); border-bottom:0; border-top:2px solid var(--b-hi); padding:3px 4px; gap:6px; }
+html[data-theme="win95"] .logo-btn { padding:2px 6px; gap:6px; }
+html[data-theme="win95"] .logo-img { width:18px; height:18px; border-radius:0; box-shadow:none; transform:none !important; }
+html[data-theme="win95"] .logo h1 { font-size:.95rem; font-weight:bold; letter-spacing:0; }
+html[data-theme="win95"] .logo span { color:var(--text); }
+html[data-theme="win95"] .conn-btn { color:var(--text); padding:3px 10px; font-family:var(--font-ui); }
+html[data-theme="win95"] .conn-btn .dot { color:var(--ok); animation:none; }
+html[data-theme="win95"] .conn-btn.offline .dot { color:var(--danger); }
+html[data-theme="win95"] .header-actions .btn { padding:3px 10px; }
+html[data-theme="win95"] .menu { top:auto; bottom:calc(100% + 4px); background:var(--surface); border:2px solid; border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi); border-radius:0; }
+html[data-theme="win95"] .menu-item { border:0; box-shadow:none; }
+html[data-theme="win95"] .menu-item:hover { background:var(--title1); color:var(--title-text); }
+html[data-theme="win95"] .banner { background:var(--tip); color:var(--text); border-bottom:1px solid var(--b-lo); }
+/* dialogs */
+html[data-theme="win95"] .modal { padding:24px 16px 16px; }
+html[data-theme="win95"] .modal-head { margin:-22px -14px 14px; padding:3px 4px 3px 8px; align-items:center;
+  background:linear-gradient(90deg,var(--title1),var(--title2)); }
+html[data-theme="win95"] .modal-head h2 { color:var(--title-text); font-size:1rem; font-weight:bold; margin:0; }
+html[data-theme="win95"] .x { width:20px; height:18px; font-size:.85rem; line-height:12px; padding:0; }
+html[data-theme="win95"] .steps span { border-radius:0; }
+html[data-theme="win95"] .result, html[data-theme="win95"] .note { border-radius:0; }
+html[data-theme="win95"] .toast { border-radius:0; background:var(--tip); color:var(--text); border:1px solid var(--b-lo); }
+html[data-theme="win95"] .badge { border-radius:0; }
+html[data-theme="win95"] .tag { border-radius:0; }
+
+/* ======================================================================
+   4. STAR WARS — inspired: starfield, crawl yellow, sidebar as a top strip
+   (no logos, characters or film artwork)
+   ====================================================================== */
+[data-theme="starwars"] {
+  --font-ui:'Exo 2',system-ui,sans-serif; --font-head:'Orbitron','Exo 2',sans-serif; --font-mono:'Share Tech Mono',ui-monospace,monospace;
+  --radius:4px; --radius-lg:6px; --bubble-radius:6px; --pill:4px;
+}
+[data-theme="starwars"][data-mode="dark"] {          /* deep space */
+  --bg:#000004; --surface:rgba(9,10,20,.82); --surface2:#0d0f1c; --border:#262b45;
+  --accent:#ffe81f; --accent2:#4bd5ee; --warn:#ff7a2f; --ok:#57f287; --danger:#ff3b3b; --medium:#ffd166;
+  --text:#ebecf5; --muted:#8f95b2; --bot:#ffe81f; --on-accent:#0b0b0b;
+  --grad:linear-gradient(135deg,#ffe81f,#ffb000); --overlay:rgba(0,0,6,.78);
+}
+[data-theme="starwars"][data-mode="light"] {         /* desert planet, twin suns */
+  --bg:#f0dfbf; --surface:rgba(250,240,220,.9); --surface2:#fbf2df; --border:#d9bf91;
+  --accent:#a3500c; --accent2:#22607e; --warn:#c2410c; --ok:#3f7d20; --danger:#b91c1c; --medium:#9a6b00;
+  --text:#3a2914; --muted:#7a6040; --bot:#9a3412; --on-accent:#fff;
+  --grad:linear-gradient(135deg,#c8691a,#9a3412); --overlay:rgba(60,40,10,.35); --shadow:0 18px 50px rgba(90,60,20,.25);
+}
+html[data-theme="starwars"] { --fs:15.5px; --chat-bg:transparent; --chat-max:820px; }
+html[data-theme="starwars"] main { grid-template-columns:minmax(0,1fr); grid-template-rows:auto 1fr; }
+html[data-theme="starwars"] aside { flex-direction:row; border-right:0; border-bottom:1px solid var(--border); overflow-x:auto; overflow-y:hidden; }
+html[data-theme="starwars"] .sidebar-section { border-bottom:0; border-right:1px solid var(--border); padding:10px 16px; }
+html[data-theme="starwars"] .sidebar-section h3 { margin-bottom:6px; }
+html[data-theme="starwars"] .stat-grid { grid-template-columns:repeat(4,minmax(78px,auto)); }
+html[data-theme="starwars"] .stat-card { padding:6px 10px; }
+html[data-theme="starwars"] .stat-val { font-size:1.25rem; }
+html[data-theme="starwars"] .sidebar-section.devices-section { flex:1; overflow-x:auto; overflow-y:hidden; border-right:0; }
+html[data-theme="starwars"] .device-list { flex-direction:row; }
+html[data-theme="starwars"] .device-item { width:auto; min-width:170px; }
+html[data-theme="starwars"] .messages, html[data-theme="starwars"] .chat-input-area {
+  padding-left:max(20px,calc((100% - var(--chat-max)) / 2)); padding-right:max(20px,calc((100% - var(--chat-max)) / 2)); }
+html[data-theme="starwars"] .logo h1, html[data-theme="starwars"] .chat-toolbar h2, html[data-theme="starwars"] .modal h2,
+html[data-theme="starwars"] .sidebar-section h3 { text-transform:uppercase; letter-spacing:.14em; }
+html[data-theme="starwars"] .logo h1 { color:var(--accent); font-weight:700; font-size:1.05rem; }
+html[data-theme="starwars"] .logo span { color:var(--text); }
+html[data-theme="starwars"][data-mode="dark"] .logo h1 { text-shadow:0 0 12px rgba(255,232,31,.45); }
+html[data-theme="starwars"] .msg-bubble { backdrop-filter:blur(2px); }
+html[data-theme="starwars"][data-mode="dark"] #fx {
+  background:
+    radial-gradient(1px 1px at 20px 30px,#fff,transparent), radial-gradient(1px 1px at 140px 90px,#cfd8ff,transparent),
+    radial-gradient(1.5px 1.5px at 60px 160px,#fff,transparent), radial-gradient(1px 1px at 200px 220px,#fff,transparent),
+    radial-gradient(1px 1px at 260px 40px,#ffe9c4,transparent), radial-gradient(1.5px 1.5px at 330px 180px,#fff,transparent),
+    radial-gradient(1px 1px at 90px 280px,#bcd0ff,transparent), radial-gradient(1px 1px at 370px 300px,#fff,transparent),
+    #000004;
+  background-size:400px 340px; }
+html[data-theme="starwars"][data-mode="dark"] #fx::after { content:""; position:absolute; inset:0;
+  background:radial-gradient(1.5px 1.5px at 50px 70px,#fff,transparent), radial-gradient(2px 2px at 300px 120px,#fff,transparent),
+    radial-gradient(1.5px 1.5px at 180px 260px,#fff,transparent), radial-gradient(2px 2px at 520px 40px,#fff,transparent);
+  background-size:600px 380px; animation:sw-twinkle 4s ease-in-out infinite alternate; }
+@keyframes sw-twinkle { from { opacity:.25; } to { opacity:1; } }
+html[data-theme="starwars"][data-mode="light"] #fx {
+  background:
+    radial-gradient(circle at 82% 12%,rgba(255,250,220,.95) 0 34px,rgba(255,220,150,.35) 35px 70px,transparent 72px),
+    radial-gradient(circle at 90% 20%,rgba(255,236,190,.9) 0 22px,rgba(255,210,140,.3) 23px 50px,transparent 52px),
+    linear-gradient(180deg,#f6e6c4 0%,#efd8ad 55%,#e3c08a 100%); }
+
+/* ======================================================================
+   5. MY LITTLE PONY — inspired: pastels, rainbow, round and bubbly
+   (no characters or show artwork)
+   ====================================================================== */
+[data-theme="mlp"] {
+  --font-ui:'Fredoka',system-ui,sans-serif; --font-head:'Fredoka',system-ui,sans-serif; --font-mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+  --radius:14px; --radius-lg:28px; --bubble-radius:22px; --pill:99px;
+  --grad:linear-gradient(135deg,#ff8ad8,#b28dff 55%,#7ad7ff);
+}
+[data-theme="mlp"][data-mode="light"] {
+  --bg:#fff2fb; --surface:rgba(255,255,255,.9); --surface2:#fff8fd; --border:#f6c9e8;
+  --accent:#d63fa3; --accent2:#7c5cff; --warn:#e8701f; --ok:#1f9e74; --danger:#e23b6a; --medium:#b8860b;
+  --text:#4a2b5f; --muted:#9a7bb0; --bot:#d63fa3; --on-accent:#fff;
+  --overlay:rgba(120,60,140,.25); --shadow:0 18px 50px rgba(214,63,163,.18);
+}
+[data-theme="mlp"][data-mode="dark"] {                 /* night-sky pastel */
+  --bg:#1b1230; --surface:rgba(37,26,64,.9); --surface2:#2e2150; --border:#4a3874;
+  --accent:#ff8bd1; --accent2:#b39bff; --warn:#ffb36b; --ok:#6ee7b7; --danger:#ff7aa2; --medium:#ffe08a;
+  --text:#f8eaff; --muted:#b9a0da; --bot:#ff8bd1; --on-accent:#1b1230;
+  --overlay:rgba(10,5,25,.6);
+}
+html[data-theme="mlp"] { --fs:16.5px; --sidebar-w:290px; --chat-bg:transparent; }
+html[data-theme="mlp"] main { grid-template-columns:minmax(0,1fr) var(--sidebar-w); }
+html[data-theme="mlp"] aside { order:2; border-right:0; border-left:1px solid var(--border); }
+html[data-theme="mlp"] header::after { content:""; position:absolute; left:0; right:0; bottom:-1px; height:4px;
+  background:linear-gradient(90deg,#ff6b6b,#ffb86b,#ffe66b,#6bffa8,#6bc8ff,#b46bff); }
+html[data-theme="mlp"] .logo h1 { font-weight:600; font-size:1.3rem; letter-spacing:0; }
+html[data-theme="mlp"] .chat-toolbar h2 { font-weight:600; font-size:1.05rem; }
+html[data-theme="mlp"] .sidebar-section h3 { letter-spacing:.06em; text-transform:none; font-size:.85rem; font-weight:600; }
+html[data-theme="mlp"] .stat-val { font-family:var(--font-head); font-weight:600; }
+html[data-theme="mlp"] .msg-avatar, html[data-theme="mlp"] .logo-img { border-radius:50%; }
+html[data-theme="mlp"] .msg.assistant .msg-bubble { background:color-mix(in srgb,var(--accent2) 8%,var(--surface)); }
+html[data-theme="mlp"] .msg.user .msg-bubble { background:color-mix(in srgb,var(--accent) 12%,var(--surface)); }
+html[data-theme="mlp"] .msg-name::after { content:" ✦"; color:var(--accent2); }
+html[data-theme="mlp"] .btn, html[data-theme="mlp"] .seg button { border-radius:var(--pill); }
+html[data-theme="mlp"] #fx {
+  background:
+    radial-gradient(circle at 12% 18%,rgba(255,138,216,.28),transparent 32%),
+    radial-gradient(circle at 85% 12%,rgba(122,215,255,.26),transparent 30%),
+    radial-gradient(circle at 70% 85%,rgba(178,141,255,.24),transparent 34%),
+    radial-gradient(circle at 25% 80%,rgba(255,230,107,.2),transparent 30%), var(--bg); }
+html[data-theme="mlp"] #fx::after { content:""; position:absolute; inset:0;
+  background:radial-gradient(2px 2px at 40px 50px,#fff,transparent), radial-gradient(1.5px 1.5px at 160px 120px,#ffd6f2,transparent),
+    radial-gradient(2px 2px at 260px 30px,#e6dcff,transparent), radial-gradient(1.5px 1.5px at 90px 200px,#fff,transparent);
+  background-size:300px 240px; animation:mlp-drift 18s linear infinite; opacity:.9; }
+html[data-theme="mlp"][data-mode="light"] #fx::after { opacity:.6; filter:drop-shadow(0 0 2px rgba(214,63,163,.6)); }
+@keyframes mlp-drift { from { background-position:0 0; } to { background-position:300px -240px; } }
+
+/* ======================================================================
+   6. BLADE RUNNER — inspired: neon noir, rain, angled HUD panels
+   ====================================================================== */
+[data-theme="bladerunner"] {
+  --font-ui:'Rajdhani',system-ui,sans-serif; --font-head:'Oxanium','Rajdhani',sans-serif; --font-mono:'Share Tech Mono',ui-monospace,monospace;
+  --radius:0px; --radius-lg:0px; --bubble-radius:0px; --pill:0px;
+  --grad:linear-gradient(90deg,var(--accent),var(--accent2));
+}
+[data-theme="bladerunner"][data-mode="dark"] {          /* rain-soaked night */
+  --bg:#04060c; --surface:rgba(9,14,23,.86); --surface2:#0e1624; --border:#1c2b40;
+  --accent:#22e3ff; --accent2:#ff2fb3; --warn:#ff9f1c; --ok:#38f2a0; --danger:#ff3864; --medium:#ffd23f;
+  --text:#d9e7f6; --muted:#7189a6; --bot:#ff2fb3; --on-accent:#04060c; --overlay:rgba(2,4,10,.8);
+  --shadow:0 0 0 1px #1c2b40,0 0 40px rgba(34,227,255,.08);
+}
+[data-theme="bladerunner"][data-mode="light"] {         /* orange dust haze */
+  --bg:#f3c99a; --surface:rgba(250,222,186,.88); --surface2:#fbe6c8; --border:#d79a5e;
+  --accent:#a83f00; --accent2:#6b2050; --warn:#9a2d00; --ok:#2c6a2c; --danger:#9b1c1c; --medium:#7a5400;
+  --text:#2a1405; --muted:#7a4a22; --bot:#8a1f4f; --on-accent:#fff; --overlay:rgba(80,35,5,.35);
+  --shadow:0 18px 50px rgba(120,50,10,.25);
+}
+html[data-theme="bladerunner"] { --fs:16px; --sidebar-w:250px; --chat-bg:transparent; }
+html[data-theme="bladerunner"] header { padding:10px 22px; }
+html[data-theme="bladerunner"] .logo h1, html[data-theme="bladerunner"] .chat-toolbar h2, html[data-theme="bladerunner"] .modal h2,
+html[data-theme="bladerunner"] .sidebar-section h3, html[data-theme="bladerunner"] .msg-name, html[data-theme="bladerunner"] .btn {
+  text-transform:uppercase; letter-spacing:.16em; }
+html[data-theme="bladerunner"] .logo h1 { font-size:1.05rem; font-weight:600; }
+html[data-theme="bladerunner"][data-mode="dark"] .logo h1 { text-shadow:0 0 8px rgba(255,47,179,.7),0 0 18px rgba(34,227,255,.35); }
+html[data-theme="bladerunner"] .msg-bubble, html[data-theme="bladerunner"] .stat-card, html[data-theme="bladerunner"] .modal,
+html[data-theme="bladerunner"] .btn.primary, html[data-theme="bladerunner"] .send-btn, html[data-theme="bladerunner"] .rep-item {
+  clip-path:polygon(0 0,calc(100% - 12px) 0,100% 12px,100% 100%,12px 100%,0 calc(100% - 12px)); }
+html[data-theme="bladerunner"] .msg.assistant .msg-bubble { border-left:2px solid var(--accent2); }
+html[data-theme="bladerunner"] .msg.user .msg-bubble { border-right:2px solid var(--accent); }
+html[data-theme="bladerunner"] .stat-val { font-family:var(--font-head); }
+html[data-theme="bladerunner"] .stat-card { border-top:2px solid var(--accent); }
+html[data-theme="bladerunner"][data-mode="dark"] #fx {
+  background:
+    linear-gradient(0deg,rgba(255,47,179,.16),transparent 35%),
+    radial-gradient(ellipse at 15% 100%,rgba(34,227,255,.18),transparent 45%),
+    radial-gradient(ellipse at 85% 100%,rgba(255,47,179,.16),transparent 45%), #04060c; }
+html[data-theme="bladerunner"][data-mode="dark"] #fx::after { content:""; position:absolute; inset:-100px;
+  background:repeating-linear-gradient(104deg,transparent 0 22px,rgba(160,200,255,.06) 22px 23px,transparent 23px 47px);
+  animation:br-rain .6s linear infinite; }
+@keyframes br-rain { to { transform:translate(-12px,48px); } }
+html[data-theme="bladerunner"][data-mode="light"] #fx {
+  background:radial-gradient(ellipse at 50% 120%,rgba(255,140,40,.55),transparent 60%),
+    linear-gradient(180deg,#f6d2a4,#efb878 60%,#e7a25c); }
+html[data-theme="bladerunner"][data-mode="light"] #fx::after { content:""; position:absolute; inset:0;
+  background:radial-gradient(1px 1px at 30px 40px,rgba(120,50,0,.35),transparent), radial-gradient(1px 1px at 120px 160px,rgba(120,50,0,.3),transparent);
+  background-size:180px 200px; animation:mlp-drift 40s linear infinite; }
+
+/* ======================================================================
+   7. CANDLE MAKER — warm wax, amber flame glow, cosy serif
+   ====================================================================== */
+[data-theme="candle"] {
+  --font-ui:'Lora',Georgia,serif; --font-head:'Cormorant Garamond','Lora',Georgia,serif; --font-mono:'Courier Prime','Courier New',monospace;
+  --radius:12px; --radius-lg:18px; --bubble-radius:16px; --pill:99px;
+}
+[data-theme="candle"][data-mode="light"] {             /* soy wax & linen */
+  --bg:#fbf5ec; --surface:rgba(255,251,244,.92); --surface2:#fffdf8; --border:#ead8c0;
+  --accent:#b8661f; --accent2:#7d4f8c; --warn:#c2410c; --ok:#4d7c3a; --danger:#b23a48; --medium:#9a6b00;
+  --text:#3b2a1c; --muted:#8a705a; --bot:#a8521f; --on-accent:#fff;
+  --grad:linear-gradient(135deg,#e2a05a,#b8661f); --overlay:rgba(60,35,15,.35); --shadow:0 18px 50px rgba(120,70,20,.18);
+}
+[data-theme="candle"][data-mode="dark"] {              /* candlelit evening */
+  --bg:#170f09; --surface:rgba(34,23,14,.9); --surface2:#2a1c12; --border:#3d2a1b;
+  --accent:#f2a65a; --accent2:#cfa6e0; --warn:#ff9459; --ok:#a6d38a; --danger:#ff7a85; --medium:#ffd27a;
+  --text:#f5e6d0; --muted:#b99b7c; --bot:#f2a65a; --on-accent:#1e140c;
+  --grad:linear-gradient(135deg,#f6b46a,#d9822b); --overlay:rgba(10,5,2,.65);
+}
+html[data-theme="candle"] { --fs:17px; --sidebar-w:280px; --chat-bg:transparent; --chat-max:760px; }
+html[data-theme="candle"] main { grid-template-columns:minmax(0,1fr) var(--sidebar-w); }
+html[data-theme="candle"] aside { order:2; border-right:0; border-left:1px solid var(--border); }
+html[data-theme="candle"] .logo h1 { font-size:1.55rem; font-weight:600; font-style:italic; letter-spacing:0; }
+html[data-theme="candle"] .chat-toolbar h2 { font-size:1.35rem; font-weight:600; font-style:italic; }
+html[data-theme="candle"] .modal h2 { font-size:1.6rem; font-weight:600; }
+html[data-theme="candle"] .sidebar-section h3 { font-family:var(--font-head); font-size:.95rem; letter-spacing:.12em; font-weight:700; }
+html[data-theme="candle"] .stat-val { font-family:var(--font-head); font-size:2rem; font-weight:600; }
+html[data-theme="candle"] .msg-bubble { line-height:1.75; }
+html[data-theme="candle"] .messages, html[data-theme="candle"] .chat-input-area {
+  padding-left:max(24px,calc((100% - var(--chat-max)) / 2)); padding-right:max(24px,calc((100% - var(--chat-max)) / 2)); }
+html[data-theme="candle"] .msg-name::before { content:"🕯 "; }
+html[data-theme="candle"] .msg.user .msg-name::before { content:""; }
+html[data-theme="candle"] .logo-img { animation:cd-flame 3.2s ease-in-out infinite; }
+@keyframes cd-flame { 0%,100% { box-shadow:0 0 10px 2px rgba(255,170,70,.45); } 40% { box-shadow:0 0 16px 4px rgba(255,190,90,.6); } 70% { box-shadow:0 0 8px 1px rgba(255,150,50,.4); } }
+html[data-theme="candle"] #fx { background:var(--bg); }
+html[data-theme="candle"] #fx::after { content:""; position:absolute; inset:0;
+  background:radial-gradient(ellipse at 8% 0%,rgba(255,176,80,.30),transparent 46%), radial-gradient(ellipse at 100% 100%,rgba(255,140,60,.14),transparent 50%);
+  animation:cd-glow 4.5s ease-in-out infinite; }
+html[data-theme="candle"][data-mode="light"] #fx::after { opacity:.7; }
+@keyframes cd-glow { 0%,100% { opacity:.85; transform:scale(1); } 35% { opacity:1; transform:scale(1.02); } 60% { opacity:.75; } }
+
+/* ======================================================================
+   Phones / narrow windows: every theme collapses to the chat only
+   ====================================================================== */
+@media (max-width:820px) {
+  html[data-theme] main { grid-template-columns:minmax(0,1fr) !important; grid-template-rows:1fr !important; padding:0 !important; }
+  html[data-theme] aside { display:none !important; }
+  html[data-theme] .messages, html[data-theme] .chat-input-area { padding-left:12px !important; padding-right:12px !important; }
+  html[data-theme] .app > header { flex-wrap:wrap; gap:8px 12px; padding:10px 12px; }
+  html[data-theme] .header-actions { flex-basis:100%; justify-content:flex-start; gap:6px; }
+  html[data-theme] .header-actions .btn { padding:5px 9px; font-size:.8rem; }
+  html[data-theme] .chat-toolbar .muted { display:none; }
+}
+
+/* Respect Windows' "show animations" / reduced-motion setting */
+@media (prefers-reduced-motion:reduce) {
+  #fx, #fx::after, .logo-img, .logo h1::after { animation:none !important; }
+}
+
+/* ======================================================================
+   Theme picker
+   ====================================================================== */
+.theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; margin:6px 0 16px; }
+.theme-card { border:2px solid var(--border); border-radius:var(--radius); padding:0; cursor:pointer; overflow:hidden; text-align:left;
+  background:var(--surface); color:var(--text); font:inherit; transition:transform .15s,border-color .15s; }
+.theme-card:hover { transform:translateY(-2px); border-color:var(--accent); }
+.theme-card.on { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent); }
+.theme-prev { height:92px; display:grid; grid-template-columns:28% 1fr; grid-template-rows:16px 1fr; gap:4px; padding:6px;
+  background:var(--bg); font-family:var(--font-ui); border-bottom:1px solid var(--border); }
+.theme-prev .ph { grid-column:1 / 3; background:var(--surface); border:1px solid var(--border); border-radius:calc(var(--radius) / 2);
+  font-size:9px; line-height:14px; padding:0 5px; color:var(--accent); font-family:var(--font-head); white-space:nowrap; overflow:hidden; }
+.theme-prev .ps { background:var(--surface); border:1px solid var(--border); border-radius:calc(var(--radius) / 2); }
+.theme-prev .pc { display:flex; flex-direction:column; gap:4px; justify-content:center; }
+.theme-prev .b1, .theme-prev .b2 { height:14px; border-radius:var(--bubble-radius); border:1px solid var(--border); }
+.theme-prev .b1 { width:80%; background:var(--surface); }
+.theme-prev .b2 { width:55%; align-self:flex-end; background:color-mix(in srgb,var(--accent) 20%,var(--surface)); }
+.theme-prev .bt { width:38%; height:10px; align-self:flex-end; background:var(--grad); border-radius:var(--radius); }
+.theme-card .tn { padding:8px 10px 2px; font-weight:600; font-size:.85rem; }
+.theme-card .td { padding:0 10px 10px; font-size:.7rem; color:var(--muted); line-height:1.4; }
