@@ -4,9 +4,10 @@ Settings (.env) and UniFi connection profiles.
 Where things live (all relative to the project folder, so the whole folder
 can be copied to another PC):
 
-  .env                    app settings + Anthropic API key   (never commit)
+  .env                    app settings + AI provider API keys (never commit)
   data/connections.json   UniFi connection profiles, NO passwords
-  Windows Credential Manager (service "unifi-claude")
+  Windows Credential Manager (service "unifi-claude" - name kept from the
+                          app's first version so saved passwords keep working)
                           UniFi passwords / API keys
   data/secrets.json       fallback store, used only if Credential Manager
                           is unavailable (plaintext - the UI warns about it)
@@ -31,8 +32,11 @@ FRONTEND_DIR  = os.path.join(BASE_DIR, "frontend")
 KEYRING_SERVICE = "unifi-claude"
 
 DEFAULTS = {
+    "AI_PROVIDER":       "anthropic",          # "anthropic" (Claude) or "openai" (ChatGPT)
     "ANTHROPIC_API_KEY": "",
     "CLAUDE_MODEL":      "claude-sonnet-5-5",
+    "OPENAI_API_KEY":    "",
+    "OPENAI_MODEL":      "gpt-6.1-sol",
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
@@ -40,7 +44,26 @@ DEFAULTS = {
 }
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.
-EDITABLE_KEYS = {"ANTHROPIC_API_KEY", "CLAUDE_MODEL", "SERVER_PORT"}
+EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT"}
+
+# Per-provider .env keys
+PROVIDER_KEYS = {
+    "anthropic": {"key": "ANTHROPIC_API_KEY", "model": "CLAUDE_MODEL"},
+    "openai":    {"key": "OPENAI_API_KEY",    "model": "OPENAI_MODEL"},
+}
+
+
+def active_provider():
+    p = (get_setting("AI_PROVIDER") or "anthropic").strip().lower()
+    return p if p in PROVIDER_KEYS else "anthropic"
+
+
+def provider_key(provider):
+    return get_setting(PROVIDER_KEYS[provider]["key"])
+
+
+def provider_model(provider):
+    return get_setting(PROVIDER_KEYS[provider]["model"])
 
 _lock = threading.RLock()
 
@@ -104,8 +127,8 @@ def write_env_file(updates):
             with open(ENV_PATH, encoding="utf-8-sig") as f:
                 lines = f.read().splitlines()
         else:
-            lines = ["# UniFi x Claude settings - created by the Settings screen.",
-                     "# Keep this file private: it contains your Anthropic API key."]
+            lines = ["# UniFi x AI settings - created by the Settings screen.",
+                     "# Keep this file private: it contains your AI provider API key(s)."]
         remaining = dict(updates)
         out = []
         for line in lines:

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="app-token" content="__APP_TOKEN__">
-<title>UniFi × Claude</title>
+<title>UniFi × AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
@@ -207,7 +207,7 @@
 <body>
 <div class="app">
   <header>
-    <div class="logo"><div class="logo-icon">⚡</div><h1>UniFi <span>×</span> Claude</h1></div>
+    <div class="logo"><div class="logo-icon">⚡</div><h1>UniFi <span>×</span> AI</h1></div>
     <div class="conn-switch">
       <button id="connBtn" class="conn-btn none" aria-haspopup="true" aria-expanded="false">
         <span class="dot"></span><span class="name" id="connName">Starting…</span><span aria-hidden="true">▾</span>
@@ -333,7 +333,7 @@ async function refreshStatus() {
   if (status.error_kind === 'cert') {
     showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
   } else if (!status.configured) {
-    showBanner('Add your Anthropic API key to start chatting.', [h('button', { class: 'btn', onclick: openSettings }, 'Open Settings')]);
+    showBanner('Add an AI API key (Claude or ChatGPT) to start chatting.', [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.model_warning) {
     showBanner(status.model_warning, [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.secret_storage === 'file' && status.has_connections) {
@@ -437,7 +437,7 @@ let transcript = [];
 
 function addMessage(role, text, opts = {}) {
   clearEmpty();
-  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text, at: new Date() });
+  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text, at: new Date(), ai: aiName() });
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
@@ -451,7 +451,7 @@ function addApproval(pending) {
   const approve = h('button', { class: 'btn primary' }, pending.length > 1 ? `Approve all ${pending.length}` : 'Approve');
   const deny = h('button', { class: 'btn danger' }, 'Deny');
   const card = h('div', { class: 'msg-bubble approval' },
-    h('h4', {}, pending.length > 1 ? `Claude wants to make ${pending.length} changes` : 'Claude wants to make a change'),
+    h('h4', {}, pending.length > 1 ? `${aiName()} wants to make ${pending.length} changes` : `${aiName()} wants to make a change`),
     ...pending.map(p => h('div', { class: 'action' },
       h('div', { class: 'label' }, p.label),
       p.target ? h('div', { class: 'target' }, p.target) : null,
@@ -555,7 +555,9 @@ function fillModelSelect(sel, models, cur, pickNewestIfMissing) {
   sel.replaceChildren(...lines.map(line => {
     // API order is newest first; keep that, but list active models before deprecated ones
     const list = groups[line].slice().sort((a, b) => (a.lifecycle !== 'active') - (b.lifecycle !== 'active'));
-    const newest = list.find(m => m.lifecycle === 'active');
+    // ★ only where the API's own `line` means 'same tier, newer version' (Claude).
+    // OpenAI version groups mix tiers (Sol/Terra/Luna), so 'newest' there isn't 'best'.
+    const newest = LINE_ORDER.includes(line) ? list.find(m => m.lifecycle === 'active') : null;
     return h('optgroup', { label: line === 'other' ? 'Other' : `${titleCase(line)} — ${LINE_HINT[line] || ''}`.replace(/ — $/, '') },
       ...list.map(m => h('option', { value: m.id, selected: m.id === cur },
         m.name + (m.lifecycle !== 'active' ? `  — deprecated${m.retires_at ? ', retires ' + m.retires_at : ''}`
@@ -565,66 +567,115 @@ function fillModelSelect(sel, models, cur, pickNewestIfMissing) {
   sel.value = cur;
   return models;
 }
+const PROVIDER_INFO = {
+  anthropic: { short: 'Claude', by: 'by Anthropic',
+    keyHelp: 'console.anthropic.com → API Keys',
+    modelHelp: 'Sonnet is a good default. Opus and Fable are smarter but cost more per question.',
+    pricing: 'https://platform.claude.com/docs/en/about-claude/pricing' },
+  openai: { short: 'ChatGPT', by: 'by OpenAI (GPT models)',
+    keyHelp: 'platform.openai.com → API keys. A ChatGPT Plus/Pro subscription does not include API use; add API credit under Billing',
+    modelHelp: 'GPT-6.1 Sol is a good default. GPT-6 Astra is the most capable and costs more; Terra and Luna are cheaper.',
+    pricing: 'https://developers.openai.com/api/docs/pricing' },
+};
+const aiName = () => (status && status.provider_label) || 'AI';
+
 async function openSettings(wizard) {
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { toast(e.message, true); return; }
-  const key = secretInput({ placeholder: s.anthropic_key_set ? `Saved (${s.anthropic_key_hint}) — paste a new key to replace` : 'sk-ant-…' });
-  const model = h('select', {}, h('option', { value: s.model }, s.model));
-  const modelNote = h('div');
-  let catalogue = [];
-  const describeChoice = () => {
-    const m = catalogue.find(x => x.id === model.value);
-    modelNote.replaceChildren(!m ? null : m.lifecycle !== 'active'
-      ? result('warn', `${m.name} is deprecated${m.retires_at ? ' and stops working on ' + m.retires_at : ''}. Pick a model marked ★ newest.`)
-      : null);
+  let provider = s.provider;
+
+  // One section per provider: key, test, live model list
+  const sections = {};
+  for (const [name, info] of Object.entries(s.providers)) {
+    const pi = PROVIDER_INFO[name] || { short: info.label, by: '', keyHelp: '', modelHelp: '', pricing: '#' };
+    const key = secretInput({ placeholder: info.key_set ? `Saved (${info.key_hint}) — paste a new key to replace` : `${info.key_prefix}…` });
+    const model = h('select', {}, h('option', { value: info.model }, info.model));
+    const out = h('div'), modelNote = h('div');
+    const sec = { info, key, model, out, catalogue: [], loaded: false };
+    const describeChoice = () => {
+      const m = sec.catalogue.find(x => x.id === model.value);
+      modelNote.replaceChildren(...(m && m.lifecycle !== 'active'
+        ? [result('warn', `${m.name} is deprecated${m.retires_at ? ' and stops working on ' + m.retires_at : ''}. Pick a current model.`)]
+        : []));
+    };
+    model.addEventListener('change', describeChoice);
+    sec.load = async () => {
+      out.replaceChildren(result('warn', `Checking the key with ${info.vendor}…`));
+      const r = await api('POST', '/api/settings/test-key', { provider: name, api_key: key.input.value.trim() || undefined })
+        .catch(e => ({ ok: false, error: e.message }));
+      if (!r.ok) { out.replaceChildren(result('bad', r.error)); return false; }
+      sec.catalogue = fillModelSelect(model, r.models, model.value, wizard);
+      sec.loaded = true;
+      describeChoice();
+      out.replaceChildren(result('ok', `Key works. ${r.models.filter(m => m.lifecycle === 'active').length} current models available.`));
+      return true;
+    };
+    sec.el = h('div', {},
+      field(`${info.vendor} API key`, key.wrap, h('span', {}, `Create one at ${pi.keyHelp}. Saved only in the .env file on this PC.`)),
+      h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: sec.load }, 'Test key & load models')),
+      out,
+      field(`${pi.short} model`, model, h('span', {}, 'The list comes live from ' + info.vendor + ', so new models appear automatically. ' + pi.modelHelp + ' Prices: ',
+        h('a', { href: pi.pricing, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, `${info.vendor} pricing`), '.')),
+      modelNote);
+    sections[name] = sec;
+  }
+
+  const holder = h('div');
+  const segBtns = {};
+  const choose = name => {
+    provider = name;
+    Object.entries(segBtns).forEach(([n, b]) => b.className = n === name ? 'on' : '');
+    holder.replaceChildren(sections[name].el);
+    if (sections[name].info.key_set && !sections[name].loaded) sections[name].load();   // live list without an extra click
   };
-  model.addEventListener('change', describeChoice);
+  for (const [name, info] of Object.entries(s.providers)) {
+    const pi = PROVIDER_INFO[name] || { short: info.label, by: '' };
+    segBtns[name] = h('button', { type: 'button', onclick: () => choose(name) },
+      h('div', { style: 'font-weight:600' }, pi.short), h('div', { style: 'font-size:10px;opacity:.7' }, pi.by));
+  }
   const port = h('input', { type: 'number', min: 1024, max: 65535, value: s.port });
-  const out = h('div');
-  const loadModels = async () => {
-    out.replaceChildren(result('warn', 'Checking the key with Anthropic…'));
-    const r = await api('POST', '/api/settings/test-anthropic', { api_key: key.input.value.trim() || undefined }).catch(e => ({ ok: false, error: e.message }));
-    if (!r.ok) { out.replaceChildren(result('bad', r.error)); return false; }
-    catalogue = fillModelSelect(model, r.models, model.value, wizard);
-    describeChoice();
-    out.replaceChildren(result('ok', `Key works. ${r.models.filter(m => m.lifecycle === 'active').length} current models available.`));
-    return true;
-  };
+
   const save = async (next) => {
+    const sec = sections[provider];
     try {
-      if (!key.input.value.trim() && !s.anthropic_key_set) { out.replaceChildren(result('bad', 'Paste your Anthropic API key first.')); return; }
-      if (key.input.value.trim() && !(await loadModels())) return;
-      const r = await api('POST', '/api/settings', { anthropic_api_key: key.input.value.trim() || undefined, model: model.value,
-                                                     port: (wizard || Number(port.value) === s.port) ? undefined : port.value });
+      if (!sec.key.input.value.trim() && !sec.info.key_set) { sec.out.replaceChildren(result('bad', `Paste your ${sec.info.vendor} API key first.`)); return; }
+      if (sec.key.input.value.trim() && !(await sec.load())) return;
+      const keys = {}, models = {};
+      for (const [name, x] of Object.entries(sections)) {
+        if (x.key.input.value.trim()) keys[name] = x.key.input.value.trim();
+        if (x.loaded || name === provider) models[name] = x.model.value;
+      }
+      if (provider !== s.provider && (status && status.pending) &&
+          !confirm('Switching AI discards the change waiting for approval. Continue?')) return;
+      const r = await api('POST', '/api/settings', { provider, keys, models,
+        port: (wizard || Number(port.value) === s.port) ? undefined : port.value });
+      if (r.chat_reset) clearChatView(`Switched to ${PROVIDER_INFO[provider] ? PROVIDER_INFO[provider].short : provider}. The conversation was cleared (it can't carry over between AI providers).`);
       if (r.restart_needed) toast(`Saved. The new port (${r.port}) takes effect after you restart the app.`);
       else toast('Settings saved.');
       await refreshStatus();
       if (next) next(); else closeModal();
-    } catch (e) { out.replaceChildren(result('bad', e.message)); }
+    } catch (e) { sec.out.replaceChildren(result('bad', e.message)); }
   };
   const overrides = s.env_overrides.length
     ? h('div', { class: 'note warn' }, `These are set as Windows environment variables and override this screen: ${s.env_overrides.join(', ')}. Remove them (System Properties → Environment Variables) if you want this screen to control them.`) : null;
 
   const body = [
     overrides,
-    field('Anthropic API key', key.wrap, h('span', {}, 'Create one at console.anthropic.com → API Keys. It is saved only in the .env file on this PC.')),
-    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: loadModels }, 'Test key & load models')),
-    out,
-    field('Claude model', model, h('span', {}, 'The list comes live from Anthropic, so new models appear here automatically. Sonnet is a good default; Opus/Fable are smarter but cost more per question. Prices: ',
-      h('a', { href: 'https://platform.claude.com/docs/en/about-claude/pricing', target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Anthropic pricing'), '.')),
-    modelNote,
+    field('AI provider', h('div', { class: 'seg' }, ...Object.values(segBtns)),
+      'Pick whose AI answers. You can save keys for both and switch any time; switching starts a new conversation.'),
+    holder,
     wizard ? null : field('App port', port, `This app's web address is http://127.0.0.1:${s.running_port}/. Change only if another program uses this port.`),
   ];
   if (wizard) {
-    openModal(...modalHead('Welcome! Let’s get you set up', 'Two quick steps: connect Claude, then connect your UniFi console. Everything stays on this PC.', false),
+    openModal(...modalHead('Welcome! Let’s get you set up', 'Two quick steps: connect an AI (Claude or ChatGPT), then connect your UniFi console. Everything stays on this PC.', false),
       h('div', { class: 'steps' }, h('span', { class: 'on' }), h('span')),
-      h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 1 · Claude'),
+      h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 1 · Choose your AI'),
       ...body, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => save(() => openConnections(null, true, true)) }, 'Save & continue →')));
   } else {
     openModal(...modalHead('Settings', `Saved to ${s.env_path}`), ...body,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), h('button', { class: 'btn primary', onclick: () => save() }, 'Save')));
   }
-  if (s.anthropic_key_set) loadModels();      // show the live model list without an extra click
+  choose(provider);
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────
@@ -665,7 +716,7 @@ function openConnectionForm(data, existing, wizard) {
   };
   const userField = h('div', {},
     h('div', { class: 'note warn' }, 'Use a LOCAL account created on this console (Admins & Users → tick “Restrict to local access only”). Your UI.com / Ubiquiti cloud login will not work — it asks for a two-factor code that apps can’t provide. See SETUP.md step 3.'),
-    field('Username', user, 'The local account’s username, e.g. claude-app — not an email address.'));
+    field('Username', user, 'The local account’s username, e.g. unifi-ai — not an email address.'));
   const secretLabel = h('label', {});
   const secretField = h('div', { class: 'field' }, secretLabel, secret.wrap, h('div', { class: 'hint' }));
   function setAuth(a) {
@@ -770,7 +821,7 @@ function exportMeta() {
   const a = status && status.active;
   return {
     network: a ? `${a.name} (${a.host}:${a.port}, site ${a.site})` : 'none',
-    model: (status && status.model) || '',
+    model: ((status && status.model) || '') + (status && status.provider_label ? ` (${status.provider_label})` : ''),
     exported: new Date(),
   };
 }
@@ -780,7 +831,7 @@ function exportFileName(ext) {
   const d = new Date(), pad = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
   const net = (a ? a.name : 'chat').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat';
-  return `unifi-claude_${net}_${stamp}.${ext}`;
+  return `unifi-ai_${net}_${stamp}.${ext}`;
 }
 function download(name, content, type) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -789,14 +840,15 @@ function download(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
   toast(`Saved ${name} to your Downloads folder.`);
 }
-const LABEL = { user: '👤 You', assistant: '🤖 Claude', error: '⚠️ Error', approval: '🛡️ Change request' };
+const LABEL = { user: '👤 You', assistant: '🤖 Assistant', error: '⚠️ Error', approval: '🛡️ Change request' };
+const labelFor = t => t.kind === 'assistant' ? `🤖 ${t.ai || 'Assistant'}` : LABEL[t.kind];
 
 function toMarkdown() {
   const m = exportMeta();
-  const out = [`# UniFi × Claude — chat export`, '',
+  const out = [`# UniFi × AI — chat export`, '',
     `- **Network:** ${m.network}`, `- **Model:** ${m.model}`, `- **Exported:** ${fmtTime(m.exported)}`, '', '---', ''];
   for (const t of transcript) {
-    out.push(`### ${LABEL[t.kind]} · ${fmtTime(t.at)}`, '');
+    out.push(`### ${labelFor(t)} · ${fmtTime(t.at)}`, '');
     if (t.kind === 'approval') {
       for (const it of t.items) {
         out.push(`- **${it.label}**${it.target ? ` — \`${it.target}\`` : ''}`);
@@ -829,18 +881,18 @@ function toHtml() {
     } else {
       body = esc(t.text).replace(/\n/g, '<br>');
     }
-    return `<section class="m ${t.kind}"><header>${LABEL[t.kind]}<time>${esc(fmtTime(t.at))}</time></header><div>${body}</div></section>`;
+    return `<section class="m ${t.kind}"><header>${esc(labelFor(t))}<time>${esc(fmtTime(t.at))}</time></header><div>${body}</div></section>`;
   }).join('\n');
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>UniFi × Claude — ${esc(m.network)} — ${esc(fmtTime(m.exported))}</title>
+<title>UniFi × AI — ${esc(m.network)} — ${esc(fmtTime(m.exported))}</title>
 <style>
-  :root{--bg:#fff;--fg:#1a1d24;--muted:#667085;--line:#e4e7ec;--you:#eef8fb;--claude:#f8f9fb;--warn:#fff4ed;--accent:#0b7fa5;--ok:#067647;--no:#b42318}
-  @media (prefers-color-scheme:dark){:root{--bg:#0d1016;--fg:#e2e8f0;--muted:#8b95a7;--line:#252a36;--you:#0f2530;--claude:#141821;--warn:#2a1a12;--accent:#3cc8f0;--ok:#4ade80;--no:#f87171}}
+  :root{--bg:#fff;--fg:#1a1d24;--muted:#667085;--line:#e4e7ec;--you:#eef8fb;--ai:#f8f9fb;--warn:#fff4ed;--accent:#0b7fa5;--ok:#067647;--no:#b42318}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1016;--fg:#e2e8f0;--muted:#8b95a7;--line:#252a36;--you:#0f2530;--ai:#141821;--warn:#2a1a12;--accent:#3cc8f0;--ok:#4ade80;--no:#f87171}}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
   main{max-width:860px;margin:0 auto;padding:32px 20px 64px}
   h1{font-size:22px;margin:0 0 6px} .meta{color:var(--muted);font-size:13px;margin-bottom:24px} .meta b{color:var(--fg)}
-  section.m{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0;background:var(--claude);break-inside:avoid}
+  section.m{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0;background:var(--ai);break-inside:avoid}
   section.user{background:var(--you);margin-left:12%} section.approval{background:var(--warn)} section.error{border-color:var(--no)}
   section header{display:flex;justify-content:space-between;gap:12px;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px}
   section h3{font-size:14px;margin:10px 0 4px;color:var(--accent)} section ul,section ol{padding-left:20px;margin:6px 0}
@@ -850,7 +902,7 @@ function toHtml() {
   @media print{section.user{margin-left:0} body{font-size:12px}}
 </style></head>
 <body><main>
-<h1>UniFi × Claude — chat export</h1>
+<h1>UniFi × AI — chat export</h1>
 <div class="meta"><b>Network:</b> ${esc(m.network)} &nbsp;·&nbsp; <b>Model:</b> ${esc(m.model)} &nbsp;·&nbsp; <b>Exported:</b> ${esc(fmtTime(m.exported))}</div>
 ${rows}
 </main></body></html>`;
@@ -876,7 +928,7 @@ async function runReport() {
   const tick = setInterval(() => timer.textContent = Math.round((Date.now() - started) / 1000) + 's', 1000);
   openModal(...modalHead('Building your action report', null, false),
     h('div', { style: 'display:flex;gap:14px;align-items:center;margin:8px 0 6px' }, h('div', { class: 'spinner' }),
-      h('div', {}, h('div', {}, `Claude is reviewing “${status.active.name}” — devices, clients, Wi-Fi, firewall, logs…`),
+      h('div', {}, h('div', {}, `${aiName()} is reviewing “${status.active.name}” — devices, clients, Wi-Fi, firewall, logs…`),
         h('div', { class: 'muted' }, 'Read-only: nothing on the network is changed. Usually 1–3 minutes. Elapsed: ', timer))));
   try {
     lastReport = await api('POST', '/api/report', {});
@@ -940,7 +992,7 @@ function reportMarkdown(r) {
     }
   }
   if (r.healthy && r.healthy.length) { out.push('## ✅ Looks good', '', ...r.healthy.map(x => `- ${md(x)}`), ''); }
-  out.push('---', '_Generated by UniFi × Claude from live, read-only data. Verify before making changes._', '');
+  out.push('---', '_Generated by UniFi × AI from live, read-only data. Verify before making changes._', '');
   return out.join('\n');
 }
 
@@ -986,7 +1038,7 @@ function reportHtml(r) {
   <div class="prog"><i id="pbar"></i></div></div>
 <p class="summary" id="summary"></p>
 <div id="list"></div>
-<footer>Generated by UniFi × Claude from live, read-only data. Your ticks are saved in this browser. Verify before making changes.</footer>
+<footer>Generated by UniFi × AI from live, read-only data. Your ticks are saved in this browser. Verify before making changes.</footer>
 </main>
 <script type="application/json" id="data">${data}<\/script>
 <script>

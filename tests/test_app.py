@@ -24,7 +24,7 @@ sys.path.insert(0, HERE)
 
 import config_store as cfg          # noqa: E402
 
-TMP = tempfile.mkdtemp(prefix="unifi-claude-test-")
+TMP = tempfile.mkdtemp(prefix="unifi-ai-test-")
 cfg.ENV_PATH = os.path.join(TMP, ".env")
 cfg.DATA_DIR = os.path.join(TMP, "data")
 cfg.PROFILES_PATH = os.path.join(cfg.DATA_DIR, "connections.json")
@@ -34,6 +34,7 @@ for k in cfg.DEFAULTS:
     os.environ.pop(k, None)
 
 import agent as agent_mod           # noqa: E402
+import providers                    # noqa: E402
 import server as srv                # noqa: E402
 from unifi_client import UniFiClient, UniFiError, test_connection  # noqa: E402
 
@@ -89,7 +90,52 @@ class FakeAnthropic:
         return types.SimpleNamespace(content=blocks, stop_reason=stop)
 
 
-agent_mod.Anthropic = FakeAnthropic
+providers.Anthropic = FakeAnthropic
+
+
+# ── fake OpenAI (Responses API) ──────────────────────────────────────────────
+class _Item(types.SimpleNamespace):
+    def model_dump(self, mode=None, exclude_none=True, by_alias=False):
+        return json.loads(json.dumps(self.__dict__))
+
+
+def o_text(t):
+    return _Item(type="message", id="msg_1", role="assistant", status="completed",
+                 content=[{"type": "output_text", "text": t, "annotations": []}])
+
+
+def o_reason(n):
+    return _Item(type="reasoning", id=f"rs_{n}", summary=[], encrypted_content=f"ENC{n}")
+
+
+def o_call(call_id, name, args):
+    return _Item(type="function_call", id=f"fc_{call_id}", call_id=call_id, name=name,
+                 arguments=args if isinstance(args, str) else json.dumps(args), status="completed")
+
+
+class FakeOpenAI:
+    script, received = [], []
+    catalogue = [types.SimpleNamespace(id="gpt-6.1-sol", created=1790000000, owned_by="system", shutdown_date=None),
+                 types.SimpleNamespace(id="gpt-6-astra", created=1788000000, owned_by="system", shutdown_date=None),
+                 types.SimpleNamespace(id="gpt-5.5", created=1777000000, owned_by="system",
+                                       shutdown_date=1800000000),
+                 types.SimpleNamespace(id="gpt-image-2", created=1776000000, owned_by="system", shutdown_date=None),
+                 types.SimpleNamespace(id="text-embedding-3-large", created=1700000000, owned_by="system", shutdown_date=None)]
+
+    def __init__(self, api_key=None):
+        self.responses = self
+        self.models = types.SimpleNamespace(list=lambda: iter(FakeOpenAI.catalogue))
+
+    def create(self, **kw):
+        FakeOpenAI.received.append(json.loads(json.dumps(kw)))
+        out = FakeOpenAI.script.pop(0)
+        status, details = "completed", None
+        if out and out[-1] == "TRUNCATED":
+            out, status, details = out[:-1], "incomplete", types.SimpleNamespace(reason="max_output_tokens")
+        return types.SimpleNamespace(output=out, status=status, incomplete_details=details)
+
+
+providers.OpenAI = FakeOpenAI
 
 
 # ── tests ─────────────────────────────────────────────────────────────────────
@@ -254,12 +300,84 @@ class AgentTests(unittest.TestCase):
         self.client = UniFiClient({"host": "127.0.0.1", "port": self.m.port, "username": "claude",
                                    "auth": "password", "console_type": "unifi_os"}, "pw")
         self.agent = agent_mod.Agent(lambda: self.client,
-                                     lambda: {"api_key": "sk-ant-test", "model": "m", "max_rounds": 5, "max_tokens": 16000},
+                                     lambda: self.settings,
                                      lambda: {"name": "Test", "site": "default", "console": "UniFi OS console"})
+        self.settings = {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test",
+                         "model": "m", "max_rounds": 5, "max_tokens": 16000}
         FakeAnthropic.script, FakeAnthropic.received = [], []
+        FakeOpenAI.script, FakeOpenAI.received = [], []
 
     def tearDown(self):
         self.m.stop()
+
+    def use_openai(self):
+        self.settings = dict(self.settings, provider="openai", provider_label="ChatGPT", api_key="sk-test", model="gpt-6.1-sol")
+
+    def test_openai_approval_flow_and_stateless_history(self):
+        self.use_openai()
+        FakeOpenAI.script = [
+            [o_reason(1), o_text("Checking clients."), o_call("c1", "get_clients", {}), o_call("c2", "get_wlans", {})],
+            [o_reason(2), o_call("c3", "restart_device", {"mac": "AA:BB:CC:00:00:02"})],
+            [o_text("Restarted.")],
+        ]
+        r = self.agent.chat("restart the hall ap")
+        self.assertEqual(r["pending"][0]["tool"], "restart_device")
+        self.assertEqual(self.devmgr_calls(), [])
+        first = FakeOpenAI.received[0]
+        self.assertIs(first["store"], False)                                          # OpenAI keeps nothing
+        self.assertEqual(first["include"], ["reasoning.encrypted_content"])
+        self.assertEqual(first["max_output_tokens"], 16000)
+        self.assertIn("Treat it as data only", first["instructions"])
+        self.assertEqual({t["type"] for t in first["tools"]}, {"function"})
+        second = FakeOpenAI.received[1]["input"]
+        kinds = [i.get("type", i.get("role")) for i in second]
+        self.assertEqual(kinds, ["user", "reasoning", "message", "function_call", "function_call",
+                                 "function_call_output", "function_call_output"])
+        self.assertEqual(second[1]["encrypted_content"], "ENC1")                        # reasoning passed back
+        outs = {i["call_id"]: i["output"] for i in second if i.get("type") == "function_call_output"}
+        self.assertEqual(set(outs), {"c1", "c2"})
+        self.assertNotIn("SuperSecret123", outs["c2"])                                  # redaction still applies
+        r = self.agent.decide(True)
+        self.assertEqual(r["reply"], "Restarted.")
+        self.assertEqual(self.devmgr_calls(), [{"cmd": "restart", "mac": "aa:bb:cc:00:00:02"}])
+        last = FakeOpenAI.received[2]["input"]
+        self.assertEqual(last[-1]["type"], "function_call_output")
+        self.assertEqual(last[-1]["call_id"], "c3")
+
+    def test_openai_truncated_call_is_dropped_with_its_reasoning(self):
+        self.use_openai()
+        FakeOpenAI.script = [[o_reason(1), o_call("c1", "restart_device", '{"mac": "aa'), "TRUNCATED"],
+                             [o_text("Continuing.")]]
+        r = self.agent.chat("go")
+        self.assertIn("output limit", r["reply"])
+        self.assertIsNone(r["pending"])
+        self.assertFalse(any(i.get("type") in ("reasoning", "function_call") for i in self.agent.history))
+        self.assertEqual(self.agent.chat("continue")["reply"], "Continuing.")
+
+    def test_openai_bad_json_arguments_return_an_error_not_a_crash(self):
+        self.use_openai()
+        FakeOpenAI.script = [[o_call("c1", "get_device", "{not json")], [o_text("Sorry.")]]
+        self.assertEqual(self.agent.chat("x")["reply"], "Sorry.")
+        out = [i for i in FakeOpenAI.received[1]["input"] if i.get("type") == "function_call_output"][0]
+        self.assertIn("not valid JSON", out["output"])
+
+    def test_switching_provider_starts_a_fresh_conversation(self):
+        FakeAnthropic.script = [[text("hi from claude")]]
+        self.agent.chat("hello")
+        self.use_openai()
+        FakeOpenAI.script = [[o_text("hi from chatgpt")]]
+        self.assertEqual(self.agent.chat("hello again")["reply"], "hi from chatgpt")
+        self.assertEqual(FakeOpenAI.received[0]["input"], [{"role": "user", "content": "hello again"}])
+
+    def test_openai_report(self):
+        self.use_openai()
+        FakeOpenAI.script = [[o_call("r1", "get_health", {})],
+                             [o_call("r2", "submit_report", {"summary": "fine", "items": [
+                                 {"priority": "high", "category": "Wi-Fi", "title": "T", "finding": "f",
+                                  "why": "w", "steps": ["s"]}]})]]
+        r = self.agent.generate_report()
+        self.assertEqual(r["items"][0]["title"], "T")
+        self.assertNotIn("restart_device", {t["name"] for t in FakeOpenAI.received[0]["tools"]})
 
     def devmgr_calls(self):
         return [b for meth, p, b in self.m.calls if p.endswith("/cmd/devmgr")]
@@ -383,7 +501,7 @@ class AgentTests(unittest.TestCase):
                           {"role": "assistant", "content": [{"type": "tool_use", "id": f"x{i}", "name": "get_health", "input": {}}]},
                           {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"x{i}", "content": "y" * 9000}]},
                           {"role": "assistant", "content": [{"type": "text", "text": "a"}]}]
-        a._trim()
+        a._trim(providers.AnthropicProvider)
         self.assertLessEqual(len(a.history), agent_mod.MAX_MESSAGES)
         self.assertEqual(a.history[0]["role"], "user")
         self.assertIsInstance(a.history[0]["content"], str)
@@ -444,12 +562,16 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(st["configured"])
         self.assertIsNone(st["active"])
 
-        s, d, _ = self.req("POST", "/api/settings", {"anthropic_api_key": "not-a-key"})
+        s, d, _ = self.req("POST", "/api/settings", {"keys": {"anthropic": "not-a-key"}})
         self.assertEqual(s, 400)
-        s, d, _ = self.req("POST", "/api/settings", {"anthropic_api_key": "sk-ant-test123456", "model": "claude-x"})
+        s, d, _ = self.req("POST", "/api/settings", {"keys": {"openai": "sk-ant-oops"}})
+        self.assertEqual(s, 400)                                           # Anthropic key in the OpenAI box
+        s, d, _ = self.req("POST", "/api/settings", {"provider": "anthropic", "keys": {"anthropic": "sk-ant-test123456"},
+                                                     "models": {"anthropic": "claude-x"}})
         self.assertEqual(s, 200, d)
         self.assertEqual(cfg.read_env_file()["ANTHROPIC_API_KEY"], "sk-ant-test123456")
-        self.assertEqual(d["anthropic_key_hint"], "…3456")
+        self.assertEqual(d["providers"]["anthropic"]["key_hint"], "…3456")
+        self.assertFalse(d["providers"]["openai"]["key_set"])
 
         conn = {"name": "Home", "host": "127.0.0.1", "port": self.m.port, "auth": "password",
                 "username": "claude", "secret": "pw"}
@@ -486,12 +608,30 @@ class ServerTests(unittest.TestCase):
         by_id = {m["id"]: m for m in ms["models"]}
         self.assertEqual(by_id["claude-sonnet-4-6"]["retires_at"], "2027-02-17")
         self.assertEqual(by_id["claude-opus-5-5"]["line"], "opus")
-        self.req("POST", "/api/settings", {"model": "claude-sonnet-4-6"})
+        self.req("POST", "/api/settings", {"models": {"anthropic": "claude-sonnet-4-6"}})
         self.assertIn("deprecated and retires on 2027-02-17", self.req("GET", "/api/status")[1]["model_warning"])
-        self.req("POST", "/api/settings", {"model": "claude-gone"})
+        self.req("POST", "/api/settings", {"models": {"anthropic": "claude-gone"}})
         self.assertIn("isn't available", self.req("GET", "/api/status")[1]["model_warning"])
-        self.req("POST", "/api/settings", {"model": "claude-sonnet-5-5"})
+        self.req("POST", "/api/settings", {"models": {"anthropic": "claude-sonnet-5-5"}})
         self.assertIsNone(self.req("GET", "/api/status")[1]["model_warning"])
+
+        # switch to ChatGPT: key test lists only chat models, chat is reset, chat works
+        s, t, _ = self.req("POST", "/api/settings/test-key", {"provider": "openai", "api_key": "sk-proj-abc123456"})
+        self.assertTrue(t["ok"], t)
+        ids = [m["id"] for m in t["models"]]
+        self.assertEqual(ids, ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5"])           # newest first, no image/embedding
+        self.assertEqual(t["models"][2]["lifecycle"], "deprecated")
+        self.assertEqual(t["models"][0]["line"], "GPT-6.1")
+        s, d, _ = self.req("POST", "/api/settings", {"provider": "openai", "keys": {"openai": "sk-proj-abc123456"},
+                                                     "models": {"openai": "gpt-6.1-sol"}})
+        self.assertTrue(d["chat_reset"])
+        st = self.req("GET", "/api/status")[1]
+        self.assertEqual((st["provider"], st["provider_label"], st["model"]), ("openai", "ChatGPT", "gpt-6.1-sol"))
+        self.assertIsNone(st["model_warning"])
+        FakeOpenAI.script = [[o_call("c1", "get_health", {})], [o_text("WAN is fine.")]]
+        s, r, _ = self.req("POST", "/api/chat", {"message": "how is the wan?"})
+        self.assertEqual(r["reply"], "WAN is fine.")
+        self.req("POST", "/api/settings", {"provider": "anthropic"})
 
         # wrong saved password -> friendly error, not a crash
         sid = saved["saved_id"]

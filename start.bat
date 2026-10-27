@@ -1,13 +1,13 @@
 @echo off
 setlocal EnableExtensions
 REM ===========================================================================
-REM  UniFi x Claude - double-click to start.
+REM  UniFi x AI - double-click to start.
 REM  First run: creates a private Python environment (.venv) and installs what
 REM  the app needs. Later runs start in a few seconds.
 REM  Options are passed through, e.g.:  start.bat --port 8090
 REM ===========================================================================
 cd /d "%~dp0"
-title UniFi x Claude
+title UniFi x AI
 
 REM --- find Python 3.10+ (the "py" launcher first, then "python") -------------
 set "PY="

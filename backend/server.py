@@ -1,5 +1,5 @@
 """
-UniFi x Claude - local web app.
+UniFi x AI - local web app (Claude or ChatGPT).
 
 Run:  start.bat   (Windows)   or   python backend/server.py [--port N] [--no-browser]
 
@@ -30,10 +30,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config_store as cfg                                     # noqa: E402
 from agent import Agent, AgentError, redact                    # noqa: E402
+from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -80,8 +81,10 @@ def agent_settings():
         out_tokens = int(cfg.get_setting("MAX_OUTPUT_TOKENS"))
     except ValueError:
         out_tokens = 16000
-    return {"api_key": cfg.get_setting("ANTHROPIC_API_KEY"),
-            "model": cfg.get_setting("CLAUDE_MODEL"),
+    prov = cfg.active_provider()
+    return {"provider": prov, "provider_label": PROVIDERS[prov].label,
+            "api_key": cfg.provider_key(prov), "model": cfg.provider_model(prov),
+            "keys": {p: cfg.provider_key(p) for p in PROVIDERS},
             "max_rounds": max(1, min(rounds, 50)),
             # 21,000 is the SDK's ceiling for a non-streaming request
             "max_tokens": max(2000, min(out_tokens, 21000))}
@@ -103,25 +106,9 @@ def switch_connection():
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-def anthropic_error_message(e):
-    import anthropic
-    if isinstance(e, anthropic.AuthenticationError):
-        return "Anthropic rejected the API key. Open Settings and paste a valid key."
-    if isinstance(e, anthropic.PermissionDeniedError):
-        return "This Anthropic key isn't allowed to do that (check the key's workspace/permissions)."
-    if isinstance(e, anthropic.NotFoundError):
-        return (f"Model '{cfg.get_setting('CLAUDE_MODEL')}' wasn't found for this key. "
-                f"Pick another model in Settings.")
-    if isinstance(e, anthropic.RateLimitError):
-        return "Anthropic rate limit reached. Wait a minute and try again."
-    if isinstance(e, anthropic.APIConnectionError):
-        return "Can't reach api.anthropic.com. Check this PC's internet connection."
-    if isinstance(e, anthropic.APIStatusError):
-        msg = getattr(e, "message", str(e))
-        if "credit balance" in str(msg).lower():
-            return "Your Anthropic account is out of credits. Add credits at console.anthropic.com."
-        return f"Anthropic API error {e.status_code}: {msg}"
-    return None
+def ai_error_message(e):
+    prov = cfg.active_provider()
+    return provider_error_message(e, prov, cfg.provider_model(prov))
 
 
 def mask_key(k):
@@ -172,7 +159,7 @@ class HttpError(Exception):
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    server_version = "UniFiClaude"
+    server_version = "UniFiAI"
     sys_version = ""
 
     def log_message(self, fmt, *args):
@@ -270,9 +257,9 @@ class Handler(BaseHTTPRequestHandler):
         except (AgentError, ValueError) as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
-            msg = anthropic_error_message(e)
+            msg = ai_error_message(e)
             if msg:
-                self.send_json({"error": msg, "kind": "anthropic"}, 502)
+                self.send_json({"error": msg, "kind": "ai"}, 502)
             else:
                 traceback.print_exc()
                 self.send_json({"error": f"Internal error: {type(e).__name__}: {e}"}, 500)
@@ -290,13 +277,15 @@ def r_status(_):
     p = cfg.active_profile()
     out = {
         "version": APP_VERSION,
-        "configured": bool(cfg.get_setting("ANTHROPIC_API_KEY")),
+        "configured": bool(cfg.provider_key(cfg.active_provider())),
+        "provider": cfg.active_provider(),
+        "provider_label": PROVIDERS[cfg.active_provider()].label,
         "has_connections": bool(cfg.list_profiles()["profiles"]),
         "active": public_profile(p) if p else None,
         "connected": False, "error": None, "error_kind": None,
         "secret_storage": cfg.secret_storage_kind(),
         "pending": agent.pending_view(),
-        "model": cfg.get_setting("CLAUDE_MODEL"),
+        "model": cfg.provider_model(cfg.active_provider()),
         "model_warning": None,
     }
     try:
@@ -316,9 +305,13 @@ def r_status(_):
 
 
 def r_settings_get(_):
-    key = cfg.get_setting("ANTHROPIC_API_KEY")
-    return {"anthropic_key_set": bool(key), "anthropic_key_hint": mask_key(key),
-            "model": cfg.get_setting("CLAUDE_MODEL"),
+    providers = {}
+    for name, cls in PROVIDERS.items():
+        key = cfg.provider_key(name)
+        providers[name] = {"label": cls.label, "vendor": cls.vendor, "key_url": cls.key_url,
+                           "key_prefix": cls.key_prefix, "key_set": bool(key),
+                           "key_hint": mask_key(key), "model": cfg.provider_model(name)}
+    return {"provider": cfg.active_provider(), "providers": providers,
             "port": int(cfg.get_setting("SERVER_PORT")),
             "running_port": HTTP_PORT,
             "env_overrides": cfg.env_overrides(),
@@ -327,13 +320,24 @@ def r_settings_get(_):
 
 def r_settings_save(b):
     updates = {}
-    if b.get("anthropic_api_key"):
-        k = str(b["anthropic_api_key"]).strip()
-        if not k.startswith("sk-ant-"):
-            raise ValueError("That doesn't look like an Anthropic API key (they start with 'sk-ant-').")
-        updates["ANTHROPIC_API_KEY"] = k
-    if b.get("model"):
-        updates["CLAUDE_MODEL"] = str(b["model"]).strip()
+    before = cfg.active_provider()
+    if b.get("provider"):
+        if b["provider"] not in PROVIDERS:
+            raise ValueError("Unknown AI provider")
+        updates["AI_PROVIDER"] = b["provider"]
+    for name, k in (b.get("keys") or {}).items():
+        if name not in PROVIDERS or not k:
+            continue
+        k = str(k).strip()
+        cls = PROVIDERS[name]
+        if not k.startswith(cls.key_prefix):
+            raise ValueError(f"That doesn't look like an {cls.vendor} API key (they start with '{cls.key_prefix}').")
+        if name == "openai" and k.startswith("sk-ant-"):
+            raise ValueError("That's an Anthropic key. Paste it in the Claude section instead.")
+        updates[cfg.PROVIDER_KEYS[name]["key"]] = k
+    for name, m in (b.get("models") or {}).items():
+        if name in PROVIDERS and m:
+            updates[cfg.PROVIDER_KEYS[name]["model"]] = str(m).strip()
     if b.get("port") not in (None, ""):
         port = int(b["port"])
         if not 1024 <= port <= 65535:
@@ -343,39 +347,46 @@ def r_settings_save(b):
         cfg.write_env_file(updates)
     res = r_settings_get(None)
     res["restart_needed"] = "SERVER_PORT" in updates and res["port"] != HTTP_PORT
+    res["chat_reset"] = cfg.active_provider() != before
+    if res["chat_reset"]:
+        agent.reset()            # conversations can't move between providers
     return res
 
 
-def r_test_anthropic(b):
+def r_test_key(b):
+    prov = b.get("provider") or cfg.active_provider()
+    if prov not in PROVIDERS:
+        return {"ok": False, "error": "Unknown AI provider"}
     try:
-        models = agent.list_models(str(b.get("api_key") or "").strip() or None)
+        models = agent.list_models(prov, str(b.get("api_key") or "").strip() or None)
         return {"ok": True, "models": models}
     except AgentError as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
-        return {"ok": False, "error": anthropic_error_message(e) or str(e)}
+        return {"ok": False, "error": provider_error_message(e, prov) or str(e)}
 
 
 # Model catalogue cache: lets /api/status warn about a deprecated/missing model
-# without calling Anthropic on every 30-second poll.
+# without calling the provider on every 30-second poll.
 _models_cache = {"key": None, "at": 0.0, "models": None, "error": None}
 _models_lock = threading.Lock()
 MODELS_TTL, MODELS_ERR_TTL = 6 * 3600, 300
 
 
 def cached_models(force=False):
-    key = cfg.get_setting("ANTHROPIC_API_KEY")
+    prov = cfg.active_provider()
+    key = cfg.provider_key(prov)
     if not key:
         return None
     with _models_lock:
         c = _models_cache
         ttl = MODELS_ERR_TTL if c["error"] else MODELS_TTL
-        if force or c["key"] != key or time.time() - c["at"] > ttl:
+        if force or c["key"] != (prov, key) or time.time() - c["at"] > ttl:
             try:
-                c.update(models=agent.list_models(key), error=None)
+                c.update(models=agent.list_models(prov, key), error=None)
             except Exception as e:
-                c.update(models=None, error=anthropic_error_message(e) or str(e))
-            c.update(key=key, at=time.time())
+                c.update(models=None, error=provider_error_message(e, prov) or str(e))
+            c.update(key=(prov, key), at=time.time())
         return c["models"]
 
 
@@ -384,7 +395,7 @@ def model_warning():
     models = cached_models()
     if not models:
         return None
-    current = cfg.get_setting("CLAUDE_MODEL")
+    current = cfg.provider_model(cfg.active_provider())
     m = next((x for x in models if x["id"] == current), None)
     if m is None:
         return f"The model '{current}' isn't available to your API key. Pick another in Settings."
@@ -397,8 +408,8 @@ def model_warning():
 def r_models(_):
     models = cached_models(force=True)
     if models is None:
-        raise AgentError(_models_cache["error"] or "Enter an Anthropic API key first.")
-    return {"models": models, "current": cfg.get_setting("CLAUDE_MODEL")}
+        raise AgentError(_models_cache["error"] or "Enter an API key first.")
+    return {"models": models, "current": cfg.provider_model(cfg.active_provider())}
 
 
 def r_connections(_):
@@ -510,7 +521,7 @@ def r_report(_):
         report = agent.generate_report()
         report.update(generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                       network=p["name"], host=p["host"], site=p.get("site", "default"),
-                      model=cfg.get_setting("CLAUDE_MODEL"),
+                      model=f"{PROVIDERS[cfg.active_provider()].label} · {cfg.provider_model(cfg.active_provider())}",
                       report_id=f"{p['id']}-{int(time.time())}")
         return report
     finally:
@@ -521,7 +532,7 @@ ROUTES = {
     ("GET",  "/api/status"):                  r_status,
     ("GET",  "/api/settings"):                r_settings_get,
     ("POST", "/api/settings"):                r_settings_save,
-    ("POST", "/api/settings/test-anthropic"): r_test_anthropic,
+    ("POST", "/api/settings/test-key"):       r_test_key,
     ("GET",  "/api/models"):                  r_models,
     ("GET",  "/api/connections"):             r_connections,
     ("POST", "/api/connections"):             r_connection_save,
@@ -541,7 +552,7 @@ HTTP_PORT = None
 
 def main():
     global HTTP_PORT
-    ap = argparse.ArgumentParser(description="UniFi x Claude")
+    ap = argparse.ArgumentParser(description="UniFi x AI")
     ap.add_argument("--port", type=int, help="override SERVER_PORT from .env")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser window")
     args = ap.parse_args()
@@ -560,13 +571,15 @@ def main():
     url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "127.0.0.1") else host
     url = f"http://{url_host}:{HTTP_PORT}/"
     print("")
-    print("  UniFi x Claude", APP_VERSION)
+    print("  UniFi x AI", APP_VERSION)
     print(f"  Open:  {url}")
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"  WARNING: listening on {host} - other machines on this network can reach the app.")
     p = cfg.active_profile()
     print(f"  Connection: {p['name']} ({p['host']})" if p else "  Connection: none yet - add one in the app")
-    print(f"  Anthropic key: {'set' if cfg.get_setting('ANTHROPIC_API_KEY') else 'NOT set - add it in the app'}")
+    prov = cfg.active_provider()
+    print(f"  AI: {PROVIDERS[prov].label} ({cfg.provider_model(prov)}), key "
+          f"{'set' if cfg.provider_key(prov) else 'NOT set - add it in the app'}")
     print(f"  Secrets stored in: {'Windows Credential Manager' if cfg.secret_storage_kind() == 'credential-manager' else 'data/secrets.json (plaintext)'}")
     print("  Press Ctrl+C to stop.\n")
     if not args.no_browser:
