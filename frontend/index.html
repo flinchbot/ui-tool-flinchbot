@@ -315,6 +315,8 @@ async function refreshStatus() {
     showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
   } else if (!status.configured) {
     showBanner('Add your Anthropic API key to start chatting.', [h('button', { class: 'btn', onclick: openSettings }, 'Open Settings')]);
+  } else if (status.model_warning) {
+    showBanner(status.model_warning, [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.secret_storage === 'file' && status.has_connections) {
     showBanner('Passwords are being saved in data/secrets.json because Windows Credential Manager is not available. Keep that folder private.', []);
   } else hideBanner();
@@ -507,21 +509,57 @@ function secretInput(attrs) {
 function result(kind, ...kids) { return h('div', { class: `result ${kind}` }, ...kids); }
 
 // ── Settings (writes .env) ─────────────────────────────────────────────────
+// Model families as reported by the Models API's `line` field (never guessed from IDs).
+const LINE_ORDER = ['fable', 'opus', 'sonnet', 'haiku', 'mythos'];
+const LINE_HINT = { fable: 'most capable, highest cost', opus: 'very capable, higher cost',
+                    sonnet: 'balanced speed, smarts and cost', haiku: 'fastest and cheapest' };
+const titleCase = t => t.charAt(0).toUpperCase() + t.slice(1);
+
+function fillModelSelect(sel, models, cur, pickNewestIfMissing) {
+  const groups = {};
+  for (const m of models) (groups[m.line || 'other'] = groups[m.line || 'other'] || []).push(m);
+  const lines = [...LINE_ORDER.filter(l => groups[l]), ...Object.keys(groups).filter(l => !LINE_ORDER.includes(l))];
+  const available = models.some(m => m.id === cur);
+  if (!available && pickNewestIfMissing) {
+    const pick = (groups.sonnet || []).find(m => m.lifecycle === 'active') || models.find(m => m.lifecycle === 'active');
+    if (pick) cur = pick.id;
+  }
+  sel.replaceChildren(...lines.map(line => {
+    // API order is newest first; keep that, but list active models before deprecated ones
+    const list = groups[line].slice().sort((a, b) => (a.lifecycle !== 'active') - (b.lifecycle !== 'active'));
+    const newest = list.find(m => m.lifecycle === 'active');
+    return h('optgroup', { label: line === 'other' ? 'Other' : `${titleCase(line)} — ${LINE_HINT[line] || ''}`.replace(/ — $/, '') },
+      ...list.map(m => h('option', { value: m.id, selected: m.id === cur },
+        m.name + (m.lifecycle !== 'active' ? `  — deprecated${m.retires_at ? ', retires ' + m.retires_at : ''}`
+                                         : (m === newest ? '  ★ newest' : '')))));
+  }));
+  if (!models.some(m => m.id === cur)) sel.prepend(h('option', { value: cur, selected: true }, `${cur} — not available to this key`));
+  sel.value = cur;
+  return models;
+}
 async function openSettings(wizard) {
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { toast(e.message, true); return; }
   const key = secretInput({ placeholder: s.anthropic_key_set ? `Saved (${s.anthropic_key_hint}) — paste a new key to replace` : 'sk-ant-…' });
   const model = h('select', {}, h('option', { value: s.model }, s.model));
+  const modelNote = h('div');
+  let catalogue = [];
+  const describeChoice = () => {
+    const m = catalogue.find(x => x.id === model.value);
+    modelNote.replaceChildren(!m ? null : m.lifecycle !== 'active'
+      ? result('warn', `${m.name} is deprecated${m.retires_at ? ' and stops working on ' + m.retires_at : ''}. Pick a model marked ★ newest.`)
+      : null);
+  };
+  model.addEventListener('change', describeChoice);
   const port = h('input', { type: 'number', min: 1024, max: 65535, value: s.port });
   const out = h('div');
   const loadModels = async () => {
     out.replaceChildren(result('warn', 'Checking the key with Anthropic…'));
     const r = await api('POST', '/api/settings/test-anthropic', { api_key: key.input.value.trim() || undefined }).catch(e => ({ ok: false, error: e.message }));
     if (!r.ok) { out.replaceChildren(result('bad', r.error)); return false; }
-    const cur = model.value;
-    model.replaceChildren(...r.models.map(m => h('option', { value: m.id, selected: m.id === cur }, `${m.name} (${m.id})`)));
-    if (!r.models.some(m => m.id === cur)) model.prepend(h('option', { value: cur, selected: true }, `${cur} (not offered to this key)`));
-    out.replaceChildren(result('ok', `Key works. ${r.models.length} models available.`));
+    catalogue = fillModelSelect(model, r.models, model.value, wizard);
+    describeChoice();
+    out.replaceChildren(result('ok', `Key works. ${r.models.filter(m => m.lifecycle === 'active').length} current models available.`));
     return true;
   };
   const save = async (next) => {
@@ -529,7 +567,7 @@ async function openSettings(wizard) {
       if (!key.input.value.trim() && !s.anthropic_key_set) { out.replaceChildren(result('bad', 'Paste your Anthropic API key first.')); return; }
       if (key.input.value.trim() && !(await loadModels())) return;
       const r = await api('POST', '/api/settings', { anthropic_api_key: key.input.value.trim() || undefined, model: model.value,
-                                                     port: wizard ? undefined : port.value });
+                                                     port: (wizard || Number(port.value) === s.port) ? undefined : port.value });
       if (r.restart_needed) toast(`Saved. The new port (${r.port}) takes effect after you restart the app.`);
       else toast('Settings saved.');
       await refreshStatus();
@@ -544,7 +582,9 @@ async function openSettings(wizard) {
     field('Anthropic API key', key.wrap, h('span', {}, 'Create one at console.anthropic.com → API Keys. It is saved only in the .env file on this PC.')),
     h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: loadModels }, 'Test key & load models')),
     out,
-    field('Claude model', model, 'Larger models are smarter but cost more per question. Use "Test key & load models" to see what your key can use.'),
+    field('Claude model', model, h('span', {}, 'The list comes live from Anthropic, so new models appear here automatically. Sonnet is a good default; Opus/Fable are smarter but cost more per question. Prices: ',
+      h('a', { href: 'https://platform.claude.com/docs/en/about-claude/pricing', target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, 'Anthropic pricing'), '.')),
+    modelNote,
     wizard ? null : field('App port', port, `This app's web address is http://127.0.0.1:${s.running_port}/. Change only if another program uses this port.`),
   ];
   if (wizard) {
@@ -556,6 +596,7 @@ async function openSettings(wizard) {
     openModal(...modalHead('Settings', `Saved to ${s.env_path}`), ...body,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), h('button', { class: 'btn primary', onclick: () => save() }, 'Save')));
   }
+  if (s.anthropic_key_set) loadModels();      // show the live model list without an extra click
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────

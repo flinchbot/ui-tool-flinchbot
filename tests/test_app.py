@@ -52,6 +52,11 @@ def reset_store():
 
 
 # ── fake Anthropic ────────────────────────────────────────────────────────────
+def model(id_, line, lifecycle="active", retires=None):
+    return types.SimpleNamespace(id=id_, display_name=id_.replace("-", " ").title(), line=line,
+                                 lifecycle=lifecycle, retires_at=retires, created_at=None, max_input_tokens=1000000)
+
+
 class _Block(types.SimpleNamespace):
     def model_dump(self, exclude_none=True):
         return dict(self.__dict__)
@@ -69,8 +74,13 @@ class FakeAnthropic:
     script = []          # list of lists of blocks, one per API call
     received = []        # messages sent on each call
 
+    catalogue = [model("claude-sonnet-5-5", "sonnet"), model("claude-opus-5-5", "opus"),
+                 model("claude-sonnet-4-6", "sonnet", "deprecated",
+                       __import__("datetime").datetime(2027, 2, 17))]
+
     def __init__(self, api_key=None):
         self.messages = self
+        self.models = types.SimpleNamespace(list=lambda limit=100: iter(FakeAnthropic.catalogue))
 
     def create(self, **kw):
         FakeAnthropic.received.append(kw)
@@ -97,6 +107,9 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertEqual(vals["OTHER"], "keep me")
         self.assertEqual(vals["CLAUDE_MODEL"], "claude-x")
         self.assertEqual(vals["ANTHROPIC_API_KEY"], 'sk-ant-a"b c#d')
+
+    def test_default_model_is_current(self):
+        self.assertEqual(cfg.get_setting("CLAUDE_MODEL"), "claude-sonnet-5-5")
 
     def test_env_var_overrides_file(self):
         cfg.write_env_file({"CLAUDE_MODEL": "from-file"})
@@ -406,6 +419,19 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(st["pending"])
         s, r, _ = self.req("POST", "/api/chat/decide", {"approve": True})
         self.assertEqual(r["reply"], "The Gateway LED is blinking.")
+
+        # live model list + lifecycle warnings
+        s, ms, _ = self.req("GET", "/api/models")
+        self.assertEqual(s, 200, ms)
+        by_id = {m["id"]: m for m in ms["models"]}
+        self.assertEqual(by_id["claude-sonnet-4-6"]["retires_at"], "2027-02-17")
+        self.assertEqual(by_id["claude-opus-5-5"]["line"], "opus")
+        self.req("POST", "/api/settings", {"model": "claude-sonnet-4-6"})
+        self.assertIn("deprecated and retires on 2027-02-17", self.req("GET", "/api/status")[1]["model_warning"])
+        self.req("POST", "/api/settings", {"model": "claude-gone"})
+        self.assertIn("isn't available", self.req("GET", "/api/status")[1]["model_warning"])
+        self.req("POST", "/api/settings", {"model": "claude-sonnet-5-5"})
+        self.assertIsNone(self.req("GET", "/api/status")[1]["model_warning"])
 
         # wrong saved password -> friendly error, not a crash
         sid = saved["saved_id"]

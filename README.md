@@ -15,6 +15,7 @@ A local web app for chatting with Claude about a Ubiquiti UniFi network. Claude 
   - UniFi passwords and API keys live in Windows Credential Manager.
   - Wi-Fi passphrases and other `x_*` fields are redacted before anything is sent to Claude.
 - **TLS certificate pinning.** The console's certificate fingerprint is saved when you test a connection. If the address later answers with a different certificate, the app stops and warns you. This matters when you move between networks that reuse the same IPs.
+- **Always-current model list:** Settings pulls the model catalogue live from Anthropic, grouped by family with the newest starred. If your chosen model is deprecated, a banner shows its retirement date.
 - **Locked to this PC:**
   - Listens on `127.0.0.1` only.
   - Every request needs a per-launch token.

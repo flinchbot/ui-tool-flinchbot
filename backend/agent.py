@@ -494,8 +494,26 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             f"if you want me to keep going.)_"]), "pending": None}
 
     def list_models(self, api_key=None):
+        """All models this key can use, newest first, with lifecycle info.
+
+        Uses the Models API's own `line` / `lifecycle` / `retires_at` fields rather
+        than guessing from model IDs, so new releases show up with no code change.
+        Older SDKs without those fields still work (they just show less detail).
+        """
         key = api_key or self._get_settings().get("api_key")
         if not key:
             raise AgentError("Enter an Anthropic API key first.")
-        page = Anthropic(api_key=key).models.list(limit=100)
-        return [{"id": m.id, "name": getattr(m, "display_name", m.id)} for m in page.data]
+        out = []
+        for m in Anthropic(api_key=key).models.list(limit=100):    # iterating auto-paginates
+            created = getattr(m, "created_at", None)
+            retires = getattr(m, "retires_at", None)
+            out.append({
+                "id": m.id,
+                "name": getattr(m, "display_name", None) or m.id,
+                "line": getattr(m, "line", None),
+                "lifecycle": getattr(m, "lifecycle", None) or "active",
+                "retires_at": retires.date().isoformat() if hasattr(retires, "date") else (str(retires)[:10] if retires else None),
+                "created_at": created.isoformat() if hasattr(created, "isoformat") else (str(created) if created else None),
+                "context": getattr(m, "max_input_tokens", None),
+            })
+        return out

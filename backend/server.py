@@ -20,6 +20,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -288,7 +289,13 @@ def r_status(_):
         "connected": False, "error": None, "error_kind": None,
         "secret_storage": cfg.secret_storage_kind(),
         "pending": agent.pending_view(),
+        "model": cfg.get_setting("CLAUDE_MODEL"),
+        "model_warning": None,
     }
+    try:
+        out["model_warning"] = model_warning()
+    except Exception:
+        pass
     if p:
         try:
             c = state.client()
@@ -342,8 +349,49 @@ def r_test_anthropic(b):
         return {"ok": False, "error": anthropic_error_message(e) or str(e)}
 
 
+# Model catalogue cache: lets /api/status warn about a deprecated/missing model
+# without calling Anthropic on every 30-second poll.
+_models_cache = {"key": None, "at": 0.0, "models": None, "error": None}
+_models_lock = threading.Lock()
+MODELS_TTL, MODELS_ERR_TTL = 6 * 3600, 300
+
+
+def cached_models(force=False):
+    key = cfg.get_setting("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    with _models_lock:
+        c = _models_cache
+        ttl = MODELS_ERR_TTL if c["error"] else MODELS_TTL
+        if force or c["key"] != key or time.time() - c["at"] > ttl:
+            try:
+                c.update(models=agent.list_models(key), error=None)
+            except Exception as e:
+                c.update(models=None, error=anthropic_error_message(e) or str(e))
+            c.update(key=key, at=time.time())
+        return c["models"]
+
+
+def model_warning():
+    """Human-readable warning if the configured model is deprecated or unavailable."""
+    models = cached_models()
+    if not models:
+        return None
+    current = cfg.get_setting("CLAUDE_MODEL")
+    m = next((x for x in models if x["id"] == current), None)
+    if m is None:
+        return f"The model '{current}' isn't available to your API key. Pick another in Settings."
+    if m["lifecycle"] != "active":
+        when = f" and retires on {m['retires_at']}" if m.get("retires_at") else ""
+        return f"{m['name']} is deprecated{when}. Pick a newer model in Settings."
+    return None
+
+
 def r_models(_):
-    return {"models": agent.list_models(), "current": cfg.get_setting("CLAUDE_MODEL")}
+    models = cached_models(force=True)
+    if models is None:
+        raise AgentError(_models_cache["error"] or "Enter an Anthropic API key first.")
+    return {"models": models, "current": cfg.get_setting("CLAUDE_MODEL")}
 
 
 def r_connections(_):

@@ -32,7 +32,7 @@ KEYRING_SERVICE = "unifi-claude"
 
 DEFAULTS = {
     "ANTHROPIC_API_KEY": "",
-    "CLAUDE_MODEL":      "claude-sonnet-4-6",
+    "CLAUDE_MODEL":      "claude-sonnet-5-5",
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
