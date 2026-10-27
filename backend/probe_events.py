@@ -3,7 +3,7 @@ Diagnostic: check which UniFi endpoints the ACTIVE connection answers.
 
 Run from the project folder:
     .venv\\Scripts\\python backend\\probe_events.py        (Windows)
-    .venv/bin/python backend/probe_events.py              (macOS/Linux)
+    .venv/bin/python backend/probe_events.py              (macOS / Linux)
 
 Uses the connection currently selected in the app (no credentials in this file).
 Paste the output into a chat when asking for help - it contains no secrets.

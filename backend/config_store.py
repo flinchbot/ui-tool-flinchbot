@@ -6,10 +6,11 @@ can be copied to another PC):
 
   .env                    app settings + AI provider API keys (never commit)
   data/connections.json   UniFi connection profiles, NO passwords
-  Windows Credential Manager (service "unifi-claude" - name kept from the
-                          app's first version so saved passwords keep working)
-                          UniFi passwords / API keys
-  data/secrets.json       fallback store, used only if Credential Manager
+  the OS password store   UniFi / SSH passwords, API keys, undo snapshots' old secrets:
+                          Windows Credential Manager or the macOS Keychain (service
+                          "unifi-claude" - name kept from the app's first version so
+                          saved passwords keep working)
+  data/secrets.json       fallback store, used only if that password store
                           is unavailable (plaintext - the UI warns about it)
 
 Real environment variables override .env values (standard dotenv behaviour).
@@ -18,9 +19,22 @@ Real environment variables override .env values (standard dotenv behaviour).
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import uuid
+
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+
+def platform_name():
+    return "windows" if IS_WINDOWS else "mac" if IS_MAC else "linux"
+
+
+def launcher():
+    """What the user double-clicks / runs to start the app on this OS."""
+    return "start.bat" if IS_WINDOWS else "./start.command"
 
 BASE_DIR      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV_PATH      = os.path.join(BASE_DIR, ".env")
@@ -129,16 +143,23 @@ def write_env_file(updates):
         else:
             lines = ["# UniFi x flinchbot settings - created by the Settings screen.",
                      "# Keep this file private: it contains your AI provider API key(s)."]
-        remaining = dict(updates)
-        out = []
+        for k, v in updates.items():
+            if any(c in str(v) for c in "\r\n"):
+                raise ValueError(f"{k} can't contain line breaks")
+        done, out = set(), []
         for line in lines:
             m = _ENV_LINE.match(line)
-            if m and m.group(1) in remaining:
-                out.append(f"{m.group(1)}={_quote(remaining.pop(m.group(1)))}")
+            key = m.group(1) if m else None
+            if key in updates:
+                if key in done:
+                    continue        # a duplicate line would otherwise win (last one read)
+                done.add(key)
+                out.append(f"{key}={_quote(updates[key])}")
             else:
                 out.append(line)
-        for k, v in remaining.items():
-            out.append(f"{k}={_quote(v)}")
+        for k, v in updates.items():
+            if k not in done:
+                out.append(f"{k}={_quote(v)}")
         _atomic_write(ENV_PATH, "\n".join(out) + "\n")
 
 
@@ -170,6 +191,13 @@ def secret_storage_kind():
     return "credential-manager" if _keyring() else "file"
 
 
+def secret_store_name():
+    """Human name of where passwords are kept, for the UI and the console banner."""
+    if not _keyring():
+        return "data/secrets.json (plaintext)"
+    return "Windows Credential Manager" if IS_WINDOWS else "the macOS Keychain" if IS_MAC else "the system keyring"
+
+
 def _read_secret_file():
     if not os.path.exists(SECRETS_PATH):
         return {}
@@ -177,40 +205,53 @@ def _read_secret_file():
         return json.load(f)
 
 
-def set_secret(profile_id, secret):
+SECRET_KINDS = ("", "ssh")      # "" = UniFi password / API key, "ssh" = SSH password
+
+
+def _secret_key(profile_id, kind):
+    return f"{profile_id}:{kind}" if kind else profile_id
+
+
+def set_secret(profile_id, secret, kind=""):
     with _lock:
         kr = _keyring()
         if kr:
-            kr.set_password(KEYRING_SERVICE, f"profile:{profile_id}", secret)
+            kr.set_password(KEYRING_SERVICE, "profile:" + _secret_key(profile_id, kind), secret)
             return
         data = _read_secret_file()
-        data[profile_id] = secret
+        data[_secret_key(profile_id, kind)] = secret
         _atomic_write(SECRETS_PATH, json.dumps(data, indent=2))
 
 
-def get_secret(profile_id):
+def get_secret(profile_id, kind=""):
     kr = _keyring()
     if kr:
         try:
-            v = kr.get_password(KEYRING_SERVICE, f"profile:{profile_id}")
+            v = kr.get_password(KEYRING_SERVICE, "profile:" + _secret_key(profile_id, kind))
             if v is not None:
                 return v
         except Exception:
             pass
-    return _read_secret_file().get(profile_id)
+    return _read_secret_file().get(_secret_key(profile_id, kind))
 
 
-def delete_secret(profile_id):
+def delete_secret(profile_id, kind=None):
+    """Delete one kind of secret, or all of them for the profile (kind=None)."""
+    kinds = SECRET_KINDS if kind is None else (kind,)
     with _lock:
         kr = _keyring()
-        if kr:
-            try:
-                kr.delete_password(KEYRING_SERVICE, f"profile:{profile_id}")
-            except Exception:
-                pass
         data = _read_secret_file()
-        if profile_id in data:
-            del data[profile_id]
+        changed = False
+        for k in kinds:
+            if kr:
+                try:
+                    kr.delete_password(KEYRING_SERVICE, "profile:" + _secret_key(profile_id, k))
+                except Exception:
+                    pass
+            if _secret_key(profile_id, k) in data:
+                del data[_secret_key(profile_id, k)]
+                changed = True
+        if changed:
             _atomic_write(SECRETS_PATH, json.dumps(data, indent=2))
 
 
@@ -224,7 +265,25 @@ PROFILE_FIELDS = {
     "auth":         str,   # "password" | "apikey"
     "username":     str,   # only for auth == "password"
     "fingerprint":  str,   # SHA-256 of the console's TLS certificate (pinned on Test)
+    # SSH to the console host (optional; off by default; password stored like the UniFi secret)
+    "ssh_enabled":  bool,
+    "ssh_port":     int,   # 22
+    "ssh_username": str,   # "root" on UniFi OS consoles
+    "ssh_hostkey":  str,   # SHA-256 of the SSH host key (pinned on Test SSH)
+    "speedtest_hours": int,  # run a WAN speed test every N hours while this is the active connection (0 = off)
 }
+SPEEDTEST_CHOICES = (0, 1, 2, 3, 4, 6, 8, 12, 24, 48, 168)
+
+
+def _to_bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"not a boolean: {v!r}")
 
 
 def _load():
@@ -241,29 +300,36 @@ def _save(data):
     _atomic_write(PROFILES_PATH, json.dumps(data, indent=2))
 
 
+def normalize_host(host):
+    """'https://192.168.1.1:8443/' -> ('192.168.1.1', 8443); '[fd00::1]' -> ('fd00::1', None)."""
+    host = re.sub(r"^https?://", "", str(host or "").strip(), flags=re.I).rstrip("/")
+    port = None
+    m = re.match(r"^\[([0-9A-Fa-f:.]+)\](?::(\d+))?$", host)   # [IPv6] or [IPv6]:port
+    if m:
+        host = m.group(1)
+        port = int(m.group(2)) if m.group(2) else None
+    elif host.count(":") == 1:                                 # host:port typed together
+        host, _, p = host.partition(":")
+        port = int(p) if p.isdigit() else None
+    if not host:
+        raise ValueError("Address is required")
+    if re.search(r"[\s/?#@\\]", host):
+        raise ValueError("The address should be just a host name or IP, without a path")
+    return host, port
+
+
 def clean_profile(raw):
     """Validate/normalise user input into a profile dict (no secret)."""
     p = {}
     for k, typ in PROFILE_FIELDS.items():
-        if k in raw and raw[k] is not None and raw[k] != "":
+        if k in raw and raw[k] is not None and (raw[k] != "" or typ is bool):
             try:
-                p[k] = typ(raw[k]).strip() if typ is str else typ(raw[k])
+                p[k] = typ(raw[k]).strip() if typ is str else (_to_bool(raw[k]) if typ is bool else typ(raw[k]))
             except (TypeError, ValueError):
                 raise ValueError(f"Invalid value for {k}")
-    host = p.get("host", "")
-    host = re.sub(r"^https?://", "", host, flags=re.I).rstrip("/")
-    m = re.match(r"^\[([0-9A-Fa-f:.]+)\](?::(\d+))?$", host)   # [IPv6] or [IPv6]:port
-    if m:
-        host = m.group(1)
-        if m.group(2) and "port" not in p:
-            p["port"] = int(m.group(2))
-    elif host.count(":") == 1:                                 # host:port typed together
-        host, _, port = host.partition(":")
-        if port.isdigit() and "port" not in p:
-            p["port"] = int(port)
-    p["host"] = host
-    if not p["host"]:
-        raise ValueError("Address is required")
+    p["host"], typed_port = normalize_host(p.get("host", ""))
+    if typed_port and "port" not in p:
+        p["port"] = typed_port
     p.setdefault("port", 443)
     if not 1 <= p["port"] <= 65535:
         raise ValueError("Port must be between 1 and 65535")
@@ -276,6 +342,15 @@ def clean_profile(raw):
     if p.get("console_type") not in (None, "unifi_os", "standalone"):
         raise ValueError("Unknown console type")
     p.setdefault("name", p["host"])
+    p.setdefault("ssh_enabled", False)
+    p.setdefault("ssh_port", 22)
+    if not 1 <= p["ssh_port"] <= 65535:
+        raise ValueError("SSH port must be between 1 and 65535")
+    if p["ssh_enabled"] and not p.get("ssh_username"):
+        p["ssh_username"] = "root"
+    p.setdefault("speedtest_hours", 0)
+    if p["speedtest_hours"] not in SPEEDTEST_CHOICES:
+        raise ValueError(f"Speed test schedule must be one of {', '.join(map(str, SPEEDTEST_CHOICES))} hours")
     return p
 
 
@@ -286,6 +361,7 @@ def list_profiles():
         for p in data["profiles"]:
             q = dict(p)
             q["has_secret"] = bool(get_secret(p["id"]))
+            q["has_ssh_secret"] = bool(get_secret(p["id"], "ssh"))
             out.append(q)
         return {"active": data["active"], "profiles": out}
 
@@ -298,7 +374,7 @@ def get_profile(profile_id):
     return None
 
 
-def upsert_profile(raw, secret=None):
+def upsert_profile(raw, secret=None, ssh_secret=None):
     with _lock:
         data = _load()
         pid = raw.get("id")
@@ -307,22 +383,31 @@ def upsert_profile(raw, secret=None):
         merged.update({k: v for k, v in raw.items() if k in PROFILE_FIELDS})
         profile = clean_profile(merged)
         if existing:
-            # A changed address or port means a different certificate: drop the pin
-            # unless the caller supplied a fresh one from a Test.
+            # A changed address or port means a different certificate / host key: drop
+            # the pin unless the caller supplied a fresh one from a Test.
             if (existing.get("host"), existing.get("port")) != (profile["host"], profile["port"]) \
                     and "fingerprint" not in raw:
                 profile.pop("fingerprint", None)
+            if (existing.get("host"), existing.get("ssh_port")) != (profile["host"], profile["ssh_port"]) \
+                    and "ssh_hostkey" not in raw:
+                profile.pop("ssh_hostkey", None)
             profile["id"] = existing["id"]
-            data["profiles"] = [profile if p["id"] == pid else p for p in data["profiles"]]
         else:
             profile["id"] = uuid.uuid4().hex[:12]
+        if not secret and not existing:
+            raise ValueError("A password or API key is required for a new connection")
+        if not secret and existing and existing.get("auth") != profile["auth"]:
+            raise ValueError("Changing the login method needs the new password or API key")
+        if profile["ssh_enabled"] and not ssh_secret and not get_secret(profile["id"], "ssh"):
+            raise ValueError("Enter the SSH password to turn SSH on")
+        if existing:
+            data["profiles"] = [profile if p["id"] == pid else p for p in data["profiles"]]
+        else:
             data["profiles"].append(profile)
         if secret:
             set_secret(profile["id"], secret)
-        elif not existing:
-            raise ValueError("A password or API key is required for a new connection")
-        elif existing.get("auth") != profile["auth"]:
-            raise ValueError("Changing the login method needs the new password or API key")
+        if ssh_secret:
+            set_secret(profile["id"], ssh_secret, "ssh")
         if data["active"] is None:
             data["active"] = profile["id"]
         _save(data)

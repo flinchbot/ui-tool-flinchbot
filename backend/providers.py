@@ -52,8 +52,13 @@ class AnthropicProvider:
         self.client = Anthropic(api_key=api_key)
 
     def complete(self, history, system, tools, model, max_tokens):
+        # cache_control (top-level): the tool schemas, system prompt and earlier turns are
+        # identical from one round of the tool loop to the next, so they are served from
+        # the prompt cache instead of being re-billed in full. The agent keeps the system
+        # prompt free of anything that changes minute to minute for the same reason.
         resp = self.client.messages.create(
             model=model, max_tokens=max_tokens, system=system, messages=copy.deepcopy(history),
+            cache_control={"type": "ephemeral"},
             tools=[{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]}
                    for t in tools])
         blocks = []
@@ -156,7 +161,8 @@ class OpenAIProvider:
 
     def __init__(self, api_key):
         if OpenAI is None:
-            raise RuntimeError("The 'openai' package isn't installed. Run start.bat again to install it.")
+            raise RuntimeError("The 'openai' package isn't installed. Close the app and start it again "
+                               "(start.bat on Windows, start.command on a Mac) to install it.")
         self.client = OpenAI(api_key=api_key)
 
     def complete(self, history, system, tools, model, max_tokens):

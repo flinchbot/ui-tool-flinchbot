@@ -1,7 +1,8 @@
 """
 UniFi x flinchbot - local web app (AI: Claude or ChatGPT).
 
-Run:  start.bat   (Windows)   or   python backend/server.py [--port N] [--no-browser]
+Run:  start.bat (Windows), start.command (macOS / Linux),
+      or   python backend/server.py [--port N] [--no-browser]
 
 Security
   * Listens on 127.0.0.1 only by default (SERVER_HOST in .env to change).
@@ -13,11 +14,13 @@ Security
 """
 
 import argparse
+import base64
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -34,8 +37,14 @@ from agent import Agent, AgentError, redact                    # noqa: E402
 from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
+from ssh_client import SSHClient, SSHError, format_hostkey, test_ssh  # noqa: E402
+import history                                                         # noqa: E402
+import topology                                                        # noqa: E402
+import wan                                                             # noqa: E402
+from unifi_client import summarize_event                               # noqa: E402
+from urllib.parse import parse_qs                                      # noqa: E402
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -46,27 +55,61 @@ class State:
         self.lock = threading.RLock()
         self._client = None
         self._client_profile = None
+        self._ssh = None
+        self._ssh_profile = None
 
     def invalidate(self):
         with self.lock:
             self._client = None
             self._client_profile = None
+            if self._ssh is not None:
+                self._ssh.close()
+            self._ssh = None
+            self._ssh_profile = None
+
+    def ssh(self):
+        """SSH client for the active profile (only if SSH is turned on for it)."""
+        with self.lock:
+            profile = cfg.active_profile()
+            if not profile:
+                raise SSHError("No UniFi connection yet.", "noconn")
+            if not profile.get("ssh_enabled"):
+                raise SSHError(f"SSH is turned off for '{profile['name']}'. Turn it on in the "
+                               f"connection settings if you want this.", "disabled")
+            if self._ssh is None or self._key(profile, self.SSH_KEYS) != self._ssh_profile:
+                secret = cfg.get_secret(profile["id"], "ssh")
+                if not secret:
+                    raise SSHError(f"No SSH password is saved for '{profile['name']}'. Edit the "
+                                   f"connection and enter it again.", "auth")
+                self._ssh = SSHClient(profile["host"], profile.get("ssh_port"), profile.get("ssh_username"),
+                                      secret, expected_hostkey=profile.get("ssh_hostkey"))
+                self._ssh_profile = self._key(profile, self.SSH_KEYS)
+            return self._ssh
+
+    # Only these fields mean "a different login": changing e.g. the speed-test schedule
+    # must not throw away the session (and the sign-in circuit breaker with it).
+    CONN_KEYS = ("id", "host", "port", "site", "auth", "username", "console_type", "fingerprint")
+    SSH_KEYS = ("id", "host", "ssh_enabled", "ssh_port", "ssh_username", "ssh_hostkey")
+
+    @staticmethod
+    def _key(profile, keys):
+        return tuple(profile.get(k) for k in keys)
 
     def client(self):
-        """UniFi client for the active profile; rebuilt if the profile changed."""
+        """UniFi client for the active profile; rebuilt if the login details changed."""
         with self.lock:
             profile = cfg.active_profile()
             if not profile:
                 raise UniFiError("No UniFi connection yet. Click the connection menu at the top "
                                  "and add one.", "noconn")
-            if self._client is None or profile != self._client_profile:
+            if self._client is None or self._key(profile, self.CONN_KEYS) != self._client_profile:
                 secret = cfg.get_secret(profile["id"])
                 if not secret:
                     raise UniFiError(f"No password or API key is saved for '{profile['name']}'. "
                                      f"Edit the connection and enter it again.", "auth")
                 self._client = UniFiClient(profile, secret)
                 self._client.verified = False
-                self._client_profile = profile
+                self._client_profile = self._key(profile, self.CONN_KEYS)
             return self._client
 
 
@@ -94,10 +137,34 @@ def agent_settings():
 def agent_context():
     p = cfg.active_profile() or {}
     return {"name": p.get("name"), "site": p.get("site", "default"),
-            "console": CONSOLE_LABELS.get(p.get("console_type") or "unifi_os")}
+            "console": CONSOLE_LABELS.get(p.get("console_type") or "unifi_os"),
+            "ssh_enabled": bool(p.get("ssh_enabled")), "ssh_username": p.get("ssh_username")}
 
 
-agent = Agent(state.client, agent_settings, agent_context)
+def wan_history(days):
+    """WAN history for the active connection (the AI's get_wan_history tool and the WAN view)."""
+    c, p = state.client(), cfg.active_profile()
+    points, events, notes = wan.collect(c, days, history.speedtests(p["id"]))
+    current = None
+    try:
+        current = next((h for h in c.get_health() if h.get("subsystem") == "wan"), None)
+    except UniFiError as e:
+        notes.append(f"Current WAN health isn't available ({e}).")
+    return {"days": days, "summary": wan.summary(points), "speed_tests": points[-200:], "wan_events": events[-100:],
+            "outages": sum(1 for e in events if wan.is_outage(e)), "current_wan": current, "notes": notes,
+            "schedule_hours": p.get("speedtest_hours", 0)}
+
+
+changelog = history.ChangeLog(state.client, cfg.active_profile)
+agent = Agent(state.client, agent_settings, agent_context, get_ssh=state.ssh, changes=changelog, get_wan=wan_history)
+
+
+def _last_speedtest_ms(connection_id):
+    runs = [r.get("ran_at") or 0 for r in history.speedtests(connection_id) if r.get("via") == "schedule"]
+    return max(runs) if runs else None
+
+
+scheduler = wan.Scheduler(cfg.active_profile, state.client, _last_speedtest_ms, history.record_speedtest)
 
 
 def switch_connection():
@@ -119,6 +186,7 @@ def mask_key(k):
 def public_profile(p):
     q = dict(p)
     q["fingerprint_display"] = format_fingerprint(p.get("fingerprint"))
+    q["ssh_hostkey_display"] = format_hostkey(p.get("ssh_hostkey"))
     q["console_label"] = CONSOLE_LABELS.get(p.get("console_type"), "Not tested yet")
     return q
 
@@ -274,6 +342,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError(404, "Not found")
             self._check(api=True)
             body = self._body()
+            if self.command == "GET" and "?" in self.path:
+                body = {k: v[-1] for k, v in parse_qs(self.path.split("?", 1)[1]).items()}
             route = ROUTES.get((self.command, path))
             if not route:
                 raise HttpError(404, f"Unknown endpoint {self.command} {path}")
@@ -283,6 +353,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(e), **e.extra}, e.status)
         except UniFiError as e:
             self.send_json({"error": str(e), "kind": e.kind}, 502)
+        except SSHError as e:
+            self.send_json({"error": str(e), "kind": "ssh_" + e.kind}, 502)
         except (AgentError, ValueError) as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
@@ -313,6 +385,9 @@ def r_status(_):
         "active": public_profile(p) if p else None,
         "connected": False, "error": None, "error_kind": None,
         "secret_storage": cfg.secret_storage_kind(),
+        "secret_store_name": cfg.secret_store_name(),
+        "platform": cfg.platform_name(),
+        "launcher": cfg.launcher(),
         "pending": agent.pending_view(),
         "model": cfg.provider_model(cfg.active_provider()),
         "model_warning": None,
@@ -457,8 +532,9 @@ def r_connections(_):
 
 def r_connection_save(b):
     secret = (b.pop("secret", None) or "").strip() or None
+    ssh_secret = (b.pop("ssh_secret", None) or "").strip() or None
     was_active = cfg.list_profiles()["active"]
-    profile = cfg.upsert_profile(b, secret)
+    profile = cfg.upsert_profile(b, secret, ssh_secret)
     if b.get("activate") or not was_active or was_active == profile["id"]:
         cfg.set_active(profile["id"])
         switch_connection()
@@ -503,6 +579,42 @@ def r_connection_test(b):
 
 
 _test_failures = {}     # recent failed tests: (host,port) for lockouts, (+creds) for rejections
+
+
+def r_ssh_test(b):
+    """Test SSH for a connection (saved or being edited): login, host key, one command."""
+    secret = (b.pop("ssh_secret", None) or "").strip()
+    stored = cfg.get_profile(b["id"]) if b.get("id") else None
+    if stored and not secret:
+        secret = cfg.get_secret(stored["id"], "ssh") or ""
+    if not secret:
+        raise ValueError("Enter the SSH password to test.")
+    merged = dict(stored or {})
+    merged.update({k: v for k, v in b.items() if k in cfg.PROFILE_FIELDS})
+    # Only the SSH side matters here; the UniFi login isn't part of an SSH test.
+    host, _ = cfg.normalize_host(merged.get("host"))
+    try:
+        ssh_port = int(merged.get("ssh_port") or 22)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid SSH port")
+    if not 1 <= ssh_port <= 65535:
+        raise ValueError("SSH port must be between 1 and 65535")
+    profile = {"host": host, "ssh_port": ssh_port,
+               "ssh_username": str(merged.get("ssh_username") or "").strip() or "root",
+               "ssh_hostkey": (stored or {}).get("ssh_hostkey")}
+
+    # Same rule as the UniFi login test: never resend a password the box just rejected.
+    now = time.time()
+    cred_key = ("ssh", profile["host"].lower(), profile["ssh_port"], profile["ssh_username"],
+                hashlib.sha256(secret.encode()).hexdigest())
+    hit = _test_failures.get(cred_key)
+    if hit and now < hit["until"]:
+        return {"ok": False, "kind": hit["kind"],
+                "error": hit["error"] + " (Not sent again: change the username or password first.)"}
+    result = test_ssh(profile, secret)
+    if not result["ok"] and result["kind"] == "auth":
+        _test_failures[cred_key] = {"kind": "auth", "error": result["error"], "until": now + 3600}
+    return result
 
 
 def r_connection_retry(_):
@@ -559,9 +671,115 @@ def r_network(_):
                      "state": d.get("state", 0), "ip": d.get("ip", ""), "version": d.get("version", ""),
                      "num_sta": d.get("num_sta", 0)} for d in devs],
         "alerts": redact(sections["alerts"][:10]),
+        # for the sidebar list + "Explain": a readable title, and the redacted entry to hand to the AI
+        "alert_items": [dict(summarize_event(a), raw=redact(a)) for a in sections["alerts"][:10]],
         "wlans": [{"id": w.get("_id"), "name": w.get("name"), "enabled": w.get("enabled", False)}
                   for w in sections["wlans"]],
     }
+
+
+def r_topology(_):
+    """Device tree + problem clients as a model and as SVG (vector, shown inline and downloadable)."""
+    c = state.client()
+    devices, clients = c.get_devices(), c.get_clients()
+    try:
+        events = c.get_events(500, 24, ["CLIENT_DEVICES"])
+    except UniFiError:
+        events = None                          # flapping detection is best-effort
+    p = cfg.active_profile()
+    model = topology.build_model(devices, clients, events, network=p["name"], site=p.get("site", "default"))
+    return {"svg": topology.render_svg(model), "totals": model["totals"], "generated_at": model["generated_at"],
+            "network": p["name"], "thresholds": model["thresholds"]}
+
+
+def r_changes(b):
+    here = (b.get("scope") or "here") == "here"
+    p = cfg.active_profile()
+    return {"changes": changelog.list(limit=500, connection_id=(p or {}).get("id") if here else None),
+            "active": (p or {}).get("id")}
+
+
+def r_change_undo(b):
+    rid = str(b.get("id") or "")
+    res = changelog.undo(rid, force=bool(b.get("force")))
+    if res.get("ok"):
+        rec = changelog.get(rid)
+        agent.add_note(f"The user pressed Undo on an earlier change ({rec['label']}"
+                       f"{' – ' + rec['target'] if rec.get('target') else ''}). Result: {res['detail']}")
+    return res
+
+
+def r_wan(b):
+    try:
+        days = max(1, min(int(b.get("days") or 7), 90))
+    except (TypeError, ValueError):
+        days = 7
+    p = cfg.active_profile()
+    if not p:
+        raise UniFiError("No UniFi connection yet.", "noconn")
+    h = wan_history(days)
+    svg = wan.render_svg(h["speed_tests"], h["wan_events"], days, network=p["name"])
+    return dict(h, svg=svg, network=p["name"], running=wan.is_running(), last_error=scheduler.last_error,
+                schedule_choices=list(cfg.SPEEDTEST_CHOICES),
+                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"))
+
+
+def r_wan_speedtest(_):
+    """The user pressed 'Run a speed test now' (an explicit action, so no approval card); logged."""
+    c, p = state.client(), cfg.active_profile()
+    try:
+        point = wan.run_speedtest(c)
+    except UniFiError as e:
+        changelog.record("speedtest", {}, "Run a WAN speed test", "approved",
+                         {"content": str(e), "is_error": True}, via="button")
+        raise
+    history.record_speedtest(p["id"], point, "button")
+    changelog.record("speedtest", {}, "Run a WAN speed test", "approved",
+                     {"content": f"{point['download_mbps']} / {point['upload_mbps']} Mbps, {point['latency_ms']} ms",
+                      "is_error": False}, via="button")
+    return {"point": point}
+
+
+def r_wan_schedule(b):
+    p = cfg.active_profile()
+    if not p:
+        raise UniFiError("No UniFi connection yet.", "noconn")
+    try:
+        hours = int(b.get("hours"))
+    except (TypeError, ValueError):
+        raise ValueError("hours must be a number")
+    if hours not in cfg.SPEEDTEST_CHOICES:
+        raise ValueError("Unsupported schedule")
+    cfg.update_profile_fields(p["id"], speedtest_hours=hours)
+    return {"schedule_hours": hours}
+
+
+_backup_lock = threading.Lock()
+
+
+def r_backup(_):
+    """One click: the console makes a settings backup (.unf) and the browser saves it.
+    It's the file UniFi's own Settings → System → Backups → Restore accepts."""
+    if not _backup_lock.acquire(blocking=False):
+        raise AgentError("A backup is already being made. Wait for it to finish.")
+    try:
+        c, p = state.client(), cfg.active_profile()
+        try:
+            body, console_name = c.download_backup()
+        except UniFiError as e:
+            changelog.record("backup", {}, "Download a config backup", "approved",
+                             {"content": str(e), "is_error": True}, via="button")
+            raise
+        net = re.sub(r"[^A-Za-z0-9._-]+", "-", p["name"]).strip("-") or "unifi"
+        version = console_name.rsplit(".unf", 1)[0]
+        filename = f"unifi-backup_{net}_{datetime.now().strftime('%Y-%m-%d_%H%M')}_v{version}.unf"
+        changelog.record("backup", {}, "Download a config backup", "approved",
+                         {"content": f"{len(body):,} bytes, saved by the browser as {filename}", "is_error": False},
+                         via="button")
+        return {"filename": filename, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+                "data": base64.b64encode(body).decode()}
+    finally:
+        _backup_lock.release()
 
 
 def r_chat(b):
@@ -605,11 +823,19 @@ ROUTES = {
     ("GET",  "/api/connections"):             r_connections,
     ("POST", "/api/connections"):             r_connection_save,
     ("POST", "/api/connections/test"):        r_connection_test,
+    ("POST", "/api/connections/ssh-test"):    r_ssh_test,
     ("POST", "/api/connections/activate"):    r_connection_activate,
     ("POST", "/api/connections/trust-cert"):  r_connection_trust,
     ("POST", "/api/connections/retry"):       r_connection_retry,
     ("POST", "/api/connections/delete"):      r_connection_delete,
     ("GET",  "/api/network"):                 r_network,
+    ("GET",  "/api/topology"):                r_topology,
+    ("GET",  "/api/changes"):                 r_changes,
+    ("POST", "/api/changes/undo"):            r_change_undo,
+    ("GET",  "/api/wan"):                     r_wan,
+    ("POST", "/api/wan/speedtest"):           r_wan_speedtest,
+    ("POST", "/api/wan/schedule"):            r_wan_schedule,
+    ("POST", "/api/backup"):                  r_backup,
     ("POST", "/api/chat"):                    r_chat,
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/reset"):                   r_reset,
@@ -633,7 +859,7 @@ def main():
     except OSError as e:
         print(f"\n  Could not start on {host}:{HTTP_PORT} ({e.strerror or e}).")
         print("  Another program is probably using that port. Close it, or start with")
-        print("  a different port:   start.bat --port 8090\n")
+        print(f"  a different port:   {cfg.launcher()} --port 8090\n")
         sys.exit(1)
     httpd.daemon_threads = True
 
@@ -649,8 +875,9 @@ def main():
     prov = cfg.active_provider()
     print(f"  AI: {PROVIDERS[prov].label} ({cfg.provider_model(prov)}), key "
           f"{'set' if cfg.provider_key(prov) else 'NOT set - add it in the app'}")
-    print(f"  Secrets stored in: {'Windows Credential Manager' if cfg.secret_storage_kind() == 'credential-manager' else 'data/secrets.json (plaintext)'}")
+    print(f"  Secrets stored in: {cfg.secret_store_name()}")
     print("  Press Ctrl+C to stop.\n")
+    scheduler.start()                  # speed tests, only for connections where a schedule is set
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:

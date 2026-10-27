@@ -238,6 +238,46 @@
   .badge.medium { background:color-mix(in srgb,var(--medium) 16%,transparent); color:color-mix(in srgb,var(--medium) 75%,var(--text)); } .badge.low { background:color-mix(in srgb,var(--accent) 12%,transparent); color:var(--accent); }
   .counts { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 4px; }
   .spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--border); border-top-color:var(--accent); animation:spin 1s linear infinite; }
+  .modal.wide { width:min(1320px,100%); }
+  /* sidebar alerts */
+  .alert-list { display:flex; flex-direction:column; gap:6px; }
+  .alert-item { display:flex; align-items:flex-start; gap:8px; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); }
+  .alert-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; margin-top:5px; background:var(--muted); }
+  .alert-dot.bad { background:var(--danger); } .alert-dot.warn { background:var(--medium); }
+  .alert-info { flex:1; min-width:0; }
+  .alert-title { font-size:0.75rem; line-height:1.35; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .alert-meta { font-size:0.625rem; color:var(--muted); font-family:var(--font-mono); margin-top:2px; }
+  .alert-item .btn { padding:3px 8px; font-size:0.6875rem; }
+  .linklike { background:none; border:0; color:var(--accent); cursor:pointer; font-size:0.75rem; padding:2px 0; text-align:left; }
+  /* change log */
+  .chg-list { max-height:56vh; overflow:auto; display:flex; flex-direction:column; gap:6px; margin:10px 0; }
+  .chg { border:1px solid var(--border); border-radius:var(--radius); background:var(--bg); }
+  .chg > summary { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer; font-size:0.8125rem; list-style:none; flex-wrap:wrap; }
+  .chg > summary::-webkit-details-marker { display:none; }
+  .chg .when { font-family:var(--font-mono); font-size:0.6875rem; color:var(--muted); white-space:nowrap; }
+  .chg .what { flex:1; min-width:200px; } .chg .what small { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
+  .chg .body { padding:0 10px 10px; font-size:0.75rem; line-height:1.6; }
+  .chg .body pre { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px; white-space:pre-wrap; overflow-wrap:anywhere; font-family:var(--font-mono); font-size:0.6875rem; margin:4px 0; }
+  .chg .btn { padding:3px 10px; font-size:0.75rem; }
+  .badge.ok { background:color-mix(in srgb,var(--ok) 15%,transparent); color:color-mix(in srgb,var(--ok) 75%,var(--text)); }
+  .badge.bad { background:color-mix(in srgb,var(--danger) 18%,transparent); color:color-mix(in srgb,var(--danger) 75%,var(--text)); }
+  .badge.muted { background:color-mix(in srgb,var(--muted) 18%,transparent); color:var(--muted); }
+  /* WAN */
+  .wan-chart { border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; background:#1a1a19; }
+  .wan-chart svg { display:block; width:100%; height:auto; }
+  .wan-stats { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+  .wan-stat { flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px 12px; }
+  .wan-stat .v { font-size:1.25rem; font-weight:700; } .wan-stat .l { font-size:0.6875rem; color:var(--muted); margin-top:2px; }
+  .wan-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; font-size:0.8125rem; }
+  .wan-controls select { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:6px 8px; font-family:inherit; }
+  .data-table { width:100%; border-collapse:collapse; font-size:0.75rem; margin-top:6px; }
+  .data-table th, .data-table td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  .data-table th { color:var(--muted); font-weight:600; }
+  .topo-view { height:68vh; overflow:hidden; background:#0a0c10; border:1px solid var(--border); border-radius:var(--radius); position:relative; cursor:grab; touch-action:none; }
+  .topo-view.dragging { cursor:grabbing; }
+  .topo-view svg { position:absolute; left:0; top:0; transform-origin:0 0; user-select:none; }
+  .topo-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:10px 0 0; }
+  .topo-bar .muted { margin-right:auto; }
   @keyframes spin { to { transform:rotate(360deg); } }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border);
            padding:10px 16px; border-radius:8px; font-size:0.8125rem; z-index:60; max-width:90vw; }
@@ -264,6 +304,10 @@
     <div class="spacer"></div>
     <div class="header-actions">
       <button class="btn" id="reportBtn" title="Review the whole network and build a prioritised checklist">📋 Action report</button>
+      <button class="btn" id="topoBtn" title="Map of the UniFi devices with the clients that have issues">🗺 Topology</button>
+      <button class="btn" id="wanBtn" title="Internet speed and WAN events over time; scheduled speed tests">📈 WAN</button>
+      <button class="btn" id="changesBtn" title="Every change made through this app, with Undo where possible">🧾 Changes</button>
+      <button class="btn" id="backupBtn" title="Download a backup of this console's UniFi Network settings (.unf) to this computer. Restore it in UniFi: Settings → System → Backups.">💾 Backup</button>
       <button class="btn" id="refreshBtn" title="Reload network data">↻ Refresh</button>
       <button class="btn" id="clearBtn" title="Start a new conversation">✕ Clear chat</button>
       <button class="btn" id="themeBtn" title="Change the look: theme and light/dark">🎨 Theme</button>
@@ -284,6 +328,10 @@
           <div class="stat-card"><div class="stat-val" id="wanState">—</div><div class="stat-label">WAN</div></div>
         </div>
         <div id="sideErrors"></div>
+      </div>
+      <div class="sidebar-section" id="alertsSection" hidden>
+        <h3>Alerts</h3>
+        <div class="alert-list" id="alertList"></div>
       </div>
       <div class="sidebar-section devices-section">
         <h3>Devices</h3>
@@ -350,6 +398,14 @@ function h(tag, attrs, ...kids) {
 }
 const esc = t => String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
+// Platform wording (Windows / macOS / Linux), as reported by the server for this computer.
+const IS_MAC_UA = /Mac/.test(navigator.platform || navigator.userAgent);
+const launcherName = () => (status && status.launcher) || (IS_MAC_UA ? 'start.command' : 'start.bat');
+const storeName = () => (status && status.secret_store_name) || 'the system password store';
+const fileStoreWarning = () => `Passwords are being saved in data/secrets.json because ${
+  status && status.platform === 'mac' ? 'the macOS Keychain' : status && status.platform === 'windows' ? 'Windows Credential Manager' : 'the system password store'
+} is not available. Keep that folder private.`;
+
 // ── API ───────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   let r;
@@ -357,7 +413,7 @@ async function api(method, path, body) {
     r = await fetch(path, { method, headers: { 'X-App-Token': TOKEN, 'Content-Type': 'application/json' },
                             body: body === undefined ? undefined : JSON.stringify(body) });
   } catch (e) {
-    throw Object.assign(new Error('The app is not running. Start it again with start.bat.'), { kind: 'down' });
+    throw Object.assign(new Error(`The app is not running. Start it again with ${launcherName()}.`), { kind: 'down' });
   }
   let data = {};
   try { data = await r.json(); } catch {}
@@ -399,7 +455,7 @@ async function refreshStatus() {
   } else if (status.model_warning) {
     showBanner(status.model_warning, [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.secret_storage === 'file' && status.has_connections) {
-    showBanner('Passwords are being saved in data/secrets.json because Windows Credential Manager is not available. Keep that folder private.', []);
+    showBanner(fileStoreWarning(), []);
   } else hideBanner();
   return status;
 }
@@ -462,6 +518,7 @@ async function refreshNetwork() {
   $('wanState').textContent = wan ? (wan.status === 'ok' ? '✓ OK' : wan.status) : '—';
   const errs = Object.entries(d.errors || {});
   $('sideErrors').replaceChildren(...errs.map(([k, v]) => h('div', { class: 'side-error' }, `${k}: ${v}`)));
+  renderAlerts(d.alert_items || [], d.alert_count || 0);
   $('deviceList').replaceChildren(...(d.devices.length ? d.devices.map(dev =>
     h('button', { class: 'device-item', onclick: () => sendQuick(`Tell me about the device "${dev.name}" (${dev.mac}): status, connected clients, and any issues.`) },
       h('div', { class: 'device-dot' + (dev.state !== 1 ? ' offline' : '') }),
@@ -469,6 +526,33 @@ async function refreshNetwork() {
         h('div', { class: 'device-meta' }, [dev.model || dev.type, dev.ip].filter(Boolean).join(' · '))),
       dev.num_sta ? h('div', { class: 'device-clients' }, dev.num_sta) : null))
     : [h('div', { class: 'muted' }, 'No devices found.')]));
+}
+
+// ── sidebar alerts + "Explain" ────────────────────────────────────────────
+const sevClass = s => /very_high|critical|high|error|alert/.test(String(s || '')) ? 'bad' : /medium|warn/.test(String(s || '')) ? 'warn' : '';
+function relTime(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} days ago`;
+}
+function renderAlerts(items, total) {
+  $('alertsSection').hidden = !items.length;
+  const shown = items.slice(0, 5);
+  $('alertList').replaceChildren(...shown.map(a => h('div', { class: 'alert-item' },
+      h('span', { class: 'alert-dot ' + sevClass(a.severity) }),
+      h('div', { class: 'alert-info' }, h('div', { class: 'alert-title', title: a.title }, a.title),
+        h('div', { class: 'alert-meta' }, [a.at ? relTime(a.at) : '', a.severity ? a.severity.replace(/_/g, ' ') : ''].filter(Boolean).join(' · '))),
+      h('button', { class: 'btn', title: 'Ask flinchbot to investigate this alert', onclick: () => explainAlert(a) }, 'Explain'))),
+    ...(total > shown.length ? [h('button', { class: 'linklike', onclick: () => sendQuick('Show me all active alerts and how to fix them') },
+      `All ${total} alerts…`)] : []));
+}
+function explainAlert(a) {
+  const data = JSON.stringify(a.raw, null, 1).replace(/<(\/?alert)>/gi, '&lt;$1>');
+  sendMessage({ display: `Explain this alert: “${a.title}”`,
+    text: 'Explain this alert and investigate it with your tools: what it means, whether it is still happening, ' +
+          `the likely cause, and what I should do.\n\n<alert>\n${data}\n</alert>` });
 }
 
 // ── chat ──────────────────────────────────────────────────────────────────
@@ -533,9 +617,17 @@ function addApproval(pending) {
     entry.decision = ok ? 'Approved' : 'Denied';
     approve.disabled = deny.disabled = true;
     decided.textContent = ok ? 'Approved — running…' : 'Denied.';
-    await runChat('/api/chat/decide', { approve: ok });
+    const d = await runChat('/api/chat/decide', { approve: ok });
     decided.textContent = ok ? 'Approved.' : 'Denied.';
     approve.remove(); deny.remove();
+    // One-click undo for changes the app could snapshot (Wi-Fi / LAN edits, creates, Wi-Fi deletes)
+    for (const c of (d && d.changes) || []) {
+      if (!c.can_undo) continue;
+      const b = h('button', { class: 'btn', style: 'margin-left:8px;padding:2px 10px', title: c.undo },
+        pending.length > 1 ? `↶ Undo: ${c.label}` : '↶ Undo');
+      b.addEventListener('click', () => undoChange(c.id, c.label, c.undo, b));
+      decided.append(b);
+    }
   };
   approve.addEventListener('click', () => decide(true));
   deny.addEventListener('click', () => decide(false));
@@ -558,27 +650,32 @@ async function runChat(path, body) {
     if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
     if (d.pending && d.pending.length) addApproval(d.pending);
     if (path.endsWith('decide')) refreshNetwork();
-    ok = true;
+    ok = d;
   } catch (e) {
     $('typing')?.remove();
     addMessage('assistant', e.message, { error: true, plain: true });
   } finally {
     busy = false; $('sendBtn').disabled = $('attachBtn').disabled = false; $('chatInput').focus();
   }
-  return ok;
+  return ok;     // the response data, or false if the request failed (the error is shown in the chat)
 }
 
-async function sendMessage() {
-  const input = $('chatInput'); let text = input.value.trim();
+// override = { text, display }: send text the app built (e.g. "Explain this alert") and show a short version
+async function sendMessage(override) {
+  const input = $('chatInput');
+  let text = override ? override.text : input.value.trim();
   if ((!text && !attached.length) || busy) return;
   if (!status || !status.configured) { openSettings(); return; }
   if (!status.active) { openConnections(null, true); return; }
-  const files = attached; attached = []; renderAttachments();
-  if (!text) text = files.length > 1 ? 'Please review the attached files.' : 'Please review the attached file.';
-  input.value = ''; autoResize(input);
+  const files = override ? [] : attached;
+  if (!override) {
+    attached = []; renderAttachments();
+    if (!text) text = files.length > 1 ? 'Please review the attached files.' : 'Please review the attached file.';
+    input.value = ''; autoResize(input);
+  }
   document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
   transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
-  addMessage('user', text, { files });
+  addMessage('user', override ? override.display : text, { files });
   const ok = await runChat('/api/chat', { message: text, files: files.map(f => ({ name: f.name, text: f.text })) });
   if (!ok && files.length && !attached.length) { attached = files; renderAttachments('The message failed, so the files are still attached. Send again when ready.'); }
 }
@@ -627,7 +724,7 @@ async function resetChat() {
 }
 
 // ── modal plumbing ────────────────────────────────────────────────────────
-function openModal(...content) { $('modal').replaceChildren(...content.flat().filter(Boolean)); $('overlay').hidden = false; }
+function openModal(...content) { $('modal').classList.remove('wide'); $('modal').replaceChildren(...content.flat().filter(Boolean)); $('overlay').hidden = false; }
 function closeModal() { $('overlay').hidden = true; $('modal').replaceChildren(); }
 function modalHead(title, lead, closable = true) {
   return [h('div', { class: 'modal-head' }, h('h2', {}, title), closable ? h('button', { class: 'x', title: 'Close', onclick: closeModal }, '×') : null),
@@ -766,7 +863,8 @@ async function openSettings(wizard) {
     } catch (e) { sec.out.replaceChildren(result('bad', e.message)); }
   };
   const overrides = s.env_overrides.length
-    ? h('div', { class: 'note warn' }, `These are set as Windows environment variables and override this screen: ${s.env_overrides.join(', ')}. Remove them (System Properties → Environment Variables) if you want this screen to control them.`) : null;
+    ? h('div', { class: 'note warn' }, `These are set as environment variables on this computer and override this screen: ${s.env_overrides.join(', ')}. Remove them ${
+        status && status.platform === 'windows' ? '(System Properties → Environment Variables) ' : '(from your shell profile or launch settings) '}if you want this screen to control them.`) : null;
 
   const body = [
     overrides,
@@ -796,12 +894,12 @@ async function openConnections(editId, addNew, wizard) {
   const rows = data.profiles.map(p => h('div', { class: 'conn-row' + (p.id === data.active ? ' active' : '') },
     h('div', { class: 'info' },
       h('div', { class: 'title' }, p.name, ' ', p.id === data.active ? h('span', { class: 'tag' }, 'in use') : null),
-      h('div', { class: 'meta' }, `${p.host}:${p.port} · site ${p.site} · ${p.console_label} · ${p.auth === 'apikey' ? 'API key' : p.username}`)),
+      h('div', { class: 'meta' }, `${p.host}:${p.port} · site ${p.site} · ${p.console_label} · ${p.auth === 'apikey' ? 'API key' : p.username}${p.ssh_enabled ? ' · SSH on' : ''}`)),
     p.id !== data.active ? h('button', { class: 'btn ok', onclick: async () => { closeModal(); await activate(p.id); } }, 'Use') : null,
     h('button', { class: 'btn', onclick: () => openConnectionForm(data, p) }, 'Edit')));
 
   openModal(...modalHead('UniFi connections', 'Each connection is one UniFi console (one network). Switch between them from the menu at the top.'),
-    data.secret_storage === 'file' ? h('div', { class: 'note warn' }, 'Windows Credential Manager is not available, so passwords are saved in data/secrets.json. Keep that folder private.') : null,
+    data.secret_storage === 'file' ? h('div', { class: 'note warn' }, fileStoreWarning()) : null,
     h('div', { class: 'conn-list' }, rows.length ? rows : h('div', { class: 'muted' }, 'No connections yet.')),
     h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'),
       h('button', { class: 'btn primary', onclick: () => openConnectionForm(data) }, '+ Add connection')));
@@ -834,16 +932,63 @@ function openConnectionForm(data, existing, wizard) {
     userField.hidden = a !== 'password';
     secretLabel.textContent = a === 'password' ? 'Password' : 'API key';
     secretField.querySelector('.hint').textContent = a === 'password'
-      ? 'Stored in Windows Credential Manager, not in any file in this folder.'
+      ? `Stored in ${storeName()}, not in any file in this folder.`
       : 'Create in UniFi Network → Settings → Control Plane → Integrations (name varies by version). Not every UniFi version accepts keys for everything this app does — the sign-in check when you save will tell you.';
   }
   setAuth(auth);
   // Changing anything that affects sign-in invalidates the last successful test (site/name don't).
   [host, port, user, secret.input].forEach(i => i.addEventListener('input', () => { tested = null; }));
 
+  // SSH to the console: optional, off by default, settings and password kept per connection.
+  let sshOn = !!p.ssh_enabled, sshTested = null;      // last successful SSH test for the current inputs
+  const sshPort = h('input', { type: 'number', min: 1, max: 65535, value: p.ssh_port || 22 });
+  const sshUser = h('input', { value: p.ssh_username || 'root', autocomplete: 'off', spellcheck: 'false' });
+  const sshPw = secretInput({ placeholder: existing && existing.has_ssh_secret ? 'Saved — type a new one only to change it' : '' });
+  const sshOut = h('div');
+  const sshBtns = { off: h('button', { type: 'button', onclick: () => setSsh(false) }, 'Off'),
+                    on:  h('button', { type: 'button', onclick: () => setSsh(true) }, 'On') };
+  const sshFields = h('div', {},
+    h('div', { class: 'note warn' }, 'Read-only commands (cat, grep, ls, df, ps, ip, journalctl…) run straight away; anything that could change the console is shown to you for approval first. Command output goes to the AI exactly as is — nothing in it is redacted.'),
+    h('div', { class: 'grid2' },
+      field('SSH username', sshUser, 'UniFi OS consoles: root. Self-hosted controllers: a login on that server.'),
+      field('SSH port', sshPort)),
+    field('SSH password', sshPw.wrap, `UniFi OS: Console Settings → Advanced → SSH, set a password there. Stored in ${storeName()}, not in any file in this folder.`),
+    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: runSshTest }, 'Test SSH')),
+    sshOut);
+  function setSsh(on) {
+    sshOn = on; sshTested = null;
+    sshBtns.on.className = on ? 'on' : ''; sshBtns.off.className = on ? '' : 'on';
+    sshFields.hidden = !on;
+  }
+  setSsh(sshOn);
+  [host, sshPort, sshUser, sshPw.input].forEach(i => i.addEventListener('input', () => { sshTested = null; }));
+
   const values = () => ({ id: existing && existing.id, name: name.value.trim() || host.value.trim(), host: host.value.trim(),
     port: Number(port.value) || 443, site: (siteWrap.querySelector('select') || siteInput).value.trim() || 'default',
-    auth, username: auth === 'password' ? user.value.trim() : undefined, secret: secret.input.value });
+    auth, username: auth === 'password' ? user.value.trim() : undefined, secret: secret.input.value,
+    ssh_enabled: sshOn, ssh_port: Number(sshPort.value) || 22, ssh_username: sshUser.value.trim() || 'root', ssh_secret: sshPw.input.value });
+
+  async function runSshTest() {
+    const { secret: _unused, ...v } = values();           // the UniFi password isn't needed for this
+    if (!v.host) { sshOut.replaceChildren(result('bad', 'Enter the console’s address first.')); return null; }
+    sshOut.replaceChildren(result('warn', `Connecting to ${v.host}:${v.ssh_port} over SSH…`));
+    let r;
+    try { r = await api('POST', '/api/connections/ssh-test', v); } catch (e) { r = { ok: false, error: e.message }; }
+    if (!r.ok) { sshTested = null; sshOut.replaceChildren(result('bad', r.error)); return r; }
+    sshTested = r;
+    sshOut.replaceChildren(result(r.hostkey_changed ? 'warn' : 'ok',
+      h('div', {}, `✓ SSH works${r.uname ? ' — ' + r.uname : ''}`),
+      h('div', {}, 'Host key (saved so the app can tell if the console is ever swapped): ', h('code', {}, r.hostkey_display)),
+      r.hostkey_changed ? h('div', { style: 'margin-top:6px' }, '⚠ This is a DIFFERENT host key from the one saved before. Only save if you know the console was reset or replaced.') : null));
+    return r;
+  }
+  // Saving with SSH on needs one successful SSH test when anything SSH-related changed.
+  function needsSshTest() {
+    const v = values();
+    if (!v.ssh_enabled) return false;
+    if (!existing || !existing.ssh_hostkey) return true;
+    return v.host !== existing.host || v.ssh_port !== existing.ssh_port || v.ssh_username !== existing.ssh_username || !!v.ssh_secret;
+  }
 
   async function runTest() {
     const v = values();
@@ -896,9 +1041,18 @@ function openConnectionForm(data, existing, wizard) {
         }
       }
       if (r && r.cert_changed && !confirm('The console presented a DIFFERENT certificate from the one saved before. Save and trust it?')) return;
+      let s = sshTested;
+      if (needsSshTest() && !s) {
+        primary.textContent = 'Testing SSH…';
+        s = await runSshTest();
+        if (!s || !s.ok) return;
+      }
+      if (s && s.hostkey_changed && !confirm('The console presented a DIFFERENT SSH host key from the one saved before. Save and trust it?')) return;
       const v = values();
       if (r && r.ok) { v.console_type = r.console_type; v.fingerprint = r.fingerprint; }
+      if (s && s.ok && v.ssh_enabled) v.ssh_hostkey = s.hostkey;
       if (!v.secret) delete v.secret;
+      if (!v.ssh_secret) delete v.ssh_secret;
       v.activate = !!activateIt;
       primary.textContent = 'Saving…';
       await api('POST', '/api/connections', v);
@@ -943,6 +1097,9 @@ function openConnectionForm(data, existing, wizard) {
     field('Login method', h('div', { class: 'seg' }, authBtns.password, authBtns.apikey)),
     userField, secretField,
     field('Site', siteWrap, 'Leave as "default" unless the console manages several sites — the sign-in check lists them.'),
+    field('SSH access', h('div', { class: 'seg' }, sshBtns.off, sshBtns.on),
+      'Off by default. When on, flinchbot can also run commands on the console itself for what the API can’t show (system logs, processes, disk, config files).'),
+    sshFields,
     out,
     h('div', { class: 'actions' },
       existing ? h('button', { class: 'btn danger left', onclick: del }, 'Delete') : null,
@@ -1229,6 +1386,196 @@ function reportHtml(r) {
 <\/script></body></html>`;
 }
 
+// ── topology (vector map: UniFi devices + only the clients with issues) ───
+async function openTopology() {
+  if (!status || !status.active) { openConnections(null, true); return; }
+  openModal(...modalHead('Network topology', null, false),
+    h('div', { style: 'display:flex;gap:14px;align-items:center;margin:8px 0 6px' }, h('div', { class: 'spinner' }),
+      h('div', {}, `Reading devices, clients and the last 24 h of the system log from “${status.active.name}”…`)));
+  let r;
+  try { r = await api('GET', '/api/topology'); }
+  catch (e) {
+    openModal(...modalHead('Topology failed'), result('bad', e.message),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'), h('button', { class: 'btn primary', onclick: openTopology }, 'Try again')));
+    return;
+  }
+  const svg = importSvg(r.svg);
+  const view = h('div', { class: 'topo-view' }, svg);
+  let scale = 1, tx = 0, ty = 0;
+  const applyT = () => { svg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; };
+  const fit = () => {
+    const vw = view.clientWidth, vh = view.clientHeight;
+    const sw = Number(svg.getAttribute('width')), sh = Number(svg.getAttribute('height'));
+    scale = Math.min(1, vw / sw, vh / sh); tx = Math.max(0, (vw - sw * scale) / 2); ty = 0; applyT();
+  };
+  const zoom = (f, cx, cy) => {
+    const s = Math.min(6, Math.max(0.15, scale * f));
+    if (cx === undefined) { cx = view.clientWidth / 2; cy = view.clientHeight / 2; }
+    tx = cx - (cx - tx) * (s / scale); ty = cy - (cy - ty) * (s / scale); scale = s; applyT();
+  };
+  view.addEventListener('wheel', e => { e.preventDefault(); const b = view.getBoundingClientRect(); zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - b.left, e.clientY - b.top); }, { passive: false });
+  let drag = null;
+  view.addEventListener('pointerdown', e => { drag = { x: e.clientX - tx, y: e.clientY - ty }; view.classList.add('dragging'); view.setPointerCapture(e.pointerId); });
+  view.addEventListener('pointermove', e => { if (drag) { tx = e.clientX - drag.x; ty = e.clientY - drag.y; applyT(); } });
+  view.addEventListener('pointerup', () => { drag = null; view.classList.remove('dragging'); });
+  view.addEventListener('pointercancel', () => { drag = null; view.classList.remove('dragging'); });
+  const t = r.totals;
+  const sub = `${r.network} · ${new Date(r.generated_at).toLocaleString()} · ${t.devices} UniFi devices · ${t.clients} clients · ${t.problem_clients} with issues`;
+  openModal(...modalHead('Network topology', sub), view,
+    h('div', { class: 'topo-bar' },
+      h('span', { class: 'muted' }, 'Scroll to zoom, drag to pan. Hover a box for details. Only clients with a problem are drawn; the SVG is vector, so zoom in as far as you like.'),
+      h('button', { class: 'btn', onclick: () => zoom(1 / 1.3), title: 'Zoom out' }, '−'),
+      h('button', { class: 'btn', onclick: () => zoom(1.3), title: 'Zoom in' }, '+'),
+      h('button', { class: 'btn', onclick: fit }, 'Fit'),
+      h('button', { class: 'btn', onclick: openTopology }, '↻ Refresh'),
+      h('button', { class: 'btn primary', onclick: () => download(topoFileName(r), r.svg, 'image/svg+xml;charset=utf-8') }, '⤓ Download SVG'),
+      h('button', { class: 'btn', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+  fit();
+}
+function topoFileName(r) {
+  const d = new Date(r.generated_at), pad = n => String(n).padStart(2, '0');
+  const net = r.network.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'network';
+  return `unifi-topology_${net}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.svg`;
+}
+
+// The server builds and escapes these SVGs itself; parse as a document rather than injecting markup.
+function importSvg(text) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  return document.importNode(doc.documentElement, true);
+}
+const stamp = d => { const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`; };
+const safeName = s => String(s || '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'network';
+
+// ── undo + change log ───────────────────────────────────────────────────────
+async function undoChange(id, label, describe, btn) {
+  if (!confirm(`Undo “${label}”?\n\n${describe || ''}`)) return false;
+  if (btn) btn.disabled = true;
+  try {
+    let r = await api('POST', '/api/changes/undo', { id });
+    if (r.conflict) {
+      if (!confirm(`${r.detail}\n\nUndo anyway?`)) { if (btn) btn.disabled = false; return false; }
+      r = await api('POST', '/api/changes/undo', { id, force: true });
+    }
+    toast(r.detail || 'Undone.');
+    addMessage('assistant', `↶ Undone: ${label}. ${r.detail || ''}`, { plain: true });
+    if (btn) btn.replaceWith(h('span', { class: 'muted', style: 'margin-left:8px' }, '↶ Undone.'));
+    refreshNetwork();
+    return true;
+  } catch (e) { toast(e.message, true); if (btn) btn.disabled = false; return false; }
+}
+
+const CHANGE_FIELDS = ['at', 'connection', 'host', 'site', 'user', 'pc', 'via', 'decision', 'ok', 'label', 'target', 'tool', 'input', 'result', 'note', 'undoes', 'undone_by'];
+function changesCsv(rows) {
+  // Quote every cell; prefix cells a spreadsheet would treat as a formula (names come from the network).
+  const cell = v => { let s = v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+  return [CHANGE_FIELDS.join(','), ...rows.map(r => CHANGE_FIELDS.map(f => cell(r[f])).join(','))].join('\r\n') + '\r\n';
+}
+
+async function openChanges(scope = 'here') {
+  let r;
+  try { r = await api('GET', `/api/changes?scope=${scope}`); } catch (e) { toast(e.message, true); return; }
+  const fmt = iso => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const rows = r.changes.map(c => {
+    const [cls, word] = c.decision === 'denied' ? ['muted', 'denied'] : c.via === 'undo' ? (c.ok ? ['ok', 'undo'] : ['bad', 'undo failed'])
+      : c.ok ? ['ok', c.undone_by ? 'undone' : 'done'] : ['bad', 'failed'];
+    const undoBtn = c.undo_here ? h('button', { class: 'btn', title: c.rollback && c.rollback.describe,
+      onclick: async e => { e.preventDefault(); if (await undoChange(c.id, c.label, c.rollback && c.rollback.describe)) openChanges(scope); } }, '↶ Undo') : null;
+    const inputJson = JSON.stringify(c.input || {}, null, 2);
+    return h('details', { class: 'chg' },
+      h('summary', {}, h('span', { class: 'when' }, fmt(c.at)), h('span', { class: `badge ${cls}` }, word),
+        h('span', { class: 'what' }, c.label, c.target ? h('small', {}, ' · ', c.target) : null,
+          scope === 'all' ? h('small', {}, ' · ', c.connection || '') : null), undoBtn),
+      h('div', { class: 'body' },
+        h('div', {}, `${c.connection || '—'} (${c.host || ''}, site ${c.site || 'default'}) · by ${c.user || '?'} on ${c.pc || '?'} · via ${c.via}`),
+        inputJson !== '{}' ? h('pre', {}, inputJson) : null,
+        c.result ? h('div', {}, h('b', {}, 'Console said: '), c.result) : null,
+        c.note ? h('div', {}, h('b', {}, 'Note: '), c.note) : null,
+        c.rollback ? h('div', {}, h('b', {}, 'Undo: '), c.rollback.describe + (c.undone_by ? ' (already undone)' : c.can_undo && !c.undo_here ? ' (switch to this connection to undo)' : '')) : null));
+  });
+  const segBtn = (key, label) => h('button', { type: 'button', class: scope === key ? 'on' : '', onclick: () => openChanges(key) }, label);
+  const base = `unifi-flinchbot-changes_${stamp(new Date())}`;
+  openModal(...modalHead('Change log', 'Every change made or refused through this app: approvals in the chat, Undo, speed tests and backups. Kept in data/audit.jsonl on this computer; passwords are never written to it.'),
+    h('div', { class: 'seg', style: 'max-width:420px' }, segBtn('here', 'This connection'), segBtn('all', 'All connections')),
+    h('div', { class: 'chg-list' }, rows.length ? rows : h('div', { class: 'muted' }, 'No changes yet.')),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn left', disabled: !rows.length || null, onclick: () => download(`${base}.csv`, changesCsv(r.changes), 'text/csv;charset=utf-8') }, '⤓ CSV'),
+      h('button', { class: 'btn', disabled: !rows.length || null, onclick: () => download(`${base}.json`, JSON.stringify(r.changes, null, 2), 'application/json') }, '⤓ JSON'),
+      h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+}
+
+// ── WAN health ────────────────────────────────────────────────────────────
+async function openWan(days = 7) {
+  if (!status || !status.active) { openConnections(null, true); return; }
+  openModal(...modalHead('WAN health', null, false),
+    h('div', { style: 'display:flex;gap:14px;align-items:center;margin:8px 0 6px' }, h('div', { class: 'spinner' }),
+      h('div', {}, `Reading speed tests and WAN events from “${status.active.name}”…`)));
+  let r;
+  try { r = await api('GET', `/api/wan?days=${days}`); }
+  catch (e) {
+    openModal(...modalHead('WAN health'), result('bad', e.message),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'), h('button', { class: 'btn primary', onclick: () => openWan(days) }, 'Try again')));
+    return;
+  }
+  const s = r.summary, f = v => v === null || v === undefined ? '—' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  const tile = (value, label) => h('div', { class: 'wan-stat' }, h('div', { class: 'v' }, value), h('div', { class: 'l' }, label));
+  const daySel = h('select', { onchange: e => openWan(Number(e.target.value)) },
+    ...[1, 7, 30, 90].map(d => h('option', { value: d, selected: d === days }, d === 1 ? 'Last 24 hours' : `Last ${d} days`)));
+  const schedLabel = hrs => hrs === 0 ? 'Off' : hrs === 168 ? 'Weekly' : hrs === 24 ? 'Daily' : hrs === 48 ? 'Every 2 days' : `Every ${hrs} h`;
+  const schedSel = h('select', { title: 'Run a speed test automatically while this connection is the active one. Each test uses the full line for about a minute.',
+    onchange: async e => { try { await api('POST', '/api/wan/schedule', { hours: Number(e.target.value) }); toast('Speed test schedule saved.'); } catch (err) { toast(err.message, true); } } },
+    ...r.schedule_choices.map(hrs => h('option', { value: hrs, selected: hrs === r.schedule_hours }, schedLabel(hrs))));
+  const runBtn = h('button', { class: 'btn', disabled: r.running || null }, r.running ? 'Speed test running…' : '▶ Run a speed test now');
+  runBtn.addEventListener('click', async () => {
+    if (!confirm('Run a speed test on the gateway now? It uses the full internet connection for about a minute, so others on the network may notice.')) return;
+    runBtn.disabled = true; runBtn.textContent = 'Testing… (up to 2 min)';
+    try { const t = await api('POST', '/api/wan/speedtest', {}); toast(`↓ ${f(t.point.download_mbps)} / ↑ ${f(t.point.upload_mbps)} Mbps, ${f(t.point.latency_ms)} ms`); openWan(days); }
+    catch (e) { toast(e.message, true); runBtn.disabled = false; runBtn.textContent = '▶ Run a speed test now'; }
+  });
+  const ask = h('button', { class: 'btn', onclick: () => { closeModal(); sendMessage({ display: `Analyse my WAN health for the last ${days === 1 ? '24 hours' : days + ' days'}`,
+    text: `Look at my WAN history for the last ${days} days (use get_wan_history with days=${days}) and correlate speed and latency with the WAN events. Were there outages or slow periods, when, what likely caused them, and is anything worth fixing?` }); } }, '💬 Ask flinchbot about this');
+  const tests = r.speed_tests.slice().reverse();
+  const table = h('details', { style: 'margin-top:10px' }, h('summary', { style: 'cursor:pointer;font-size:0.8125rem;color:var(--accent)' }, `Show as a table (${tests.length} tests, ${r.wan_events.length} events)`),
+    h('table', { class: 'data-table' }, h('thead', {}, h('tr', {}, ...['When', 'Download Mbps', 'Upload Mbps', 'Latency ms', 'Source'].map(t => h('th', {}, t)))),
+      h('tbody', {}, ...tests.map(p => h('tr', {}, h('td', {}, new Date(p.at).toLocaleString()), h('td', {}, f(p.download_mbps)), h('td', {}, f(p.upload_mbps)), h('td', {}, f(p.latency_ms)), h('td', {}, p.source === 'app' ? 'this app' : 'console'))))),
+    r.wan_events.length ? h('table', { class: 'data-table', style: 'margin-top:12px' }, h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'WAN event'))),
+      h('tbody', {}, ...r.wan_events.slice().reverse().map(e => h('tr', {}, h('td', {}, new Date(e.at).toLocaleString()), h('td', {}, e.title))))) : null);
+  const svg = importSvg(r.svg);
+  const notes = [...(r.notes || []), ...(r.last_error ? [`Last scheduled speed test failed: ${r.last_error.error}`] : [])];
+  openModal(...modalHead('WAN health', `${r.network} · ${new Date(r.generated_at).toLocaleString()}${r.current_wan && r.current_wan.status ? ' · WAN now: ' + r.current_wan.status : ''}`),
+    h('div', { class: 'wan-controls' }, daySel, h('span', { class: 'muted', style: 'margin-left:8px' }, 'Scheduled speed test:'), schedSel, h('span', { style: 'flex:1' }), runBtn),
+    h('div', { class: 'wan-stats' },
+      tile(s.download_mbps ? `${f(s.download_mbps.median)} Mbps` : '—', `Download, median${s.download_mbps ? ` (latest ${f(s.download_mbps.latest)})` : ''}`),
+      tile(s.upload_mbps ? `${f(s.upload_mbps.median)} Mbps` : '—', `Upload, median${s.upload_mbps ? ` (latest ${f(s.upload_mbps.latest)})` : ''}`),
+      tile(s.latency_ms ? `${f(s.latency_ms.median)} ms` : '—', `Latency, median${s.latency_ms ? ` (worst ${f(s.latency_ms.max)})` : ''}`),
+      tile(String(r.outages), r.outages === 1 ? 'WAN outage event' : 'WAN outage events')),
+    h('div', { class: 'wan-chart' }, svg),
+    ...notes.map(n => h('div', { class: 'note warn', style: 'margin:8px 0 0' }, n)),
+    table,
+    h('div', { class: 'actions', style: 'margin-top:12px' },
+      h('button', { class: 'btn left', onclick: () => download(`unifi-wan_${safeName(r.network)}_${stamp(new Date())}.svg`, r.svg, 'image/svg+xml;charset=utf-8') }, '⤓ Download SVG'),
+      ask, h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+}
+
+// ── one-click config backup ────────────────────────────────────────────────
+async function runBackup() {
+  if (!status || !status.active) { openConnections(null, true); return; }
+  const btn = $('backupBtn');
+  if (btn.disabled) return;
+  btn.disabled = true; const label = btn.textContent; btn.textContent = '💾 Backing up…';
+  toast(`Asking “${status.active.name}” for a settings backup…`);
+  try {
+    const r = await api('POST', '/api/backup', {});
+    const bin = atob(r.data), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    download(r.filename, bytes, 'application/octet-stream');
+    toast(`Saved ${r.filename} (${fmtSize(r.size)}) to Downloads. Restore it in UniFi: Settings → System → Backups.`);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = label; }
+}
+
 // ── themes ───────────────────────────────────────────────────────────────
 function openThemes() {
   if (!window.Themes) { toast('Themes could not be loaded.', true); return; }
@@ -1247,7 +1594,7 @@ function openThemes() {
     return card;
   });
   const grid = h('div', { class: 'theme-grid' }, ...cards);
-  const modes = { auto: 'Auto (match Windows)', light: '☀ Light', dark: '☾ Dark' };
+  const modes = { auto: `Auto (match ${status && status.platform === 'mac' ? 'macOS' : status && status.platform === 'windows' ? 'Windows' : 'system'})`, light: '☀ Light', dark: '☾ Dark' };
   const modeBtns = Object.entries(modes).map(([k, label]) => {
     const b = h('button', { type: 'button', class: cur.pref === k ? 'on' : '' }, label);
     b.addEventListener('click', () => {
@@ -1288,7 +1635,7 @@ const QUICK = [
   ['🚨 Active alerts', 'Show me all active alerts and how to fix them'],
 ];
 $('quickPrompts').append(...QUICK.map(([l, m]) => h('button', { class: 'quick-btn', onclick: () => sendQuick(m) }, l)));
-$('sendBtn').addEventListener('click', sendMessage);
+$('sendBtn').addEventListener('click', () => sendMessage());
 $('attachBtn').addEventListener('click', () => { if (!busy) $('fileInput').click(); });
 $('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 (() => {
@@ -1310,6 +1657,10 @@ $('settingsBtn').addEventListener('click', () => openSettings());
 $('aboutBtn').addEventListener('click', openAbout);
 $('themeBtn').addEventListener('click', openThemes);
 $('reportBtn').addEventListener('click', () => lastReport ? showReportOrNew() : runReport());
+$('topoBtn').addEventListener('click', openTopology);
+$('wanBtn').addEventListener('click', () => openWan());
+$('changesBtn').addEventListener('click', () => openChanges());
+$('backupBtn').addEventListener('click', runBackup);
 function showReportOrNew() {
   if (lastReport.network === (status && status.active && status.active.name)) showReport(lastReport); else runReport();
 }

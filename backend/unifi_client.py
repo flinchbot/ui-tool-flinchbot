@@ -20,12 +20,14 @@ import hashlib
 import http.client
 import http.cookiejar
 import json
+import re
 import socket
 import ssl
 import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 
 class UniFiError(Exception):
@@ -46,6 +48,45 @@ class _CertMismatch(OSError):   # OSError so urllib wraps it in URLError
 
 def format_fingerprint(fp):
     return ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)).upper() if fp else ""
+
+
+def to_ms(ts):
+    """UniFi timestamps come as epoch seconds, epoch ms, or ISO text. -> epoch ms or None."""
+    if isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts if ts > 1e11 else ts * 1000)
+    if isinstance(ts, str) and ts.strip():
+        try:
+            return int(datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def summarize_event(e):
+    """A system-log entry or legacy alarm -> {title, key, severity, at (ms), category}.
+    Fills message_raw placeholders like 'AP {device} is offline' from 'parameters'."""
+    if not isinstance(e, dict):
+        return {"title": str(e)[:300], "key": None, "severity": None, "at": None, "category": None}
+    params = e.get("parameters") if isinstance(e.get("parameters"), dict) else {}
+
+    def fill(m):
+        k = m.group(1)
+        v = params.get(k, params.get(k.upper(), params.get(k.lower())))
+        if isinstance(v, dict):
+            v = v.get("name") or v.get("hostname") or v.get("mac") or v.get("ip") or v.get("id")
+        return str(v) if v not in (None, "") else k
+    raw = e.get("message_raw") or e.get("msg") or e.get("message") or e.get("title") or e.get("key") or "Event"
+    title = re.sub(r"\{(\w+)\}", fill, str(raw))
+    sev = e.get("severity") or e.get("subsystem")
+    return {"title": title[:300], "key": e.get("key"), "severity": str(sev).lower() if sev else None,
+            "at": to_ms(e.get("timestamp") or e.get("time") or e.get("datetime")),
+            "category": e.get("category")}
+
+
+_REST_KINDS = ("wlanconf", "networkconf")
+_OBJ_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -238,10 +279,15 @@ class UniFiClient:
         self.login_block = None
 
     def login(self):
-        """Password login. API-key profiles have nothing to log in to."""
+        """Password login. API-key profiles have nothing to log in to, but a key the
+        console rejected is still never sent again until Retry (see request())."""
         if self.auth == "apikey":
-            self.logged_in = True
-            return True
+            with self._lock:
+                blocked = self.login_blocked()
+                if blocked:
+                    raise blocked["error"]
+                self.logged_in = True
+                return True
         with self._lock:
             blocked = self.login_blocked()
             if blocked:
@@ -308,7 +354,13 @@ class UniFiClient:
                     self.logged_in = False
                     self.login()
                     return self.request(method, path, data, _retry=False)
-                raise self._http_error(e, path)
+                err = self._http_error(e, path)
+                if self.auth == "apikey" and e.code in (401, 429):
+                    # Rejected or rate-limited key: stop contacting the console until Retry.
+                    self.logged_in = False
+                    self.login_block = {"error": err, "until": None if e.code == 401
+                                        else time.time() + self.RATE_LIMIT_PAUSE}
+                raise err
 
     def get(self, path):
         return self.request("GET", path)
@@ -504,7 +556,94 @@ class UniFiClient:
         return self._devmgr("speedtest")
 
     def get_speedtest_status(self):
-        return self._devmgr("speedtest-status")
+        """Latest result the gateway holds: {rundate, xput_download, xput_upload, latency, ...} or {}."""
+        data = self._data(self._devmgr("speedtest-status"))
+        if isinstance(data, list):
+            data = data[0] if data and isinstance(data[0], dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    def get_speedtest_history(self, start_ms, end_ms):
+        """Speed tests the console itself recorded (its own schedule plus manual runs)."""
+        data = self._data(self.post(self.api("stat/report/archive.speedtest"), {
+            "attrs": ["xput_download", "xput_upload", "latency", "time"], "start": int(start_ms), "end": int(end_ms)}))
+        return data if isinstance(data, list) else []
+
+    # ── config backup (.unf, the same file Settings → System → Backups makes) ──
+    MAX_BACKUP_BYTES = 200_000_000
+
+    def _raw_bytes(self, path):
+        headers = {"Accept": "application/octet-stream, */*"}
+        if self.csrf_token:
+            headers["X-Csrf-Token"] = self.csrf_token
+        if self.auth == "apikey":
+            headers["X-API-KEY"] = self.secret
+        req = urllib.request.Request(self.base_url + path, headers=headers, method="GET")
+        try:
+            with self.opener.open(req, timeout=max(self.timeout, 120)) as resp:
+                body = resp.read(self.MAX_BACKUP_BYTES + 1)
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as e:
+            raise self._network_error(e.reason)
+        except (socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as e:
+            raise self._network_error(e)
+        if len(body) > self.MAX_BACKUP_BYTES:
+            raise UniFiError("The backup file is unexpectedly large; download it from the UniFi UI instead.", "http")
+        return body
+
+    def download_backup(self):
+        """Ask the Network application for a settings-only backup and download it.
+        -> (bytes, console file name such as '9.0.114.unf')."""
+        resp = self.post(self.api("cmd/backup"), {"cmd": "backup", "days": 0})   # 0 = settings, no history
+        data = self._data(resp)
+        url = (data[0] or {}).get("url") if isinstance(data, list) and data and isinstance(data[0], dict) else None
+        if not url or not re.fullmatch(r"/dl/[A-Za-z0-9_.\-/]+\.unf", url) or ".." in url:
+            raise UniFiError("The console didn't return a backup file. Make the backup from the UniFi UI "
+                             "(Settings → System → Backups) instead.", "http")
+        path = self.prefix + url
+        with self._lock:
+            try:
+                body = self._raw_bytes(path)
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and self.auth == "password":     # session expired between the two calls
+                    self.logged_in = False
+                    self.login()
+                    try:
+                        body = self._raw_bytes(path)
+                    except urllib.error.HTTPError as e2:
+                        raise self._http_error(e2, path)
+                else:
+                    raise self._http_error(e, path)
+        if not body:
+            raise UniFiError("The console returned an empty backup file.", "http")
+        return body, url.rsplit("/", 1)[-1]
+
+    # ── generic REST objects (used by undo) ──────────────────────────────────
+    def _rest(self, kind, oid=None):
+        if kind not in _REST_KINDS:
+            raise UniFiError(f"Unsupported object type {kind}", "input")
+        if oid is not None and not _OBJ_ID.match(str(oid)):
+            raise UniFiError(f"Invalid object id {oid!r}", "input")
+        return self.api(f"rest/{kind}" + (f"/{oid}" if oid is not None else ""))
+
+    def list_objects(self, kind):
+        data = self._data(self.get(self._rest(kind)))
+        return [o for o in data if isinstance(o, dict)] if isinstance(data, list) else []
+
+    def get_object(self, kind, oid):
+        data = self._data(self.get(self._rest(kind, oid)))
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        raise UniFiError(f"{kind} {oid} was not found on this console.", "notfound", 404)
+
+    def update_object(self, kind, oid, data):
+        return self.put(self._rest(kind, oid), data)
+
+    def create_object(self, kind, data):
+        return self.post(self._rest(kind), data)
+
+    def delete_object(self, kind, oid):
+        return self.delete(self._rest(kind, oid))
 
 
 def test_connection(profile, secret):

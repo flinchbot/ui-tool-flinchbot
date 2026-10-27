@@ -2,7 +2,7 @@
 
 This guide assumes no programming experience. Plan on about 20 minutes the first time.
 
-**What you'll end up with:** a small app on your Windows PC. You double-click it, it opens in your web browser, and you ask an AI questions about a UniFi network, e.g. "why is the Wi-Fi slow in the hall?". The AI can be **Claude** (Anthropic) or **ChatGPT** (OpenAI). It can also make changes, but only after you click **Approve**.
+**What you'll end up with:** a small app on your Windows PC or Mac. You double-click it, it opens in your web browser, and you ask an AI questions about a UniFi network, e.g. "why is the Wi-Fi slow in the hall?". The AI can be **Claude** (Anthropic) or **ChatGPT** (OpenAI). It can also make changes, but only after you click **Approve**.
 
 > This guide is also inside the app: click the robot logo (top left) → **📖 Setup guide**.
 
@@ -10,15 +10,28 @@ This guide assumes no programming experience. Plan on about 20 minutes the first
 
 | You need | Why / notes |
 |---|---|
-| A Windows 10 or 11 PC | It must be able to reach the UniFi console: plugged into that network, on its Wi-Fi, or connected by VPN. |
+| A Windows 10 or 11 PC, or a Mac (macOS 12 Monterey or newer) | It must be able to reach the UniFi console: plugged into that network, on its Wi-Fi, or connected by VPN. |
 | A **local-only admin account** on the UniFi console | **Required.** Your normal UI.com sign-in won't work. Step 3 explains why and how to create one. You need admin access to the console once, to create it. |
 | An API account with credit at **Anthropic** (Claude) **or OpenAI** (ChatGPT) | This is how the AI is paid for (step 2). It's separate from a Claude.ai or ChatGPT chat subscription. |
 
 ---
 
-## 1. Install Python (once per PC)
+## 1. Install Python (once per computer)
 
 Python is the language the app is written in. You install it once and never have to open it.
+
+**On a Mac:**
+
+1. Go to **https://www.python.org/downloads/** and download the **macOS installer** for the newest version (3.10 or newer is required). Open the downloaded `.pkg` and click through it.
+   - Already use Homebrew? `brew install python` works too.
+   - The `python3` that comes with macOS is too old or only a placeholder, so install it this way even if `python3` seems to exist.
+2. Check it worked: open **Terminal** (press **⌘ + Space**, type `Terminal`, press Return) and type:
+   ```
+   python3 --version
+   ```
+   You should see something like `Python 3.14.3`.
+
+**On Windows:**
 
 1. Go to **https://www.python.org/downloads/**. Download the Windows installer for the newest version (3.10 or newer is required).
    - On current releases, the download is the **Python install manager**. Run it, accept the defaults, and when it asks whether to run its configuration check, say **yes**.
@@ -93,26 +106,37 @@ The two defaults cost about the same, roughly 5–15¢ for a typical health chec
 
 The app works out which type it is talking to automatically.
 
-## 4. Do you need to enable SSH on the UniFi gear? **No.**
+## 4. SSH on the console: optional, off by default
 
-This app talks to UniFi through the same secure web connection the UniFi web page uses. It never uses SSH.
+This app talks to UniFi through the same secure web connection the UniFi web page uses. That covers devices, clients, Wi-Fi, alerts, logs and settings. **You don't need SSH.**
 
-Leave SSH turned off. SSH gives full root control of the console, so it's one less password that can leak. If you previously turned it on for this app, you can turn it off again under **Settings → Control Plane → Console** (wording varies).
+SSH is an **optional extra per connection** for things the web API doesn't show: the console's own system log, running processes, memory and disk, config files, interface error counters. With it on, flinchbot adds those checks to health checks and troubleshooting, and the action report includes them too.
+
+- **Read-only commands** (`cat`, `grep`, `ls`, `df`, `free`, `ps`, `ip`, `journalctl`, …) run straight away.
+- **Anything that could change the console** (`reboot`, `rm`, `ip link set`, anything with `;` `&&` `>` or `$( )`, anything the app doesn't recognise) shows an Approve/Deny card with the exact command, like other changes. This is decided by the app, not by the AI.
+- **Command output goes to the AI exactly as is.** The passphrase removal that applies to UniFi API data can't apply to free text, so don't ask it to print files that hold secrets.
+
+To turn it on later (see step 6 for the form):
+1. On the console, enable SSH and set a password: **Console Settings → Advanced → SSH** on UniFi OS (wording varies by version). The SSH user is `root`. On a self-hosted controller, use a login on that server.
+2. In the app, open the connection (connection menu → **Manage connections… → Edit**), switch **SSH access** to **On**, enter the username, port (22) and password, and click **Test SSH**. The test records the console's SSH host key, so the app can tell if that address ever answers as a different machine. Saving with SSH on requires one successful test.
+
+The SSH password is stored in Windows Credential Manager or the macOS Keychain, separately from the UniFi login. If you don't use SSH, leave it off on the console: SSH gives full root control, so it's one less password that can leak.
 
 ## 5. Get the app onto the PC
 
 Use either of these:
-- **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-flinchbot`. Avoid running it from inside the ZIP or from Downloads.
+- **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-flinchbot` on Windows or your home folder's `Applications` or `Documents` on a Mac. Avoid running it from inside the ZIP or from Downloads.
 - **Git** (if you use it): `git clone https://github.com/flinchbot/ui-tool-flinchbot.git`
 
 The folder is self-contained, so you can move it or copy it to another PC later.
 
 ## 6. Start it
 
-1. Double-click **`start.bat`**.
-   - The first time, it creates a private Python environment (a `.venv` folder) and downloads the packages the app needs: the Anthropic and OpenAI connectors and a password-storage helper. This needs internet and takes about a minute.
-   - Windows SmartScreen may warn about running a downloaded file. Click **More info → Run anyway**.
-   - If Windows Firewall asks about Python, you can click **Cancel**. The app only listens on this PC (127.0.0.1) and doesn't need firewall access.
+1. Double-click **`start.bat`** (Windows) or **`start.command`** (Mac).
+   - The first time, it creates a private Python environment (a `.venv` folder) and downloads the packages the app needs: the Anthropic and OpenAI connectors, a password-storage helper and an SSH library. This needs internet and takes about a minute.
+   - **Windows:** SmartScreen may warn about running a downloaded file. Click **More info → Run anyway**. If Windows Firewall asks about Python, you can click **Cancel**: the app only listens on this computer (127.0.0.1) and doesn't need firewall access.
+   - **Mac:** the first time, macOS may say *"start.command" can't be opened because Apple cannot check it*. **Right-click** (or Control-click) `start.command` → **Open** → **Open**. You only need to do this once. If it says you don't have permission, open Terminal in the app folder and run `bash start.command` instead.
+   - **Mac:** the first time you save a password, macOS may ask whether Python may use your keychain. Click **Always Allow** so passwords are kept in the macOS Keychain.
 2. Your browser opens at `http://127.0.0.1:8080/` and shows a **Welcome** screen:
    - **Step 1, Choose your AI:**
      1. Pick **Claude** or **ChatGPT**.
@@ -127,13 +151,15 @@ The folder is self-contained, so you can move it or copy it to another PC later.
      - the local username and password from step 3
 
      That button signs in **once** to check the details. If the sign-in fails you stay on this screen with the reason, and nothing is saved. Fix it and press the button again. Pressing it again with the same rejected password does nothing, to protect you from UniFi's lockout. The check also detects the console type, lists its sites, and records the console's security certificate (see "DIFFERENT security certificate" in Troubleshooting).
-3. Keep the black `start.bat` window open while you use the app. Close it (or press **Ctrl+C** in it) to stop the app.
+
+     **SSH access** on the same form is **Off** by default. Leave it off unless you want what step 4 describes; you can turn it on for any connection later.
+3. Keep the `start.bat` / `start.command` window open while you use the app. Close it (or press **Ctrl+C** in it) to stop the app.
 
 ## 7. Everyday use
 
 - **Ask questions** in the chat, or click a quick prompt such as *Health check*.
 - **📎 Attach text files:** click 📎 (or drag files onto the message box) to give the AI a log, config export, CSV and so on alongside your question. Up to 5 files and 150,000 characters per message; pictures, PDFs and other non-text files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until **Clear chat** or closing the app. It goes to the AI exactly as is, so remove passwords first. Big files make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.
-- **Changes:** when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it.
+- **Changes:** when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it. With SSH on (step 4), a command that could change the console shows the same card with the exact command.
 - **Another network:** click the connection name at the top → **Add a connection…**. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.
 - **⚙ Settings:**
   - switch between **Claude** and **ChatGPT** (switching starts a new conversation)
@@ -145,8 +171,17 @@ The folder is self-contained, so you can move it or copy it to another PC later.
   - **⤓ Checklist web page:** open it in any browser and tick items off as you fix them. Ticks are remembered in that browser, and **Print / PDF** works.
   - **⤓ Markdown:** for notes apps. Obsidian, VS Code and GitHub show the `[ ]` boxes as clickable checkboxes.
   - **↻ Regenerate** gives a fresh snapshot with an empty checklist, which is handy to confirm your fixes took.
+- **🗺 Topology:** a map of your UniFi gear (gateway → switches → access points, with the port numbers on each link) plus **only the client devices that have a problem right now**, drawn under the device they're connected to: weak Wi-Fi signal, lots of Wi-Fi retries, low satisfaction, errors on their switch port, or flapping (connecting and disconnecting over and over in the last 24 hours). Each shows the name, IP address, MAC address, port or Wi-Fi details, and what's wrong. Scroll to zoom, drag to pan, hover for details. **⤓ Download SVG** saves it as a vector image that opens in any browser and stays sharp at any zoom. Healthy clients aren't drawn, so a quiet network shows just the gear.
+- **Alerts** (left side, under the overview): active alerts in plain words, most recent first. Click **Explain** next to one and flinchbot looks into it: what it means, whether it's still happening, the likely cause, and what to do.
+- **📈 WAN:** your internet speed (download and upload) and latency over the last day, week, month or 90 days, with outages marked in red. It uses the speed tests the console already runs, plus any this app runs.
+  - **▶ Run a speed test now** uses the full internet connection for about a minute, so others on the network may notice.
+  - **Scheduled speed test** runs one automatically every few hours while this connection is the one selected. It's off by default, and set separately for each connection.
+  - **💬 Ask flinchbot about this** has the AI compare slow periods and outages and suggest causes.
+- **🧾 Changes:** a log of every change made or refused through this app, with who, when, on which console and exactly what. Click an entry for details. **⤓ CSV** opens in Excel or Numbers. The log stays on this computer (`data/audit.jsonl`); passwords are never written to it.
+- **↶ Undo:** after you approve a change to a Wi-Fi network or LAN/VLAN (including deleting a Wi-Fi network or creating a new one), an **↶ Undo** button appears on the approval card and in 🧾 Changes. It puts back exactly what was there before. If someone changed the same setting again in the meantime, the app asks before overwriting it. A deleted Wi-Fi network comes back as a new network with the same settings and password. Other changes (restarts, blocking a client, firewall rules) can't be undone automatically; the log tells you what was done so you can reverse it in UniFi.
+- **💾 Backup:** one click saves a backup of this console's UniFi Network settings to your **Downloads** folder (a `.unf` file named after the network and date). To restore it, open the console in a browser and go to **Settings → System → Backups → Restore** (wording varies by version). It contains your whole network configuration, Wi-Fi passwords included, so keep it somewhere private.
 - **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
-- **🎨 Theme:** pick a look: Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner or Candle Maker. Each one changes colours, fonts, text size and screen layout, and each has a light and a dark version (or *Auto*, which follows the Windows setting). The choice is remembered in that browser. If Windows has animations turned off, the moving backgrounds stay still. The movie and show themes are fan-inspired: colours and moods only, no logos or characters.
+- **🎨 Theme:** pick a look: Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner or Candle Maker. Each one changes colours, fonts, text size and screen layout, and each has a light and a dark version (or *Auto*, which follows the Windows or macOS setting). The choice is remembered in that browser. If animations are turned off in Windows or reduced in macOS, the moving backgrounds stay still. The movie and show themes are fan-inspired: colours and moods only, no logos or characters.
 - **About:** click the robot logo for the version, the AI in use, and this guide.
 
 ## 8. Updating the app
@@ -157,38 +192,41 @@ The folder is self-contained, so you can move it or copy it to another PC later.
   3. Copy across your `.env` file and `data` folder.
 - **Git:** run `git pull` in the app folder.
 
-Your settings, connections and passwords aren't touched by an update. `start.bat` notices new requirements and installs them on the next start.
+Your settings, connections and passwords aren't touched by an update. `start.bat` / `start.command` notices new requirements and installs them on the next start.
 
 ## 9. Where your information is stored, and what is sent where
 
 | What | Where |
 |---|---|
 | AI choice, API key(s), models, port | `.env` file in the app folder |
-| Connection details (name, address, port, site, username) | `data\connections.json` |
-| UniFi passwords / API keys | Windows Credential Manager (Control Panel → Credential Manager → Windows Credentials → entries named `unifi-claude`, the app's original name, kept so saved passwords keep working) |
+| Connection details (name, address, port, site, username, SSH on/off, SSH username and port) | `data\connections.json` |
+| Change log, speed tests this app ran | `data\audit.jsonl`, `data\speedtests.jsonl` |
+| UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
 
-If Credential Manager isn't available, passwords fall back to `data\secrets.json` and the app shows a warning.
+If that password store isn't available, passwords fall back to `data/secrets.json` and the app shows a warning.
 
 `.env` and `data\` are excluded from git, so they're never uploaded to GitHub. Don't email or share them.
 
-**What leaves this PC:**
+**What leaves this computer:**
 - When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
-- Wi-Fi passwords and other secret fields are **removed first**. (Files you attach are sent as they are; that removal only applies to data the app reads from UniFi.)
+- Wi-Fi passwords and other secret fields are **removed first**. (Files you attach and SSH command output are sent as they are; that removal only applies to data the app reads from the UniFi API.)
 - ChatGPT requests are sent with OpenAI's "don't store" option.
-- Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the PC). Only the font request goes out; no network data does.
+- Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the computer). Only the font request goes out; no network data does.
 - Nothing is sent anywhere else, and the app can't be reached from other computers.
 
-**Moving to a new PC:**
+**Moving to a new computer** (Windows ↔ Mac works too):
 1. Copy the folder.
-2. Re-enter the UniFi passwords. Credential Manager entries don't travel with the folder.
-3. Skip copying `.venv`; `start.bat` rebuilds it.
+2. Re-enter the UniFi and SSH passwords. Credential Manager and Keychain entries don't travel with the folder.
+3. Skip copying `.venv`; `start.bat` / `start.command` rebuilds it (and rebuilds it automatically if you copied one from the other kind of computer).
 
 ## 10. Troubleshooting
 
 | Message / symptom | What to do |
 |---|---|
-| *"Python 3.10 or newer was not found"* | Redo step 1, then close and reopen the `start.bat` window. |
-| *"Could not start on 127.0.0.1:8080"* | Another program uses port 8080. Run `start.bat --port 8090`, or change the port in Settings. |
+| *"Python 3.10 or newer was not found"* | Redo step 1, then close and reopen the `start.bat` / `start.command` window. |
+| Mac: *"start.command" can't be opened because Apple cannot check it* | Right-click `start.command` → **Open** → **Open** (once). |
+| Mac: *"permission denied"* when starting | In Terminal, in the app folder, run `bash start.command`, or `chmod +x start.command` once. |
+| *"Could not start on 127.0.0.1:8080"* | Another program uses port 8080. Run `start.bat --port 8090` (Windows) or `./start.command --port 8090` (Mac), or change the port in Settings. |
 | *"Timed out reaching https://…"* | This PC can't reach the console. Is it on that network or VPN? Can you open `https://<console IP>` in the browser? |
 | *"refused the connection"* | Wrong port. See the port table in step 3. |
 | *"UI.com cloud account with two-factor sign-in"* (UniFi's raw error: *HTTP 499, MFA token required*) | You entered your own UI.com login. Create the separate **local-only** admin from step 3 and use that instead. |
@@ -197,6 +235,9 @@ If Credential Manager isn't available, passwords fall back to `data\secrets.json
 | *"Permission denied … read-only"* | The UniFi account is *View Only*. Give it Full Management if you want changes to work. |
 | *"rejected the API key"* (UniFi) | That UniFi version doesn't accept API keys for this feature. Switch the connection to username + password. |
 | *"DIFFERENT security certificate"* | The address now answers with a different console certificate. Typical causes: a factory reset, a replaced console, or being on a different network where that IP belongs to something else. If you're sure it's your console, open the connection and click **Trust new certificate**. |
+| *"DIFFERENT SSH host key"* | Same idea for SSH. If you're sure it's your console, open the connection, click **Test SSH**, and save. |
+| *"SSH login as 'root' was rejected"* | On UniFi OS the SSH password is set under **Console Settings → Advanced → SSH**; it isn't the UniFi login. The app won't resend a rejected SSH password; change it and test again. |
+| *"The command did not finish within … seconds"* | The AI ran something that waits for input or never ends. Ask again; it will use `-c` with ping, `-b` with top, and so on. |
 | *"…rejected the API key"* / *"out of credits"* / *"no API credit"* (AI) | Fix the key in Settings. Or add API credit at console.anthropic.com (Claude) or platform.openai.com → Billing (ChatGPT). |
 | *"…model … wasn't found"* or a *deprecated* banner | Open Settings and pick a current model from the list. |
 | *"Reply hit the …-token output limit"* | Say "continue", ask a narrower question, or raise `MAX_OUTPUT_TOKENS` in `.env` (max 21000). |
@@ -206,4 +247,8 @@ If Credential Manager isn't available, passwords fall back to `data\secrets.json
 Still stuck? Run the diagnostic and send its output to whoever is helping you. It contains no passwords.
 ```
 .venv\Scripts\python backend\probe_events.py
+```
+On a Mac:
+```
+.venv/bin/python backend/probe_events.py
 ```

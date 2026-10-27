@@ -4,6 +4,7 @@ Nothing real is contacted.
 
 Run from the project folder:
     .venv\\Scripts\\python -m unittest discover -s tests -v      (Windows)
+    .venv/bin/python -m unittest discover -s tests -v           (macOS / Linux)
     python -m unittest discover -s tests -v                     (anywhere)
 """
 
@@ -37,6 +38,13 @@ for k in cfg.DEFAULTS:
 import agent as agent_mod           # noqa: E402
 import providers                    # noqa: E402
 import server as srv                # noqa: E402
+import history                      # noqa: E402
+import ssh_client                   # noqa: E402
+import topology                     # noqa: E402
+import wan                          # noqa: E402
+from unifi_client import summarize_event  # noqa: E402
+
+wan.POLL_SECONDS = 0                 # the mock gateway finishes a speed test instantly
 from unifi_client import UniFiClient, UniFiError, test_connection  # noqa: E402
 
 try:
@@ -45,6 +53,22 @@ try:
     HAVE_OPENSSL = True
 except Exception:
     HAVE_OPENSSL = False
+
+try:
+    from mock_ssh import MockSSH
+    HAVE_PARAMIKO = ssh_client.paramiko is not None
+except Exception:
+    HAVE_PARAMIKO = False
+
+
+class FakeSSH:
+    """Stands in for ssh_client.SSHClient in agent tests: records commands, never connects."""
+    def __init__(self):
+        self.calls = []
+
+    def run(self, command, timeout=60):
+        self.calls.append(command)
+        return {"exit_code": 0, "stdout": f"output of {command}", "stderr": "", "truncated": False}
 
 
 def reset_store():
@@ -158,6 +182,32 @@ class ConfigStoreTests(unittest.TestCase):
     def test_default_model_is_current(self):
         self.assertEqual(cfg.get_setting("CLAUDE_MODEL"), "claude-sonnet-5-5")
 
+    def test_env_duplicate_keys_are_collapsed(self):
+        with open(cfg.ENV_PATH, "w") as f:
+            f.write("CLAUDE_MODEL=a\nOTHER=x\nCLAUDE_MODEL=b\n")     # hand-edited file with a repeat
+        cfg.write_env_file({"CLAUDE_MODEL": "c"})
+        self.assertEqual(cfg.read_env_file()["CLAUDE_MODEL"], "c")
+        self.assertEqual(open(cfg.ENV_PATH).read().count("CLAUDE_MODEL"), 1)
+        with self.assertRaises(ValueError):
+            cfg.write_env_file({"CLAUDE_MODEL": "x\nANTHROPIC_API_KEY=evil"})
+
+    def test_ssh_settings_and_secret(self):
+        a = cfg.upsert_profile({"name": "Home", "host": "10.0.0.1", "username": "u"}, "pw1")
+        self.assertFalse(cfg.get_profile(a["id"])["ssh_enabled"])            # off by default
+        with self.assertRaises(ValueError):
+            cfg.upsert_profile({"id": a["id"], "ssh_enabled": True})         # needs the SSH password
+        cfg.upsert_profile({"id": a["id"], "ssh_enabled": "true", "ssh_hostkey": "aa" * 32}, ssh_secret="sshpw")
+        p = cfg.get_profile(a["id"])
+        self.assertEqual((p["ssh_enabled"], p["ssh_port"], p["ssh_username"]), (True, 22, "root"))
+        self.assertEqual(cfg.get_secret(a["id"], "ssh"), "sshpw")
+        self.assertEqual(cfg.get_secret(a["id"]), "pw1")                     # separate from the UniFi login
+        self.assertNotIn("sshpw", open(cfg.PROFILES_PATH).read())
+        self.assertTrue(cfg.list_profiles()["profiles"][0]["has_ssh_secret"])
+        cfg.upsert_profile({"id": a["id"], "ssh_port": 2222})                # new port: host-key pin dropped
+        self.assertNotIn("ssh_hostkey", cfg.get_profile(a["id"]))
+        cfg.delete_profile(a["id"])
+        self.assertIsNone(cfg.get_secret(a["id"], "ssh"))
+
     def test_env_var_overrides_file(self):
         cfg.write_env_file({"CLAUDE_MODEL": "from-file"})
         os.environ["CLAUDE_MODEL"] = "from-env"
@@ -247,6 +297,21 @@ class UniFiClientTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("API key", r["error"])
 
+    def test_rejected_api_key_is_tried_once_then_blocked(self):
+        m = self.mock(api_key="K123")
+        c = UniFiClient(self.prof(m, auth="apikey", console_type="unifi_os"), "wrong")
+        health = lambda: sum(1 for _, p, _ in m.calls if p.endswith("stat/health"))   # noqa: E731
+        for _ in range(4):                                   # e.g. four status polls
+            with self.assertRaises(UniFiError) as cm:
+                c.get_health()
+            self.assertEqual(cm.exception.kind, "auth")
+        self.assertEqual(health(), 1)
+        self.assertTrue(c.login_blocked())
+        c.clear_login_block()                                # the Retry button
+        with self.assertRaises(UniFiError):
+            c.get_health()
+        self.assertEqual(health(), 2)
+
     def test_unreachable_is_friendly_and_fast(self):
         r = test_connection({"host": "127.0.0.1", "port": 1, "username": "u", "auth": "password"}, "x")
         self.assertFalse(r["ok"])
@@ -335,9 +400,13 @@ class AgentTests(unittest.TestCase):
         self.m = MockUniFi(n_clients=2000)
         self.client = UniFiClient({"host": "127.0.0.1", "port": self.m.port, "username": "claude",
                                    "auth": "password", "console_type": "unifi_os"}, "pw")
-        self.agent = agent_mod.Agent(lambda: self.client,
-                                     lambda: self.settings,
-                                     lambda: {"name": "Test", "site": "default", "console": "UniFi OS console"})
+        self.ctx = {"name": "Test", "site": "default", "console": "UniFi OS console", "ssh_enabled": False}
+        self.ssh = FakeSSH()
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        self.profile = {"id": "p1", "name": "Test", "host": "127.0.0.1", "site": "default"}
+        self.changes = history.ChangeLog(lambda: self.client, lambda: self.profile)
+        self.agent = agent_mod.Agent(lambda: self.client, lambda: self.settings, lambda: self.ctx,
+                                     get_ssh=lambda: self.ssh, changes=self.changes)
         self.settings = {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test",
                          "model": "m", "max_rounds": 5, "max_tokens": 16000}
         FakeAnthropic.script, FakeAnthropic.received = [], []
@@ -467,6 +536,213 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(r["reply"], "Done - it is rebooting.")
         self.assertEqual(self.devmgr_calls(), [{"cmd": "restart", "mac": "aa:bb:cc:00:00:02"}])
 
+    def test_prompt_is_cached_and_stable_within_the_hour(self):
+        FakeAnthropic.script = [[text("hi")]]
+        self.agent.chat("hello")
+        kw = FakeAnthropic.received[0]
+        self.assertEqual(kw["cache_control"], {"type": "ephemeral"})
+        self.assertRegex(kw["system"], r"between \d\d:00 and \d\d:00")       # no minute-level timestamp
+
+    def test_path_params_are_validated_before_anything_runs(self):
+        FakeAnthropic.script = [
+            [tool("t1", "delete_wlan", {"wlan_id": "../networkconf/abc"}),
+             tool("t2", "get_device", {"mac": "../../cmd/devmgr"}),
+             tool("t3", "restart_device", {"mac": "AA-BB-CC-00-00-02"})],
+            [text("ok")]]
+        r = self.agent.chat("x")
+        self.assertEqual([p["tool"] for p in r["pending"]], ["restart_device"])   # only the valid one waits
+        self.assertEqual(r["pending"][0]["details"]["mac"], "aa:bb:cc:00:00:02")
+        self.assertFalse([p for _, p, _ in self.m.calls if ".." in p])
+        self.agent.decide(False)
+        res = {b["tool_use_id"]: b for b in FakeAnthropic.received[-1]["messages"][-1]["content"]
+               if b.get("type") == "tool_result"}
+        self.assertTrue(res["t1"]["is_error"] and "not a valid UniFi object id" in res["t1"]["content"])
+        self.assertTrue(res["t2"]["is_error"] and "not a MAC address" in res["t2"]["content"])
+
+    def test_ssh_read_runs_now_and_write_needs_approval(self):
+        self.ctx["ssh_enabled"] = True
+        FakeAnthropic.script = [
+            [tool("s1", "ssh_command", {"command": "cat /proc/loadavg | head -n 1"})],
+            [text("Load is fine. Rebooting as asked."), tool("s2", "ssh_command", {"command": "reboot"})],
+            [text("Rebooting.")]]
+        r = self.agent.chat("load? then reboot")
+        self.assertEqual(self.ssh.calls, ["cat /proc/loadavg | head -n 1"])      # read-only ran at once
+        self.assertEqual((r["pending"][0]["tool"], r["pending"][0]["target"]), ("ssh_command", "reboot"))
+        first = FakeAnthropic.received[0]
+        self.assertIn("ssh_command", {t["name"] for t in first["tools"]})
+        self.assertIn("SSH to the console is turned on", first["system"])
+        self.assertEqual(self.agent.decide(True)["reply"], "Rebooting.")
+        self.assertEqual(self.ssh.calls[-1], "reboot")
+        # report mode: read-only SSH is offered and asked for, but a write command is refused
+        FakeAnthropic.script = [[tool("r1", "ssh_command", {"command": "rm -rf /tmp/x"})],
+                                [tool("r2", "submit_report", {"summary": "ok", "items": []})]]
+        self.agent.generate_report()
+        self.assertNotIn("rm -rf /tmp/x", self.ssh.calls)
+        self.assertIn("SSH is on", json.dumps(FakeAnthropic.received[-2]["messages"][0]))
+        out = FakeAnthropic.received[-1]["messages"][-1]["content"][0]
+        self.assertIn("Not available in report mode", out["content"])
+
+    def test_ssh_tool_is_absent_and_refused_when_off(self):
+        FakeAnthropic.script = [[tool("s1", "ssh_command", {"command": "uptime"})], [text("ok")]]
+        self.agent.chat("x")
+        self.assertNotIn("ssh_command", {t["name"] for t in FakeAnthropic.received[0]["tools"]})
+        self.assertNotIn("SSH", FakeAnthropic.received[0]["system"])
+        self.assertEqual(self.ssh.calls, [])
+        out = FakeAnthropic.received[1]["messages"][-1]["content"][0]
+        self.assertTrue(out["is_error"] and "not turned on" in out["content"])
+
+    # ── change log + undo ────────────────────────────────────────────────────
+    def approve_tool(self, name, inp, reply="Done."):
+        FakeAnthropic.script = [[tool("t1", name, inp)], [text(reply)]]
+        r = self.agent.chat("do it")
+        self.assertEqual(r["pending"][0]["tool"], name)
+        return self.agent.decide(True)
+
+    def audit_text(self):
+        return open(os.path.join(cfg.DATA_DIR, "audit.jsonl"), encoding="utf-8").read()
+
+    def test_wifi_edit_is_logged_without_secrets_and_can_be_undone(self):
+        r = self.approve_tool("update_wlan", {"wlan_id": "w1", "settings": {"x_passphrase": "NewPass99", "name": "Home2"}})
+        w1 = self.m.objects["wlanconf"]["w1"]
+        self.assertEqual((w1["name"], w1["x_passphrase"]), ("Home2", "NewPass99"))
+        ch = r["changes"][0]
+        self.assertTrue(ch["can_undo"] and ch["ok"])
+        self.assertIn("Put back name, x_passphrase", ch["undo"])
+        log = self.audit_text()
+        self.assertNotIn("NewPass99", log)                          # neither the new...
+        self.assertNotIn("SuperSecret123", log)                     # ...nor the old passphrase is in the log
+        rec = self.changes.list()[0]
+        self.assertEqual((rec["label"], rec["decision"], rec["connection"]), ("Change Wi-Fi network", "approved", "Test"))
+        self.assertTrue(rec["undo_here"])
+        self.assertIn("SuperSecret123", open(cfg.SECRETS_PATH).read())   # old secret kept in the secret store
+        res = self.changes.undo(rec["id"])
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((w1["name"], w1["x_passphrase"]), ("Home", "SuperSecret123"))
+        self.assertNotIn("SuperSecret123", open(cfg.SECRETS_PATH).read())   # snapshot secret removed after use
+        recs = self.changes.list()
+        self.assertEqual(recs[0]["via"], "undo")
+        self.assertEqual(recs[1]["undone_by"], recs[0]["id"])
+        self.assertFalse(recs[1]["can_undo"])
+        with self.assertRaises(UniFiError):
+            self.changes.undo(rec["id"])                            # only once
+        # the model hears about the undo with the next message
+        self.agent.add_note("The user pressed Undo on an earlier change (Change Wi-Fi network).")
+        FakeAnthropic.script = [[text("Noted.")]]
+        self.agent.chat("thanks")
+        last_user = FakeAnthropic.received[-1]["messages"][-1]["content"][-1]["text"]
+        self.assertTrue(last_user.startswith("[App note: The user pressed Undo"))
+        self.assertTrue(last_user.endswith("thanks"))
+
+    def test_undo_refuses_to_overwrite_a_newer_change_unless_forced(self):
+        self.approve_tool("update_network", {"network_id": "n1", "settings": {"dhcpd_enabled": False}})
+        self.m.objects["networkconf"]["n1"]["dhcpd_enabled"] = "changed elsewhere"
+        rid = self.changes.list()[0]["id"]
+        res = self.changes.undo(rid)
+        self.assertTrue(res["conflict"])
+        self.assertIn("dhcpd_enabled", res["detail"])
+        self.assertTrue(self.changes.undo(rid, force=True)["ok"])
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], True)
+
+    def test_undo_of_create_and_delete(self):
+        self.approve_tool("create_wlan", {"name": "Guests", "password": "GuestPass1"})
+        new = [o for o in self.m.objects["wlanconf"].values() if o["name"] == "Guests"][0]
+        self.assertNotIn("GuestPass1", self.audit_text())
+        self.assertTrue(self.changes.undo(self.changes.list()[0]["id"])["ok"])
+        self.assertNotIn(new["_id"], self.m.objects["wlanconf"])                  # created network removed
+
+        self.approve_tool("delete_wlan", {"wlan_id": "w1"})
+        self.assertNotIn("w1", self.m.objects["wlanconf"])
+        rid = self.changes.list()[0]["id"]
+        self.assertIn("Recreate the deleted Wi-Fi network “Home”", self.changes.list()[0]["rollback"]["describe"])
+        self.assertTrue(self.changes.undo(rid)["ok"])
+        back = [o for o in self.m.objects["wlanconf"].values() if o["name"] == "Home"][0]
+        self.assertEqual(back["x_passphrase"], "SuperSecret123")                   # restored from the secret store
+        self.assertNotEqual(back["_id"], "w1")                                     # recreated, new id
+        post = [b for meth, p, b in self.m.calls if meth == "POST" and p.endswith("rest/wlanconf")][-1]
+        self.assertNotIn("_id", post)
+        self.assertNotIn("site_id", post)
+
+    def test_denied_and_non_undoable_changes_are_logged(self):
+        FakeAnthropic.script = [[tool("t1", "block_client", {"mac": "de:ad:be:ef:00:01"})], [text("OK.")]]
+        self.agent.chat("block it")
+        self.agent.decide(False)
+        r = self.approve_tool("restart_device", {"mac": "aa:bb:cc:00:00:02"})
+        self.assertFalse(r["changes"][0]["can_undo"])
+        recs = self.changes.list()
+        self.assertEqual([(x["tool"], x["decision"]) for x in recs],
+                         [("restart_device", "approved"), ("block_client", "denied")])
+        self.assertEqual(recs[1]["target"], "de:ad:be:ef:00:01")
+
+    # ── WAN ──────────────────────────────────────────────────────────────────
+    def test_speedtest_history_and_chart(self):
+        import xml.etree.ElementTree as ET
+        now = int(time.time() * 1000)
+        self.m.speed_history = [{"time": now - 3 * 3600_000, "xput_download": 910.0, "xput_upload": 870.0, "latency": 5},
+                                {"time": now - 2 * 3600_000, "xput_download": 120.0, "xput_upload": 90.0, "latency": 48}]
+        point = wan.run_speedtest(self.client, sleep=lambda s: None)
+        self.assertEqual((point["download_mbps"], point["upload_mbps"], point["latency_ms"]), (850.0, 830.0, 6.0))
+        dup = dict(point, at=now - 2 * 3600_000 + 30_000)                # same test as a console entry: merged
+        points, events, notes = wan.collect(self.client, 1, [point, dup, {"at": now, "download_mbps": None, "latency_ms": None}])
+        self.assertEqual([p["source"] for p in points], ["console", "console", "app"])
+        s = wan.summary(points)
+        self.assertEqual((s["tests"], s["download_mbps"]["min"], s["latency_ms"]["max"]), (3, 120.0, 48.0))
+        events = [{"at": now - 2 * 3600_000 - 60_000, "title": "WAN went down", "key": "WAN_DOWN"},
+                  {"at": now - 3600_000, "title": "ISP changed", "key": "ISP_INFO"}]
+        svg = wan.render_svg(points, events, 1, network="Home <b>")
+        ET.fromstring(svg)
+        self.assertIn("Home &lt;b&gt;", svg)
+        self.assertIn(wan.S["critical"], svg)                            # the outage marker
+        self.assertIn("WAN went down", svg)
+        self.assertIn("Throughput", svg)
+        self.assertIn("Latency", svg)
+        ET.fromstring(wan.render_svg([], [], 7))                         # empty period still renders
+
+    def test_speedtest_scheduler(self):
+        runs = []
+        prof = {"id": "p1", "speedtest_hours": 6}
+        sched = wan.Scheduler(lambda: prof, lambda: self.client,
+                              lambda pid: runs[-1]["ran_at"] if runs else None,
+                              lambda pid, point, via: runs.append(dict(point, via=via)) or runs[-1])
+        self.assertTrue(sched.tick())                                    # never ran: due now
+        self.assertIsNone(sched.tick())                                  # just ran: not due
+        self.assertTrue(sched.tick(now_ms=runs[-1]["ran_at"] + 6 * 3600_000 + 1))
+        prof["speedtest_hours"] = 0
+        self.assertIsNone(sched.tick(now_ms=runs[-1]["ran_at"] + 10 ** 9))   # off
+        self.assertEqual(len(runs), 2)
+
+    def test_get_wan_history_tool_is_offered_only_when_wired(self):
+        FakeAnthropic.script = [[text("ok")]]
+        self.agent.chat("hi")
+        self.assertNotIn("get_wan_history", {t["name"] for t in FakeAnthropic.received[-1]["tools"]})
+        self.agent._get_wan = lambda days: {"days": days, "summary": {"tests": 0}}
+        FakeAnthropic.script = [[tool("w", "get_wan_history", {"days": 500})], [text("ok")]]
+        self.agent.chat("wan?")
+        self.assertIn("get_wan_history", {t["name"] for t in FakeAnthropic.received[-2]["tools"]})
+        out = json.loads(FakeAnthropic.received[-1]["messages"][-1]["content"][0]["content"])
+        self.assertEqual(out["days"], 90)                                # clamped
+
+    def test_backup_download(self):
+        body, name = self.client.download_backup()
+        self.assertEqual((body, name), (self.m.backup_bytes, "9.0.114.unf"))
+        self.assertTrue(any(p == "/proxy/network/dl/backup/9.0.114.unf" for _, p, _ in self.m.calls))
+
+    def test_get_topology_tool(self):
+        FakeAnthropic.script = [[tool("t1", "get_topology", {})], [text("ok")]]
+        self.agent.chat("what's wrong?")
+        raw = FakeAnthropic.received[1]["messages"][-1]["content"][0]["content"]
+        self.assertLessEqual(len(raw), agent_mod.MAX_TOOL_CHARS)
+        out = json.loads(raw)                                                # a real tree, not cut-off text
+        self.assertEqual(out["tree"][0]["name"], "Gateway")
+        ap = out["tree"][0]["children"][0]
+        self.assertEqual(ap["name"], "Hall AP")
+        probs = ap["problem_clients"]                                        # 2000 mock clients, many at -80..-89 dBm
+        self.assertEqual(len(probs), agent_mod.TOPOLOGY_MAX_CLIENTS)
+        self.assertTrue(all(p["issues"] for p in probs))
+        self.assertTrue(all(p["severity"] == "bad" for p in probs))         # the most serious ones were kept
+        self.assertGreater(ap["problem_clients_not_shown"], 0)
+        self.assertIn("most serious", out["note"])
+        self.assertEqual(out["totals"]["clients"], 2000)
+
     def test_oversized_result_is_truncated_to_valid_json(self):
         out = agent_mod.to_tool_text(agent_mod._paged([{"blob": "z" * 500, "i": i} for i in range(400)], {"limit": 400}))
         j = json.loads(out)                                                       # still valid JSON
@@ -565,6 +841,150 @@ class AgentTests(unittest.TestCase):
         self.assertLessEqual(len(a.history), agent_mod.MAX_MESSAGES)
         self.assertEqual(a.history[0]["role"], "user")
         self.assertIsInstance(a.history[0]["content"], str)
+
+
+class EventFormatTests(unittest.TestCase):
+    def test_summarize_event(self):
+        s = summarize_event({"key": "DEVICE_OFFLINE", "message_raw": "AP {device} is offline since {TIME}",
+                             "parameters": {"device": {"name": "Hall AP", "mac": "aa"}, "TIME": "10:00"},
+                             "severity": "VERY_HIGH", "timestamp": 1790000000})
+        self.assertEqual(s["title"], "AP Hall AP is offline since 10:00")
+        self.assertEqual((s["severity"], s["at"]), ("very_high", 1790000000000))
+        self.assertEqual(summarize_event({"msg": "AP disconnected", "datetime": "2026-10-27T10:00:00Z"})["at"],
+                         int(__import__("datetime").datetime(2026, 10, 27, 10, tzinfo=__import__("datetime").timezone.utc).timestamp() * 1000))
+
+
+class TopologyTests(unittest.TestCase):
+    GW, SW, AP = "aa:00:00:00:00:01", "aa:00:00:00:00:02", "aa:00:00:00:00:03"
+
+    def data(self):
+        devices = [
+            {"mac": self.GW, "name": "Gateway", "model": "UCG-Fiber", "type": "ucg", "ip": "10.0.0.1", "state": 1,
+             "version": "5.1", "num_sta": 0, "wan1": {"ip": "172.20.53.10", "isp_name": "Uniti"},
+             "system-stats": {"cpu": "30.1", "mem": "73"}},
+            {"mac": self.SW, "name": "Office <b>Switch</b>", "model": "USW-8", "type": "usw", "ip": "10.0.0.2", "state": 1,
+             "version": "7.5", "num_sta": 3, "uplink": {"uplink_mac": self.GW, "uplink_remote_port": 4, "port_idx": 8},
+             "port_table": [{"port_idx": 3, "rx_errors": 120, "tx_errors": 2, "full_duplex": True, "up": True},
+                            {"port_idx": 5, "rx_errors": 0, "tx_errors": 0, "full_duplex": False, "up": True}]},
+            {"mac": self.AP, "name": "Hall AP", "model": "U7-Pro", "type": "uap", "ip": "10.0.0.3", "state": 0,
+             "version": "7.0", "num_sta": 4, "uplink": {"uplink_mac": self.SW, "uplink_remote_port": 1, "port_idx": 1}},
+        ]
+        clients = [
+            {"mac": "c0:00:00:00:00:01", "name": "Good laptop", "ip": "10.0.1.1", "is_wired": False, "ap_mac": self.AP,
+             "signal": -55, "tx_packets": 5000, "tx_retries": 100, "satisfaction": 95},
+            {"mac": "c0:00:00:00:00:02", "hostname": "weak-cam", "ip": "10.0.1.2", "is_wired": False, "ap_mac": self.AP,
+             "signal": -84, "essid": "Home", "channel": 36, "radio_proto": "ax", "satisfaction": 80},
+            {"mac": "c0:00:00:00:00:03", "name": "Retry TV", "ip": "10.0.1.3", "is_wired": False, "ap_mac": self.AP,
+             "signal": -60, "tx_packets": 10000, "tx_retries": 2300, "satisfaction": 50},
+            {"mac": "c0:00:00:00:00:04", "name": "NAS", "ip": "10.0.1.4", "is_wired": True, "sw_mac": self.SW, "sw_port": 3,
+             "satisfaction": 99},
+            {"mac": "c0:00:00:00:00:05", "name": "Printer", "ip": "10.0.1.5", "is_wired": True, "sw_mac": self.SW, "sw_port": 5},
+            {"mac": "c0:00:00:00:00:06", "name": "Flappy phone", "ip": "10.0.1.6", "is_wired": False, "ap_mac": self.AP,
+             "signal": -58, "tx_packets": 50, "tx_retries": 40},
+            {"mac": "c0:00:00:00:00:07", "name": "Fine wired PC", "ip": "10.0.1.7", "is_wired": True, "sw_mac": self.SW, "sw_port": 7},
+        ]
+        events = [{"key": "CLIENT_DISCONNECTED", "parameters": {"CLIENT": {"mac": "C0:00:00:00:00:06"}, "AP": {"mac": self.AP}}}] * 9 \
+            + [{"key": "DEVICE_ADOPTED", "parameters": {"CLIENT": {"mac": "c0:00:00:00:00:01"}}}] * 20
+        return devices, clients, events
+
+    def test_model_tree_and_problem_clients(self):
+        devices, clients, events = self.data()
+        m = topology.build_model(devices, clients, events, network="Home", site="default")
+        self.assertEqual(m["roots"], [self.GW])
+        self.assertEqual(m["children"], {self.GW: [self.SW], self.SW: [self.AP]})
+        self.assertEqual((m["devices"][self.SW]["uplink_remote_port"], m["devices"][self.SW]["uplink_port"]), (4, 8))
+        self.assertEqual(m["devices"][self.GW]["wan_ip"], "172.20.53.10")
+        self.assertFalse(m["devices"][self.AP]["online"])
+        self.assertEqual(m["totals"], {"devices": 3, "clients": 7, "problem_clients": 5})
+        by = {c["name"]: c for lst in m["problems"].values() for c in lst}
+        self.assertEqual(set(by), {"weak-cam", "Retry TV", "NAS", "Printer", "Flappy phone"})   # not the good ones
+        self.assertEqual(by["weak-cam"]["issues"], ["very weak signal (-84 dBm)"])
+        self.assertEqual(by["Retry TV"]["issues"], ["23% Wi-Fi retries", "satisfaction 50%"])
+        self.assertEqual(by["NAS"]["issues"], ["122 errors on switch port"])
+        self.assertEqual((by["NAS"]["port"], by["NAS"]["parent"]), (3, self.SW))
+        self.assertEqual(by["Printer"]["issues"], ["half duplex"])
+        self.assertEqual(by["Flappy phone"]["issues"], ["flapping: 9 connect/disconnect events in 24 h"])  # not the 50-packet retry rate
+        on_ap = m["problems"][self.AP]
+        self.assertEqual([c["severity"] for c in on_ap], ["bad", "bad", "warn"])                        # serious first
+        self.assertEqual(on_ap[-1]["name"], "Retry TV")
+
+    def test_svg_is_well_formed_escaped_and_complete(self):
+        import xml.etree.ElementTree as ET
+        devices, clients, events = self.data()
+        m = topology.build_model(devices, clients, events, network="Home")
+        svg = topology.render_svg(m)
+        self.assertTrue(svg.startswith('<svg xmlns="http://www.w3.org/2000/svg"'))
+        root = ET.fromstring(svg)                                            # well-formed XML
+        self.assertEqual(root.tag.split("}")[1], "svg")
+        self.assertIn("Office &lt;b&gt;Switch&lt;/b&gt;", svg)              # names can't inject markup
+        self.assertNotIn("<b>Switch</b>", svg)
+        for s in ("Gateway", "Hall AP", "weak-cam", "10.0.1.2", "c0:00:00:00:00:02", "very weak signal",
+                  "WAN 172.20.53.10", "Uniti", "port 3", "OFFLINE", "5 with issues"):
+            self.assertIn(s, svg, s)
+        self.assertNotIn("Good laptop", svg)
+        texts = [t for t in root.iter() if t.tag.endswith("text")]
+        self.assertGreater(len(texts), 20)
+        # layout: every drawn node sits inside the canvas
+        nodes, w, hgt = topology.layout(m)
+        for n in nodes.values():
+            self.assertTrue(0 <= n["x"] and n["x"] + n["w"] <= w and n["y"] + n["h"] <= hgt, n)
+        # an empty network still renders
+        empty = topology.render_svg(topology.build_model([], [], None))
+        ET.fromstring(empty)
+        self.assertIn("No clients with issues", empty)
+
+
+@unittest.skipUnless(HAVE_PARAMIKO, "paramiko needed for SSH")
+class SSHTests(unittest.TestCase):
+    def test_read_only_classifier(self):
+        read_only = [
+            "uptime", "cat /var/log/messages | grep -i wan | tail -n 50", "df -h", "free -m", "ip -s link",
+            "journalctl -p err -n 100", "sudo dmesg | tail -n 20", "ls -la /etc/unifi", "top -b -n 1",
+            "ping -c 3 1.1.1.1", "iptables -L -n -v", "systemctl status unifi", "docker ps",
+            "grep -r 'x' /etc/foo 2>&1", "/bin/cat /etc/hostname", "mca-cli-op info", "find /var/log -name '*.log'",
+            "tail -n 100 /var/log/messages", "ip addr show", "ethtool -S eth0", "curl -s http://127.0.0.1/status",
+        ]
+        needs_approval = [
+            "reboot", "rm -rf /tmp/x", "cat /etc/x > /tmp/y", "ls; reboot", "ls && reboot", "ls || reboot",
+            "echo $(reboot)", "echo `reboot`", "tail -f /var/log/messages", "dmesg -c", "ip link set eth0 down",
+            "iptables -A INPUT -j DROP", "systemctl restart unifi", "docker stats", "find / -name x -delete",
+            "date -s '2020-01-01'", "mca-cli-op set-inform http://x", "cat /etc/x | tee /tmp/y",
+            "sed -i s/a/b/ /etc/x", "top", "ping 1.1.1.1", "", "x" * 3000, "FOO=1 cat x", "cat 'unterminated",
+            "ethtool -s eth0 speed 100", "curl -X POST http://x", "cat /etc/x & reboot", "ls\nreboot",
+            "mongo --eval 'db.dropDatabase()'", "sh -c ls", "bash", "python3 -c 'import os'",
+        ]
+        for c in read_only:
+            self.assertTrue(ssh_client.is_read_only(c), c)
+        for c in needs_approval:
+            self.assertFalse(ssh_client.is_read_only(c), c)
+
+    def test_login_hostkey_pin_and_run(self):
+        m = MockSSH()
+        self.addCleanup(m.stop)
+        prof = {"host": "127.0.0.1", "ssh_port": m.port, "ssh_username": "root"}
+        r = ssh_client.test_ssh(prof, "pw")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["hostkey"], m.hostkey_hex())
+        self.assertTrue(r["hostkey_display"].startswith("SHA256:"))
+        self.assertIn("mock-unifi", r["uname"])
+        self.assertEqual(ssh_client.test_ssh(prof, "nope")["kind"], "auth")
+        self.assertTrue(ssh_client.test_ssh(dict(prof, ssh_hostkey="11" * 32), "pw")["hostkey_changed"])
+        bad = ssh_client.SSHClient("127.0.0.1", m.port, "root", "pw", expected_hostkey="00" * 32)
+        with self.assertRaises(ssh_client.SSHError) as cm:
+            bad.run("uptime")
+        self.assertEqual(cm.exception.kind, "hostkey")
+        self.assertNotIn("uptime", m.commands)                       # pin failed: nothing was run
+        c = ssh_client.SSHClient("127.0.0.1", m.port, "root", "pw", expected_hostkey=m.hostkey_hex())
+        self.addCleanup(c.close)
+        r = c.run("cat /proc/loadavg")
+        self.assertEqual((r["exit_code"], r["truncated"]), (0, False))
+        self.assertIn("0.10", r["stdout"])
+        r = c.run("ls /nope")
+        self.assertEqual(r["exit_code"], 2)
+        self.assertIn("No such file", r["stderr"])
+        self.assertEqual(m.commands[-2:], ["cat /proc/loadavg", "ls /nope"])
+        self.assertEqual(ssh_client.test_ssh({"host": "127.0.0.1", "ssh_port": 1, "ssh_username": "root"},
+                                             "pw")["kind"], "unreachable")
 
 
 @unittest.skipUnless(HAVE_OPENSSL, "openssl needed for the mock console")
@@ -670,6 +1090,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(net["device_count"], 2)
         self.assertEqual(net["errors"], {})
 
+        s, topo, _ = self.req("GET", "/api/topology")
+        self.assertEqual(s, 200, topo)
+        self.assertEqual(topo["totals"], {"devices": 2, "clients": 5, "problem_clients": 0})
+        self.assertTrue(topo["svg"].startswith("<svg"))
+        self.assertIn("Hall AP", topo["svg"])
+
         # chat through the HTTP API with a write that needs approval
         FakeAnthropic.script = [[text("Locating."), tool("t1", "locate_device", {"mac": "aa:bb:cc:00:00:01"})],
                                 [text("The Gateway LED is blinking.")]]
@@ -746,6 +1172,92 @@ class ServerTests(unittest.TestCase):
         self.assertIn("try again in about", r["error"])
         self.assertEqual(self.m.login_attempts(), n)
         self.m.locked = False
+
+    @unittest.skipUnless(HAVE_PARAMIKO, "paramiko needed for SSH")
+    def test_4_ssh_is_per_connection_and_off_by_default(self):
+        conns = self.req("GET", "/api/connections")[1]
+        sid = conns["active"]
+        self.assertTrue(sid)
+        self.assertFalse(conns["profiles"][0]["ssh_enabled"])
+        ms = MockSSH(password="sshpw")
+        self.addCleanup(ms.stop)
+        s, t, _ = self.req("POST", "/api/connections/ssh-test",
+                           {"id": sid, "ssh_port": ms.port, "ssh_username": "root", "ssh_secret": "sshpw"})
+        self.assertTrue(t["ok"], t)
+        s, d, _ = self.req("POST", "/api/connections", {"id": sid, "ssh_enabled": True, "ssh_port": ms.port,
+                                                         "ssh_username": "root", "ssh_secret": "sshpw",
+                                                         "ssh_hostkey": t["hostkey"]})
+        self.assertEqual(s, 200, d)
+        p = next(x for x in d["profiles"] if x["id"] == sid)
+        self.assertTrue(p["ssh_enabled"] and p["has_ssh_secret"])
+        self.assertEqual(p["ssh_hostkey_display"], t["hostkey_display"])
+        self.assertNotIn("sshpw", json.dumps(d))
+        self.assertTrue(self.req("GET", "/api/status")[1]["active"]["ssh_enabled"])
+
+        FakeAnthropic.script = [[tool("s1", "ssh_command", {"command": "cat /proc/loadavg"})],
+                                [text("Load is low."), tool("s2", "ssh_command", {"command": "reboot"})],
+                                [text("Rebooted.")]]
+        s, r, _ = self.req("POST", "/api/chat", {"message": "load? then reboot"})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["pending"][0]["label"], "Run a command on the console over SSH")
+        self.assertEqual(r["pending"][0]["target"], "reboot")
+        self.assertEqual(ms.commands, ["uname -a", "cat /proc/loadavg"])         # test + the read-only call
+        s, r, _ = self.req("POST", "/api/chat/decide", {"approve": True})
+        self.assertEqual(r["reply"], "Rebooted.")
+        self.assertEqual(ms.commands[-1], "reboot")
+
+        self.req("POST", "/api/connections", {"id": sid, "ssh_enabled": False})   # off again: tool gone
+        FakeAnthropic.script = [[text("ok")]]
+        self.req("POST", "/api/chat", {"message": "hi"})
+        self.assertNotIn("ssh_command", {x["name"] for x in FakeAnthropic.received[-1]["tools"]})
+
+    def test_5_alerts_changes_wan_backup(self):
+        import base64
+        sid = self.req("GET", "/api/connections")[1]["active"]
+        self.req("POST", "/api/connections", {"id": sid, "secret": "pw"})        # test_3 left a wrong password
+        s, net, _ = self.req("GET", "/api/network")
+        self.assertEqual(net["alert_items"][0]["title"], "AP device is offline")
+        self.assertEqual(net["alert_items"][0]["raw"]["key"], "DEVICE_OFFLINE")
+
+        # one-click backup: the bytes the console produced, logged as a change
+        s, b, _ = self.req("POST", "/api/backup", {})
+        self.assertEqual(s, 200, b)
+        self.assertEqual(base64.b64decode(b["data"]), self.m.backup_bytes)
+        self.assertRegex(b["filename"], r"^unifi-backup_Home_\d{4}-\d\d-\d\d_\d{4}_v9\.0\.114\.unf$")
+
+        # approve a Wi-Fi rename in chat, then undo it over the API
+        FakeAnthropic.script = [[tool("t1", "update_wlan", {"wlan_id": "w1", "settings": {"name": "Renamed"}})],
+                                [text("Renamed.")]]
+        self.req("POST", "/api/chat", {"message": "rename the wifi"})
+        s, r, _ = self.req("POST", "/api/chat/decide", {"approve": True})
+        self.assertTrue(r["changes"][0]["can_undo"])
+        self.assertEqual(self.m.objects["wlanconf"]["w1"]["name"], "Renamed")
+        s, log, _ = self.req("GET", "/api/changes?scope=here")
+        labels = [c["label"] for c in log["changes"]]
+        self.assertEqual(labels[:2], ["Change Wi-Fi network", "Download a config backup"])
+        self.assertIn("Locate (blink LED) on device", labels)                    # from test_3
+        s, u, _ = self.req("POST", "/api/changes/undo", {"id": log["changes"][0]["id"]})
+        self.assertTrue(u["ok"], u)
+        self.assertEqual(self.m.objects["wlanconf"]["w1"]["name"], "Home")
+        self.assertEqual(self.req("POST", "/api/changes/undo", {"id": log["changes"][0]["id"]})[0], 502)  # only once
+        FakeAnthropic.script = [[text("ok")]]
+        self.req("POST", "/api/chat", {"message": "and now?"})
+        self.assertIn("[App note: The user pressed Undo", json.dumps(FakeAnthropic.received[-1]["messages"][-1]))
+
+        # WAN: schedule per connection, run a test, chart
+        self.assertEqual(self.req("POST", "/api/wan/schedule", {"hours": 5})[0], 400)
+        s, d, _ = self.req("POST", "/api/wan/schedule", {"hours": 6})
+        self.assertEqual(d["schedule_hours"], 6)
+        before = self.m.login_attempts()
+        s, t, _ = self.req("POST", "/api/wan/speedtest", {})
+        self.assertEqual(s, 200, t)
+        self.assertEqual(t["point"]["download_mbps"], 850.0)
+        self.assertEqual(self.m.login_attempts(), before)        # a schedule change didn't drop the session
+        s, w, _ = self.req("GET", "/api/wan?days=7")
+        self.assertEqual(s, 200, w)
+        self.assertEqual((w["schedule_hours"], w["summary"]["tests"]), (6, 1))
+        self.assertTrue(w["svg"].startswith("<svg"))
+        self.assertEqual(self.req("GET", "/api/changes")[1]["changes"][0]["label"], "Run a WAN speed test")
 
 
 if __name__ == "__main__":
