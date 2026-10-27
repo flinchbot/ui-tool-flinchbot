@@ -103,7 +103,7 @@ Leave SSH turned off. SSH gives full root control of the console, so it's one le
 
 Use either of these:
 - **Download:** on the GitHub page click **Code → Download ZIP**, then unzip it somewhere permanent, e.g. `C:\Apps\unifi-flinchbot`. Avoid running it from inside the ZIP or from Downloads.
-- **Git** (if you use it): `git clone https://github.com/flinchbot/ui-tool-claude.git`
+- **Git** (if you use it): `git clone https://github.com/flinchbot/ui-tool-flinchbot.git`
 
 The folder is self-contained, so you can move it or copy it to another PC later.
 
@@ -132,6 +132,7 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 ## 7. Everyday use
 
 - **Ask questions** in the chat, or click a quick prompt such as *Health check*.
+- **📎 Attach text files:** click 📎 (or drag files onto the message box) to give the AI a log, config export, CSV and so on alongside your question. Up to 5 files and 150,000 characters per message; pictures, PDFs and other non-text files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until **Clear chat** or closing the app. It goes to the AI exactly as is, so remove passwords first. Big files make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.
 - **Changes:** when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it.
 - **Another network:** click the connection name at the top → **Add a connection…**. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.
 - **⚙ Settings:**
@@ -172,7 +173,7 @@ If Credential Manager isn't available, passwords fall back to `data\secrets.json
 
 **What leaves this PC:**
 - When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
-- Wi-Fi passwords and other secret fields are **removed first**.
+- Wi-Fi passwords and other secret fields are **removed first**. (Files you attach are sent as they are; that removal only applies to data the app reads from UniFi.)
 - ChatGPT requests are sent with OpenAI's "don't store" option.
 - Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the PC). Only the font request goes out; no network data does.
 - Nothing is sent anywhere else, and the app can't be reached from other computers.

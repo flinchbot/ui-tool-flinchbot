@@ -35,7 +35,7 @@ from providers import PROVIDERS, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -565,7 +565,7 @@ def r_network(_):
 
 
 def r_chat(b):
-    return agent.chat(str(b.get("message", "")))
+    return agent.chat(str(b.get("message", "")), b.get("files"))
 
 
 def r_decide(b):

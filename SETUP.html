@@ -183,7 +183,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <p>Use either of these:</p>
 <ul>
 <li><strong>Download:</strong> on the GitHub page click <strong>Code → Download ZIP</strong>, then unzip it somewhere permanent, e.g. <code>C:\Apps\unifi-flinchbot</code>. Avoid running it from inside the ZIP or from Downloads.</li>
-<li><strong>Git</strong> (if you use it): <code>git clone https://github.com/flinchbot/ui-tool-claude.git</code></li>
+<li><strong>Git</strong> (if you use it): <code>git clone https://github.com/flinchbot/ui-tool-flinchbot.git</code></li>
 </ul>
 <p>The folder is self-contained, so you can move it or copy it to another PC later.</p>
 <h2 id="s-6-start-it">6. Start it</h2>
@@ -225,6 +225,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <h2 id="s-7-everyday-use">7. Everyday use</h2>
 <ul>
 <li><strong>Ask questions</strong> in the chat, or click a quick prompt such as <em>Health check</em>.</li>
+<li><strong>📎 Attach text files:</strong> click 📎 (or drag files onto the message box) to give the AI a log, config export, CSV and so on alongside your question. Up to 5 files and 150,000 characters per message; pictures, PDFs and other non-text files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until <strong>Clear chat</strong> or closing the app. It goes to the AI exactly as is, so remove passwords first. Big files make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.</li>
 <li><strong>Changes:</strong> when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click <strong>Approve</strong>. <strong>Deny</strong> cancels it.</li>
 <li><strong>Another network:</strong> click the connection name at the top → <strong>Add a connection…</strong>. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.</li>
 <li>
@@ -287,7 +288,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <p><strong>What leaves this PC:</strong></p>
 <ul>
 <li>When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.</li>
-<li>Wi-Fi passwords and other secret fields are <strong>removed first</strong>.</li>
+<li>Wi-Fi passwords and other secret fields are <strong>removed first</strong>. (Files you attach are sent as they are; that removal only applies to data the app reads from UniFi.)</li>
 <li>ChatGPT requests are sent with OpenAI's "don't store" option.</li>
 <li>Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the PC). Only the font request goes out; no network data does.</li>
 <li>Nothing is sent anywhere else, and the app can't be reached from other computers.</li>

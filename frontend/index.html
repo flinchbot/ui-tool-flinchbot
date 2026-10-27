@@ -161,6 +161,22 @@
                color:var(--muted); cursor:pointer; }
   .quick-btn:hover { border-color:var(--accent2); color:var(--accent2); }
   .input-row { display:flex; gap:10px; }
+  .attach-btn { width:44px; height:44px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg);
+                color:var(--muted); cursor:pointer; font-size:1.125rem; align-self:flex-end; flex:none; }
+  .attach-btn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .attach-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .attachments { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+  .attachments:empty { display:none; }
+  .att-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; padding:4px 6px 4px 10px; border-radius:var(--pill);
+              border:1px solid var(--border); background:var(--surface2); font-size:0.75rem; color:var(--text); }
+  .att-chip .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:260px; }
+  .att-chip .sz { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
+  .att-chip button { background:none; border:0; color:var(--muted); cursor:pointer; font-size:0.875rem; padding:0 4px; }
+  .att-chip button:hover { color:var(--danger); }
+  .att-note { font-size:0.6875rem; color:var(--muted); width:100%; }
+  .msg-files { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; white-space:normal; }
+  .msg-files .att-chip { padding-right:10px; }
+  .chat-input-area.drag { outline:2px dashed var(--accent); outline-offset:-6px; }
   .chat-input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; color:var(--text);
                 font-family:var(--font-ui); font-size:0.875rem; outline:none; resize:none; line-height:1.5; }
   .chat-input:focus { border-color:var(--accent); }
@@ -295,7 +311,11 @@
       </div>
       <div class="chat-input-area">
         <div class="quick-prompts" id="quickPrompts"></div>
+        <div class="attachments" id="attachments"></div>
         <div class="input-row">
+          <button class="attach-btn" id="attachBtn" title="Attach text files (logs, configs, exports). Read by the AI, never saved." aria-label="Attach text files">📎</button>
+          <input type="file" id="fileInput" multiple hidden
+                 accept=".txt,.log,.csv,.tsv,.json,.md,.conf,.cfg,.ini,.yaml,.yml,.xml,.toml,.sh,.ps1,.bat,.py,.js,.html,.rsc,.cap,text/*">
           <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about your network…"></textarea>
           <button class="send-btn" id="sendBtn" title="Send">➤</button>
         </div>
@@ -479,9 +499,13 @@ let transcript = [];
 
 function addMessage(role, text, opts = {}) {
   clearEmpty();
-  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text, at: new Date(), ai: aiName() });
+  const files = opts.files || [];
+  const recorded = files.length ? `${text}\n\n📎 Attached: ${files.map(f => `${f.name} (${fmtSize(f.size)})`).join(', ')}` : text;
+  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text: recorded, at: new Date(), ai: aiName() });
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
+  if (files.length) bubble.append(h('div', { class: 'msg-files' },
+    ...files.map(f => h('span', { class: 'att-chip', title: f.name }, '📎 ', h('span', { class: 'n' }, f.name), h('span', { class: 'sz' }, fmtSize(f.size))))));
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
     h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : botAvatar())),
     h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, role === 'user' ? 'You' : (opts.error ? 'Error' : BOT_NAME)), bubble));
@@ -526,37 +550,74 @@ function showTyping() {
 }
 
 async function runChat(path, body) {
-  busy = true; $('sendBtn').disabled = true; showTyping();
+  busy = true; $('sendBtn').disabled = $('attachBtn').disabled = true; showTyping();
+  let ok = false;
   try {
     const d = await api('POST', path, body);
     $('typing')?.remove();
     if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
     if (d.pending && d.pending.length) addApproval(d.pending);
     if (path.endsWith('decide')) refreshNetwork();
+    ok = true;
   } catch (e) {
     $('typing')?.remove();
     addMessage('assistant', e.message, { error: true, plain: true });
   } finally {
-    busy = false; $('sendBtn').disabled = false; $('chatInput').focus();
+    busy = false; $('sendBtn').disabled = $('attachBtn').disabled = false; $('chatInput').focus();
   }
+  return ok;
 }
 
 async function sendMessage() {
-  const input = $('chatInput'); const text = input.value.trim();
-  if (!text || busy) return;
+  const input = $('chatInput'); let text = input.value.trim();
+  if ((!text && !attached.length) || busy) return;
   if (!status || !status.configured) { openSettings(); return; }
   if (!status.active) { openConnections(null, true); return; }
+  const files = attached; attached = []; renderAttachments();
+  if (!text) text = files.length > 1 ? 'Please review the attached files.' : 'Please review the attached file.';
   input.value = ''; autoResize(input);
   document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
   transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
-  addMessage('user', text);
-  await runChat('/api/chat', { message: text });
+  addMessage('user', text, { files });
+  const ok = await runChat('/api/chat', { message: text, files: files.map(f => ({ name: f.name, text: f.text })) });
+  if (!ok && files.length && !attached.length) { attached = files; renderAttachments('The message failed, so the files are still attached. Send again when ready.'); }
+}
+
+// ── Text attachments ─────────────────────────────────────────────────────────
+// Read in the browser and sent with the message. Nothing is uploaded to a folder or written to disk.
+const MAX_FILES = 5, MAX_FILE_CHARS = 150000;
+var attached = [];   // var: clearChatView may run before this line during start-up
+function fmtSize(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
+function attachNote(msg) { const a = $('attachments'); a.querySelector('.att-note')?.remove(); if (msg) a.append(h('div', { class: 'att-note' }, msg)); }
+function renderAttachments(note) {
+  const box = $('attachments');
+  box.replaceChildren(...attached.map((f, i) => h('span', { class: 'att-chip', title: `${f.name} · ${f.text.length.toLocaleString()} characters` },
+    '📎 ', h('span', { class: 'n' }, f.name), h('span', { class: 'sz' }, fmtSize(f.size)),
+    h('button', { title: 'Remove', 'aria-label': `Remove ${f.name}`, onclick: () => { attached.splice(i, 1); renderAttachments(); } }, '✕'))));
+  if (attached.length) attachNote(note || 'Sent to the AI exactly as is, so remove any passwords first. Kept only in this chat (never saved); Clear chat discards it.');
+  else if (note) attachNote(note);
+}
+async function addFiles(list) {
+  const problems = [];
+  for (const file of Array.from(list || [])) {
+    if (attached.length >= MAX_FILES) { problems.push(`only ${MAX_FILES} files per message`); break; }
+    if (file.size > MAX_FILE_CHARS * 4) { problems.push(`${file.name} is too big`); continue; }
+    let text;
+    try { text = await file.text(); } catch { problems.push(`couldn't read ${file.name}`); continue; }
+    const bad = (text.match(/\uFFFD/g) || []).length;
+    if (text.includes('\0') || bad > Math.max(8, text.length / 200)) { problems.push(`${file.name} isn't a text file`); continue; }
+    const used = attached.reduce((n, f) => n + f.text.length, 0);
+    if (used + text.length > MAX_FILE_CHARS) { problems.push(`${file.name} would go over ${MAX_FILE_CHARS.toLocaleString()} characters for one message`); continue; }
+    attached.push({ name: file.name, size: file.size, text });
+  }
+  renderAttachments(problems.length ? `Not attached: ${problems.join('; ')}.` : null);
+  $('chatInput').focus();
 }
 function sendQuick(msg) { $('chatInput').value = msg; sendMessage(); }
 function autoResize(el) { el.style.height = ''; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
 
 function clearChatView(note) {
-  transcript = [];
+  transcript = []; attached = []; renderAttachments();
   $('messages').replaceChildren(h('div', { class: 'empty-state' }, h('div', { class: 'icon' }, '🛜'),
     h('p', {}, note || 'Chat cleared. Ask me anything about your UniFi network.')));
 }
@@ -1228,6 +1289,16 @@ const QUICK = [
 ];
 $('quickPrompts').append(...QUICK.map(([l, m]) => h('button', { class: 'quick-btn', onclick: () => sendQuick(m) }, l)));
 $('sendBtn').addEventListener('click', sendMessage);
+$('attachBtn').addEventListener('click', () => { if (!busy) $('fileInput').click(); });
+$('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+(() => {
+  const area = document.querySelector('.chat-input-area'); let depth = 0;
+  const hasFiles = e => Array.from(e.dataTransfer?.types || []).includes('Files');
+  area.addEventListener('dragenter', e => { if (hasFiles(e)) { depth++; area.classList.add('drag'); } });
+  area.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; area.classList.remove('drag'); } });
+  area.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  area.addEventListener('drop', e => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; area.classList.remove('drag'); if (!busy) addFiles(e.dataTransfer.files); });
+})();
 $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 $('chatInput').addEventListener('input', e => autoResize(e.target));
 $('connBtn').addEventListener('click', e => { e.stopPropagation(); toggleConnMenu(); });

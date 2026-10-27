@@ -74,7 +74,9 @@ html[data-theme="matrix"] .msg-bubble { background:transparent !important; borde
 html[data-theme="matrix"] .msg.user .msg-bubble { border-left-color:var(--accent2) !important; }
 html[data-theme="matrix"] .approval { border:1px dashed var(--warn) !important; border-left:2px solid var(--warn) !important; padding:10px 14px !important; }
 html[data-theme="matrix"] .input-row::before { content:">"; align-self:center; color:var(--accent); font-family:var(--font-head); font-size:2rem; line-height:1; }
-html[data-theme="matrix"] .chat-input { background:transparent; border-color:var(--border); }
+html[data-theme="matrix"] .chat-input, html[data-theme="matrix"] .attach-btn { background:transparent; border-color:var(--border); }
+html[data-theme="matrix"] .att-chip { border-radius:0; background:transparent; }
+html[data-theme="matrix"] .attach-btn { order:2; } html[data-theme="matrix"] .send-btn { order:3; }
 html[data-theme="matrix"] .btn.primary, html[data-theme="matrix"] .send-btn { color:var(--on-accent); }
 html[data-theme="matrix"][data-mode="dark"] body { text-shadow:0 0 6px rgba(0,255,65,.35); }
 html[data-theme="matrix"][data-mode="dark"] .app::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:100;
@@ -135,12 +137,12 @@ html[data-theme="win95"] .device-item:hover .device-meta { color:var(--title-tex
 html[data-theme="win95"] .chat-toolbar, html[data-theme="win95"] .chat-input-area { background:var(--surface); border:0; }
 html[data-theme="win95"] .chat-toolbar h2 { font-size:1rem; font-weight:bold; }
 /* buttons: raised bevel, pressed when active */
-html[data-theme="win95"] .btn, html[data-theme="win95"] .quick-btn, html[data-theme="win95"] .send-btn,
+html[data-theme="win95"] .btn, html[data-theme="win95"] .quick-btn, html[data-theme="win95"] .send-btn, html[data-theme="win95"] .attach-btn,
 html[data-theme="win95"] .seg button, html[data-theme="win95"] .x, html[data-theme="win95"] .logo-btn,
 html[data-theme="win95"] .menu-item, html[data-theme="win95"] .pw-wrap button {
   background:var(--surface); color:var(--text); border:2px solid; border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi);
   box-shadow:inset -1px -1px var(--b-shade),inset 1px 1px var(--b-light); border-radius:0; font-weight:normal; opacity:1; }
-html[data-theme="win95"] .btn:active, html[data-theme="win95"] .quick-btn:active, html[data-theme="win95"] .send-btn:active,
+html[data-theme="win95"] .btn:active, html[data-theme="win95"] .quick-btn:active, html[data-theme="win95"] .send-btn:active, html[data-theme="win95"] .attach-btn:active,
 html[data-theme="win95"] .seg button.on, html[data-theme="win95"] .logo-btn:active {
   border-color:var(--b-lo) var(--b-hi) var(--b-hi) var(--b-lo); box-shadow:inset 1px 1px var(--b-shade); }
 html[data-theme="win95"] .btn:hover:not(:disabled), html[data-theme="win95"] .quick-btn:hover { color:var(--text); border-color:var(--b-hi) var(--b-lo) var(--b-lo) var(--b-hi); }
@@ -149,7 +151,9 @@ html[data-theme="win95"] .btn.primary:hover:not(:disabled) { color:var(--text); 
 html[data-theme="win95"] .btn:disabled { color:var(--b-shade); text-shadow:1px 1px var(--b-hi); }
 html[data-theme="win95"] .seg button.on { color:var(--text); background:var(--b-light); }
 html[data-theme="win95"][data-mode="dark"] .seg button.on { color:var(--on-accent); background:var(--accent); }
-html[data-theme="win95"] .send-btn { width:auto; padding:0 14px; height:auto; }
+html[data-theme="win95"] .send-btn { width:auto; padding:0 14px; height:auto; align-self:stretch; }
+html[data-theme="win95"] .attach-btn { width:auto; padding:0 10px; height:auto; align-self:stretch; }
+html[data-theme="win95"] .att-chip { border-radius:0; background:var(--surface); border:1px solid var(--b-lo); }
 html[data-theme="win95"] .pw-wrap button { padding:1px 6px; }
 /* chat bubbles: assistant = tooltip yellow, user = plain */
 html[data-theme="win95"] .msg-avatar { border-radius:0; }
@@ -319,7 +323,7 @@ html[data-theme="bladerunner"] .sidebar-section h3, html[data-theme="bladerunner
 html[data-theme="bladerunner"] .logo h1 { font-size:1.05rem; font-weight:600; }
 html[data-theme="bladerunner"][data-mode="dark"] .logo h1 { text-shadow:0 0 8px rgba(255,47,179,.7),0 0 18px rgba(34,227,255,.35); }
 html[data-theme="bladerunner"] .msg-bubble, html[data-theme="bladerunner"] .stat-card, html[data-theme="bladerunner"] .modal,
-html[data-theme="bladerunner"] .btn.primary, html[data-theme="bladerunner"] .send-btn, html[data-theme="bladerunner"] .rep-item {
+html[data-theme="bladerunner"] .btn.primary, html[data-theme="bladerunner"] .send-btn, html[data-theme="bladerunner"] .attach-btn, html[data-theme="bladerunner"] .rep-item {
   clip-path:polygon(0 0,calc(100% - 12px) 0,100% 12px,100% 100%,12px 100%,0 calc(100% - 12px)); }
 html[data-theme="bladerunner"] .msg.assistant .msg-bubble { border-left:2px solid var(--accent2); }
 html[data-theme="bladerunner"] .msg.user .msg-bubble { border-right:2px solid var(--accent); }

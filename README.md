@@ -23,6 +23,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
 - **Action report:** a read-only review of the whole network, turned into a prioritised checklist (critical → low).
   - Download as an HTML page where ticks are saved, with progress, "hide done" and print/PDF.
   - Or download as Markdown with `- [ ]` task lists.
+- **Text attachments:** attach logs, configs or CSVs to a question (📎 or drag-and-drop; 5 files / 150,000 characters per message). Read in the browser and kept only in the in-memory conversation; never written to disk. Binary files are refused.
 - **Chat export** to Markdown or HTML.
 - **Themes:** Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner and Candle Maker. Each is a full re-skin (colours, fonts, text size, layout) with light and dark versions; the choice is saved per browser, and moving backgrounds respect reduced-motion. Fonts come from Google Fonts on first use.
 - **Locked to this PC:**
@@ -65,11 +66,11 @@ Not committed (see `.gitignore`):
 
 ## Known limitations
 
-- **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it (e.g. to `unifi-flinchbot`) in GitHub settings is safe; GitHub redirects the old URL.
 - **Unofficial UniFi API.** Most calls use the private Network API that the UniFi web UI itself uses. Ubiquiti can change it between versions. `probe_events.py` shows which endpoints a given console answers.
 - **Legacy firewall rules.** `create_firewall_rule` writes classic `LAN_IN` rules. On consoles using Zone-Based Firewall they may not apply.
 - **UniFi API keys.** Not every UniFi version accepts them on the private endpoints. The sign-in check when saving a connection reports this.
 - **Server-side chat history.** The conversation lives in the running app (one per app instance), not per browser tab.
+- **Attachments aren't redacted.** Secret-field removal applies to UniFi data, not to files you attach.
 
 ## Editing the docs
 
