@@ -65,7 +65,6 @@ Not committed (see `.gitignore`):
 
 - **ChatGPT support is new.** It's built on OpenAI's documented Responses API and tested against a simulated API, but hasn't yet been run against the live OpenAI API.
 - **Repo name.** The GitHub repo is still `ui-tool-claude`. Renaming it (e.g. to `unifi-flinchbot`) in GitHub settings is safe; GitHub redirects the old URL.
-
 - **Unofficial UniFi API.** Most calls use the private Network API that the UniFi web UI itself uses. Ubiquiti can change it between versions. `probe_events.py` shows which endpoints a given console answers.
 - **Legacy firewall rules.** `create_firewall_rule` writes classic `LAN_IN` rules. On consoles using Zone-Based Firewall they may not apply.
 - **UniFi API keys.** Not every UniFi version accepts them on the private endpoints. The Test button reports this.
