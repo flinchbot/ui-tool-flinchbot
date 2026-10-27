@@ -17,10 +17,15 @@ import json
 import os
 import re
 import threading
+import uuid
 from datetime import datetime
 
 from providers import get_provider
 
+import detective
+import nmap_scan
+import portmap
+import scorecard
 from rollback import is_secret_key, mask
 from ssh_client import SSHError, is_read_only
 from topology import build_model
@@ -64,6 +69,9 @@ READ_TOOLS = [
     ("get_dpi_stats",       "Deep Packet Inspection traffic stats per client (if DPI is enabled).", _EMPTY),
     ("get_routing",         "Static routes.", _EMPTY),
     ("get_topology",        "The network as a tree: which UniFi device is plugged into which (with port numbers), plus ONLY the clients that currently have a problem (weak signal, high Wi-Fi retries, low satisfaction, switch-port errors, flapping in the last 24 h) under the device they are on. Best first call for 'what is wrong?' questions.", _EMPTY),
+    ("get_port_map",        "Every switch port on every UniFi switch/gateway: link speed, PoE watts, errors, port name/profile, and what is plugged in (UniFi devices, LLDP neighbours, wired clients with name/IP/MAC). Use for 'what is on port 5', cabling, PoE or port-error questions.", _EMPTY),
+    ("get_unknown_clients", "Clients that have no name or appeared in the last 7 days, with every clue to what they are: UniFi's fingerprint guess, MAC maker, private/random MAC, hostname pattern, where connected. Use to identify devices; then propose names with set_client_name.", _EMPTY),
+    ("get_security_scorecard", "Rule-based security review of the configuration (Wi-Fi security, firmware, UPnP, IPS, port forwards, broad firewall policies, IoT segmentation) with a 0-100 score. Read-only.", _EMPTY),
     ("get_device",          "Full detail for one device by MAC (ports, radios, uplink, temps).", _MAC),
     ("get_client",          "Full detail for one client by MAC.", _MAC),
 ]
@@ -117,6 +125,24 @@ WRITE_TOOLS = [
         "type": "object", "properties": {"pf_id": {"type": "string"}}, "required": ["pf_id"]}),
     ("clear_alerts",         "Archive all active alarms (legacy alarm system; may have no effect on UniFi Network 9.x+ where alerts are system-log entries).", _EMPTY),
     ("speedtest",            "Start a WAN speed test on the gateway.", _EMPTY),
+    ("set_switch_port",      "Change one switch port: its name, PoE mode, or turn it off/on. Other ports are left as they are. Undo is available.", {
+        "type": "object", "properties": {
+            "mac": {"type": "string", "description": "The switch's MAC"},
+            "port_idx": {"type": "integer", "description": "Port number"},
+            "name": {"type": "string", "description": "New port name (optional)"},
+            "poe_mode": {"type": "string", "enum": ["auto", "off", "pasv24", "passthrough"], "description": "PoE mode (optional)"},
+            "enabled": {"type": "boolean", "description": "false turns the port off, true back on (optional)"}},
+        "required": ["mac", "port_idx"]}),
+    ("power_cycle_port",     "Cut and restore PoE power on one switch port, to reboot a stuck camera, AP or phone powered by it.", {
+        "type": "object", "properties": {"mac": {"type": "string", "description": "The switch's MAC"},
+                                         "port_idx": {"type": "integer"}}, "required": ["mac", "port_idx"]}),
+    ("set_client_name",      "Give a client (by MAC) a name, and optionally a note, in UniFi. Undo is available.", {
+        "type": "object", "properties": {"mac": {"type": "string"}, "name": {"type": "string"},
+                                         "note": {"type": "string", "description": "Optional note, e.g. what identified it"}},
+        "required": ["mac", "name"]}),
+    ("scan_client",          "Scan one LAN client with Nmap (TCP connect scan of its 200 most common ports, with service versions) to help identify it or check what it exposes. Only clients the console knows, only private addresses. Needs approval because it actively probes the device.", {
+        "type": "object", "properties": {"mac": {"type": "string", "description": "The client's MAC (its current IP is looked up)"}},
+        "required": ["mac"]}),
 ]
 
 WRITE_NAMES = {name for name, _, _ in WRITE_TOOLS}
@@ -178,6 +204,9 @@ def _executors():
         "get_dpi_stats":        lambda c, i: c.get_dpi_stats(),
         "get_routing":          lambda c, i: c.get_routing(),
         "get_topology":         lambda c, i: _topology(c),
+        "get_port_map":         lambda c, i: portmap.summary_for_ai(portmap.build(c.get_devices(), c.get_clients(), _safe(c.get_networks))),
+        "get_unknown_clients":  lambda c, i: _unknown_clients(c),
+        "get_security_scorecard": lambda c, i: _scorecard(c),
         "get_device":           lambda c, i: c.get_device(i["mac"]),
         "get_client":           lambda c, i: c.get_client(i["mac"]),
         "restart_device":       lambda c, i: c.restart_device(i["mac"]),
@@ -205,7 +234,85 @@ def _executors():
         "delete_port_forward":  lambda c, i: c.delete_port_forward(i["pf_id"]),
         "clear_alerts":         lambda c, i: c.clear_alerts(),
         "speedtest":            lambda c, i: c.speedtest(),
+        "set_switch_port":      lambda c, i: c.set_port_override(i["mac"], _port(i), _port_changes(i)),
+        "power_cycle_port":     lambda c, i: c.power_cycle_port(i["mac"], _port(i)),
+        "set_client_name":      lambda c, i: c.set_client_name(i["mac"], _clip_name(i["name"]), i.get("note")),
+        "scan_client":          lambda c, i: _scan_client(c, i["mac"]),
     }
+
+
+def _safe(fn):
+    """Optional data: an older console that lacks an endpoint shouldn't break the tool."""
+    try:
+        return fn()
+    except UniFiError:
+        return []
+
+
+def _port(i):
+    try:
+        n = int(i["port_idx"])
+    except (TypeError, ValueError):
+        raise ToolInputError("port_idx must be a port number")
+    if not 1 <= n <= 128:
+        raise ToolInputError("port_idx is out of range")
+    return n
+
+
+def _port_changes(i):
+    ch = {}
+    if i.get("name") is not None:
+        ch["name"] = _clip_name(i["name"])
+    if i.get("poe_mode") is not None:
+        if i["poe_mode"] not in ("auto", "off", "pasv24", "passthrough"):
+            raise ToolInputError("poe_mode must be auto, off, pasv24 or passthrough")
+        ch["poe_mode"] = i["poe_mode"]
+    if i.get("enabled") is not None:
+        ch["forward"] = "all" if i["enabled"] else "disabled"
+    if not ch:
+        raise ToolInputError("Nothing to change: give name, poe_mode or enabled")
+    return ch
+
+
+def _clip_name(v):
+    v = str(v or "").strip()
+    if not v or len(v) > 64 or any(ch in v for ch in "\r\n\t"):
+        raise ToolInputError("A name must be 1-64 characters on one line")
+    return v
+
+
+def _unknown_clients(c):
+    users = _safe(lambda: c._data(c.get(c.api("rest/user"))))
+    v2 = _safe(lambda: c.get(c.v2("clients/active")))
+    cands = detective.candidates(c.get_clients(), v2 if isinstance(v2, list) else [], users)
+    return {"total": len(cands), "nmap": nmap_scan.info()["installed"], "clients": cands[:80],
+            "note": "Sorted most mysterious first. Private (random) MACs are phones/tablets/laptops; ask the user."}
+
+
+def scorecard_data(c):
+    g = lambda path: _safe(lambda: c._data(c.get(c.api(path))))
+    v2 = lambda path: _safe(lambda: c.get(c.v2(path)))
+    return {"wlans": c.get_wlans(), "networks": _safe(c.get_networks), "devices": c.get_devices(),
+            "clients": c.get_clients(), "settings": g("rest/setting"), "port_forwards": _safe(c.get_port_forwards),
+            "policies": v2("firewall-policies"), "zones": v2("firewall/zone")}
+
+
+def _scorecard(c):
+    findings, passed = scorecard.check(scorecard_data(c))
+    findings = scorecard.sort(findings)
+    return dict(scorecard.grade(findings), findings=[{k: v for k, v in f.items() if k != "ask"} for f in findings],
+                passed=passed)
+
+
+def _scan_client(c, mac):
+    cl = next((x for x in c.get_clients() if (x.get("mac") or "").lower() == mac), None)
+    if not cl or not cl.get("ip"):
+        raise UniFiError(f"{mac} isn't connected right now (or has no IP), so it can't be scanned.", "input")
+    try:
+        res = nmap_scan.identify(cl["ip"])
+    except nmap_scan.ScanError as e:
+        raise UniFiError(str(e), "scan")
+    return dict(res, client=cl.get("name") or cl.get("hostname") or mac)
 
 
 def _topology(c):
@@ -392,6 +499,8 @@ _LABELS = {
     "create_firewall_rule": "Create firewall rule", "delete_firewall_rule": "DELETE firewall rule",
     "create_port_forward": "Create port forward", "delete_port_forward": "DELETE port forward",
     "clear_alerts": "Archive all alerts", "speedtest": "Run a WAN speed test",
+    "set_switch_port": "Change switch port settings", "power_cycle_port": "Power-cycle (PoE) a switch port",
+    "set_client_name": "Name a client", "scan_client": "Scan a device with Nmap",
     SSH_TOOL_NAME: "Run a command on the console over SSH",
 }
 
@@ -409,13 +518,16 @@ class Agent:
     """Provider-neutral tool loop. The provider (Claude or ChatGPT) only formats
     requests and history; approvals, redaction, paging and limits live here."""
 
-    def __init__(self, get_client, get_settings, get_context, get_ssh=None, changes=None, get_wan=None):
+    def __init__(self, get_client, get_settings, get_context, get_ssh=None, changes=None, get_wan=None,
+                 on_usage=None):
         self._get_client   = get_client      # () -> UniFiClient (raises UniFiError if none)
         self._get_settings = get_settings    # () -> dict(provider, api_key, model, max_rounds, max_tokens)
         self._get_context  = get_context     # () -> dict(name, console, site, ssh_enabled)
         self._get_ssh      = get_ssh         # () -> SSHClient (raises SSHError if off/none)
         self._changes      = changes         # history.ChangeLog: audit log + undo snapshots (optional)
         self._get_wan      = get_wan         # (days) -> WAN history dict (optional)
+        self._on_usage     = on_usage        # (provider, model, usage, kind, chat_id) after every AI call
+        self.chat_id       = uuid.uuid4().hex[:12]   # changes on Clear chat; groups usage per conversation
         self._notes        = []              # app notes for the model, sent with the next user message
         self._last_result  = None            # raw result of the last tool run (for undo of creates)
         self.history = []                    # native items for self._history_provider
@@ -428,6 +540,7 @@ class Agent:
     # public -------------------------------------------------------------------
     def reset(self):
         with self.lock:
+            self.chat_id = uuid.uuid4().hex[:12]
             self.history = []
             self._history_provider = None
             self.pending = None
@@ -543,10 +656,13 @@ class Agent:
         return {"id": tool_id, "content": content, "is_error": bool(is_error)}
 
     def _remember_names(self, name, result):
-        if name not in ("get_devices", "get_clients") or not isinstance(result, dict):
+        if not isinstance(result, dict):
             return
-        for it in result.get("items", []):
-            if it.get("mac"):
+        items = result.get("items") if name in ("get_devices", "get_clients") else \
+            result.get("devices") if name == "get_port_map" else \
+            result.get("clients") if name == "get_unknown_clients" else None
+        for it in items or []:
+            if isinstance(it, dict) and it.get("mac"):
                 self._names[it["mac"].lower()] = it.get("name") or it.get("hostname") or it["mac"]
 
     def _execute(self, tool_id, name, inp):
@@ -595,6 +711,14 @@ class Agent:
             timeout = 60
         return self._get_ssh().run(command, timeout=timeout)
 
+    def _usage(self, settings, turn, kind):
+        if self._on_usage:
+            try:
+                self._on_usage(settings["provider"], settings["model"], getattr(turn, "usage", None) or {}, kind,
+                               self.chat_id)
+            except Exception as e:          # cost tracking must never break the chat
+                print(f"  usage log failed: {e}")
+
     def _tools(self):
         return (TOOLS + ([WAN_TOOL] if self._get_wan else [])
                 + ([SSH_TOOL] if self._get_context().get("ssh_enabled") else []))
@@ -608,6 +732,8 @@ class Agent:
         if inp.get("mac"):
             mac = str(inp["mac"]).lower()
             target = f"{self._names.get(mac, mac)} ({mac})" if mac in self._names else mac
+            if inp.get("port_idx") is not None:
+                target += f", port {inp['port_idx']}"
         return {"id": w["id"], "tool": w["name"], "label": _LABELS.get(w["name"], w["name"]),
                 "target": target, "details": _mask_for_display(inp)}
 
@@ -627,6 +753,9 @@ How to work
 - List tools are paged (total/offset/returned). If "truncated" is true or returned < total,
   page with offset or use search before drawing conclusions about the whole network.
 - Wi-Fi passphrases and other secrets are hidden from you on purpose.
+- Switch ports, cabling, PoE or "what is plugged in where" -> get_port_map. Unknown or new devices ->
+  get_unknown_clients (scan_client runs Nmap on one device, after approval). Security questions ->
+  get_security_scorecard first, then the details.
 {self._ssh_prompt(ctx)}
 Changes
 - Write tools are gated: when you call one, the app shows the user an Approve/Deny card and
@@ -678,6 +807,7 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
         for _ in range(max_rounds):
             self._trim(provider)
             turn = provider.complete(self.history, self._system_prompt(), self._tools(), settings["model"], max_tokens)
+            self._usage(settings, turn, "chat")
             texts += turn.texts
 
             if turn.truncated:
@@ -733,6 +863,7 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
         for _ in range(max(settings.get("max_rounds", 15), 8)):
             turn = provider.complete(history, self._system_prompt() + REPORT_SYSTEM_SUFFIX, tools,
                                      settings["model"], settings.get("max_tokens", 16000))
+            self._usage(settings, turn, "report")
             if turn.truncated:
                 raise AgentError("The report was longer than the output limit. Raise MAX_OUTPUT_TOKENS "
                                  "in .env (max 21000) or pick a larger model, then try again.")

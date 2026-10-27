@@ -27,15 +27,32 @@ ROLLBACK_TOOLS = {
     "delete_wlan":    ("recreate", "wlanconf", "wlan_id"),
     "create_wlan":    ("delete_created", "wlanconf", None),
     "create_network": ("delete_created", "networkconf", None),
+    "set_switch_port": ("port_override", "device", "mac"),
+    "set_client_name": ("client_fields", "user", "mac"),
 }
 # Server-managed fields that must not be sent back when recreating an object.
 _SERVER_FIELDS = {"site_id", "external_id"}
 
 
+# Field-name fragments that mean "this value is a secret". UniFi marks most secrets
+# with an x_ prefix, but not all: a WireGuard VPN client keeps its whole config file,
+# private key included, in wireguard_client_configuration_file, and Wi-Fi private
+# pre-shared keys live in private_preshared_keys.
+_SECRET_PARTS = ("passphrase", "password", "secret", "token", "psk", "private", "preshared",
+                 "configuration_file", "openvpn_configuration", "_keys")
+
+
+# ...and names that look like secrets but aren't: a firewall zone's built-in name,
+# public keys, and file names.
+_NOT_SECRET = ("zone_key", "public_key", "_filename", "publickey")
+
+
 def is_secret_key(k):
     kl = str(k).lower()
+    if any(s in kl for s in _NOT_SECRET) and not kl.startswith("x_"):
+        return False
     return (kl.startswith("x_") or kl.endswith("_key")
-            or any(s in kl for s in ("passphrase", "password", "secret", "token", "psk")))
+            or any(s in kl for s in _SECRET_PARTS))
 
 
 def split_secrets(obj):
@@ -88,6 +105,17 @@ def prepare(client, tool, inp):
     if tool not in ROLLBACK_TOOLS:
         return None
     kind, obj_type, id_key = ROLLBACK_TOOLS[tool]
+    if kind == "port_override":
+        d = client.device_record(inp["mac"])
+        idx = int(inp["port_idx"])
+        before = next((dict(o) for o in d.get("port_overrides") or [] if isinstance(o, dict) and o.get("port_idx") == idx), None)
+        return {"kind": kind, "object": obj_type, "mac": inp["mac"], "port_idx": idx,
+                "name": f"{d.get('name') or inp['mac']} port {idx}", "before": before}
+    if kind == "client_fields":
+        u = client.client_record(inp["mac"])
+        return {"kind": kind, "object": obj_type, "mac": inp["mac"], "object_id": u["_id"],
+                "name": u.get("name") or u.get("hostname") or inp["mac"],
+                "before": {"name": u.get("name") or "", "note": u.get("note") or "", "noted": bool(u.get("noted"))}}
     if kind == "delete_created":
         return {"kind": kind, "object": obj_type, "name": inp.get("name")}
     current = client.get_object(obj_type, inp[id_key])
@@ -129,6 +157,10 @@ def forget(record_id):
 def describe(public):
     """One line for the UI: what an undo would do."""
     k, name = public["kind"], public.get("name") or public.get("object_id")
+    if k == "port_override":
+        return f"Put back the previous settings of {name}"
+    if k == "client_fields":
+        return f"Put back the previous name and note of client “{name}”"
     what = "Wi-Fi network" if public["object"] == "wlanconf" else "LAN/VLAN"
     if k == "update":
         fields = ", ".join(sorted(public.get("before", {}))) or "nothing"
@@ -150,6 +182,13 @@ def undo(client, public, record_id, force=False):
     full = join_secrets(public, secrets)
     kind, obj_type, oid = full["kind"], full["object"], full.get("object_id")
     what = "Wi-Fi network" if obj_type == "wlanconf" else "LAN/VLAN"
+
+    if kind == "port_override":
+        client.restore_port_override(full["mac"], full["port_idx"], full.get("before"))
+        return {"ok": True, "detail": f"Put back the previous settings of {full.get('name')}."}
+    if kind == "client_fields":
+        client.update_client(oid, full["before"])
+        return {"ok": True, "detail": f"Put back the previous name of client “{full['before'].get('name') or full.get('mac')}”."}
 
     if kind == "update":
         try:

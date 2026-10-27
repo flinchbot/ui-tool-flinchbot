@@ -6,3 +6,5 @@ keyring>=25
 openai>=3.0,<4
 # SSH to the console (optional per connection) - tested with 3.5.1.
 paramiko>=3.4,<4
+# Encrypts the passwords kept in factory-reset kit snapshots (also needed by paramiko) - tested with 50.0.2.
+cryptography>=42

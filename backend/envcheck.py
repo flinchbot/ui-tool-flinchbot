@@ -27,7 +27,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 SETUP_HTML = BASE_DIR / "SETUP.html"
 MIN_PYTHON = (3, 10)
-PACKAGES = [("anthropic", True), ("keyring", True), ("paramiko", True), ("openai", False)]
+PACKAGES = [("anthropic", True), ("keyring", True), ("paramiko", True), ("cryptography", True), ("openai", False)]
 AI_HOSTS = ("api.anthropic.com", "api.openai.com")
 MAC_NAMES = {11: "Big Sur", 12: "Monterey", 13: "Ventura", 14: "Sonoma", 15: "Sequoia", 26: "Tahoe"}
 OK, WARN, FAIL = "ok", "warn", "fail"
@@ -182,8 +182,18 @@ def check_internet(timeout=3.0):
                                                 "internet connection works."), None
 
 
+def check_nmap():
+    """Optional: Nmap powers device scans in the device detective and the security scorecard."""
+    import nmap_scan                    # stdlib only, next to this file
+    path = nmap_scan.find()
+    if path:
+        return OK, f"found ({path})", None, None
+    return OK, "not installed (optional: lets the app scan devices; get it from nmap.org)", None, None
+
+
 CHECKS = [("Computer", check_os), ("Python", check_python), ("Packages", check_packages),
-          ("Passwords", check_password_store), ("Folder", check_folder), ("Internet", check_internet)]
+          ("Passwords", check_password_store), ("Folder", check_folder), ("Internet", check_internet),
+          ("Nmap", check_nmap)]
 
 
 def run():

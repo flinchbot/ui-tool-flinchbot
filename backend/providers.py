@@ -28,11 +28,21 @@ except ImportError:          # the app still works with Claude only
 
 
 class Turn:
-    def __init__(self, texts, calls, truncated, items):
+    def __init__(self, texts, calls, truncated, items, usage=None):
         self.texts = texts            # list[str] - visible text from the model
         self.calls = calls            # list[{id, name, input}] - input None if unparseable
         self.truncated = truncated    # hit the output-token limit
         self.items = items            # native history items for this assistant turn
+        # tokens billed for this call: {"input", "cache_write", "cache_read", "output"}
+        self.usage = usage or {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+
+
+def _n(obj, name):
+    v = getattr(obj, name, None) if obj is not None else None
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _iso(v):
@@ -73,7 +83,10 @@ class AnthropicProvider:
         blocks = blocks or [{"type": "text", "text": "(no response)"}]
         texts = [b["text"] for b in blocks if b.get("type") == "text" and b.get("text", "").strip()]
         calls = [{"id": b["id"], "name": b["name"], "input": b["input"]} for b in blocks if b.get("type") == "tool_use"]
-        return Turn(texts, calls, resp.stop_reason == "max_tokens", [{"role": "assistant", "content": blocks}])
+        u = getattr(resp, "usage", None)
+        usage = {"input": _n(u, "input_tokens"), "cache_write": _n(u, "cache_creation_input_tokens"),
+                 "cache_read": _n(u, "cache_read_input_tokens"), "output": _n(u, "output_tokens")}
+        return Turn(texts, calls, resp.stop_reason == "max_tokens", [{"role": "assistant", "content": blocks}], usage)
 
     @staticmethod
     def drop_calls(items):
@@ -191,7 +204,11 @@ class OpenAIProvider:
             getattr(details, "reason", None) == "max_output_tokens"
         if not items:
             items = [{"role": "assistant", "content": "(no response)"}]
-        return Turn(texts, calls, truncated, items)
+        u = getattr(resp, "usage", None)
+        cached = _n(getattr(u, "input_tokens_details", None), "cached_tokens")
+        usage = {"input": max(0, _n(u, "input_tokens") - cached), "cache_write": 0, "cache_read": cached,
+                 "output": _n(u, "output_tokens")}          # OpenAI's input_tokens include the cached ones
+        return Turn(texts, calls, truncated, items, usage)
 
     @staticmethod
     def drop_calls(items):

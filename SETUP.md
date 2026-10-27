@@ -191,11 +191,57 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 - **🧾 Changes:** a log of every change made or refused through this app, with who, when, on which console and exactly what. Click an entry for details. **⤓ CSV** opens in Excel or Numbers. The log stays on this computer (`data/audit.jsonl`); passwords are never written to it.
 - **↶ Undo:** after you approve a change to a Wi-Fi network or LAN/VLAN (including deleting a Wi-Fi network or creating a new one), an **↶ Undo** button appears on the approval card and in 🧾 Changes. It puts back exactly what was there before. If someone changed the same setting again in the meantime, the app asks before overwriting it. A deleted Wi-Fi network comes back as a new network with the same settings and password. Other changes (restarts, blocking a client, firewall rules) can't be undone automatically; the log tells you what was done so you can reverse it in UniFi.
 - **💾 Backup:** one click saves a backup of this console's UniFi Network settings to your **Downloads** folder (a `.unf` file named after the network and date). To restore it, open the console in a browser and go to **Settings → System → Backups → Restore** (wording varies by version). It contains your whole network configuration, Wi-Fi passwords included, so keep it somewhere private.
+- **🧰 Tools** (top right) opens the rest:
+  - **🔌 Switch port map:** a drawing of every UniFi switch's ports, like the front panel, coloured by link speed, with PoE watts, the port's uplink, and a list of what is plugged into each port (other UniFi gear, LLDP neighbours, wired clients with name and IP). Ports with errors get an orange outline, or red for 1,000+ errors or half duplex: usually a bad cable or connector. Error counts are since the switch last restarted. **✎** renames a port and **⏻** power-cycles a PoE port (to reboot a stuck camera or access point); both are logged, and a rename can be undone.
+  - **🕵 Device detective:** every client without a name, and anything that joined in the last 7 days, most mysterious first, with every clue: UniFi's own fingerprint guess, the maker from the MAC address, a *private MAC* badge (phones, tablets and laptops make up an address per Wi-Fi network, so the maker is hidden), and what the hostname suggests. **✎ Name** names it in UniFi (with Undo). **🔍 Scan** runs an Nmap scan of that one device (see [Nmap](#nmap)) to see what it runs. **💬 Ask** hands it to flinchbot to work out.
+  - **🛡 Security scorecard:** a grade from A to F, worked out by fixed rules from your console's settings (no AI): open or weak Wi-Fi, short Wi-Fi passwords, firmware waiting, UPnP, intrusion prevention, port forwards to risky services, firewall policies that let the internet in or give one network full access to another, smart-home devices on the main network. Each finding says why it matters and how to fix it in UniFi; **💬 Fix with flinchbot** asks the AI to propose the change, which you approve as usual. With Nmap installed, **🔍 Scan devices for risky ports** checks every connected device for telnet, file sharing, remote desktop, VNC, unencrypted smart-home messaging and the like. It takes a few minutes, and some devices or the gateway's intrusion prevention may log it as a port scan.
+  - **📘 Network handbook:** one web page documenting the whole network: networks and VLANs with DHCP ranges, Wi-Fi, every device with firmware and uplink, the topology, every switch port, firewall policies, port forwards, routes, VPNs, named clients and fixed IPs. It downloads and opens in a new tab; **Print → Save as PDF** makes a PDF. Wi-Fi passwords are left out unless you tick the box.
+  - **♻ Factory-reset kit:** see [Before a factory reset](#reset-kit).
+  - **💰 AI usage and cost:** see below.
+- **💰 Cost meter** (above the chat): tokens used and the estimated cost of this conversation. Click it for today, the last 7 days and this month, per model, with an optional monthly budget that turns the meter orange at 80% and red when it's reached (a warning only; nothing is blocked). Token counts are exact, because every AI response reports them. Dollars are an estimate: tokens × the published price per million tokens. Neither Anthropic nor OpenAI offers a price feed, so the app uses, in order: a price you type in (✎), LiteLLM's public price list (**↻ Update prices** downloads it from GitHub; it covers Claude and GPT models), or Claude prices copied from Anthropic's pricing page. Your provider's invoice is the final word.
 - **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
 - **🎨 Theme:** pick a look: Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner or Candle Maker. Each one changes colours, fonts, text size and screen layout, and each has a light and a dark version (or *Auto*, which follows the Windows or macOS setting). The choice is remembered in that browser. If animations are turned off in Windows or reduced in macOS, the moving backgrounds stay still. The movie and show themes are fan-inspired: colours and moods only, no logos or characters.
 - **About:** click the robot logo for the version, the AI in use, and this guide.
 
-## 8. Updating the app
+<a id="reset-kit"></a>
+
+## 8. Before a factory reset
+
+**🧰 Tools → ♻ Factory-reset kit** keeps a copy of everything you set up, shows how it differs from a fresh console, and writes SSH commands that put back whichever parts you want, one at a time.
+
+1. **Before the reset:**
+   1. Click **📸 Take a snapshot**. It reads the console's whole configuration (nothing is changed): networks and VLANs with DHCP pools, WANs, VPN clients and servers, firewall zones and policies, port forwards, routes and policy-based routes, DNS records, Wi-Fi networks, client names and fixed IPs, device names and port settings, scheduled tasks and every settings page.
+   2. Also click **💾 Backup** for a full UniFi backup as a safety net.
+   3. Open the snapshot to see the list: **added** (things you created), **changed** (built-in things you changed, such as the main LAN's address), and **built-in** sections with their current values. Built-in sections are unticked, because the app can't know a fresh console's values until it sees one.
+2. **Reset the console** and set it up again in UniFi.
+3. **After the reset:**
+   1. Create a local admin (step 3) and turn SSH on (step 4).
+   2. Fix this app's connection: new address if it changed, the new password, and **Trust the new certificate** when asked.
+   3. Open the snapshot again and tick **Compare with … now**. The list shrinks to exactly what is missing or different.
+   4. Tick what you want back and click **⤓ SSH script (.sh)**.
+4. **Run the commands:**
+   1. `ssh root@<console address>` (the SSH password from step 4).
+   2. Paste the **SETUP** block first, all at once. It asks for the local admin's username and password and signs in to the console's own API.
+   3. Then paste the commands you want, top to bottom. Each one has a comment saying what it does and what it needs first (for example, a Wi-Fi network needs its VLAN). Blocks that must run together say **RUN TOGETHER**. Each prints **OK**, or **FAILED** with the console's reason.
+   4. Paste a command that asks for a password or key **on its own**: anything pasted after it would be taken as the answer. A WireGuard config is pasted whole, followed by a line with just `END`. **🔑 Show passwords** in the app shows each one with a Copy button.
+   5. Adopt your UniFi devices before the *devices* section.
+   6. The **RUN LAST** section changes the console's own LAN address (if you had changed it), so your SSH session drops there. Reconnect at the new address.
+
+Passwords, Wi-Fi keys and VPN private keys in a snapshot are encrypted on disk; the key is kept in Credential Manager or the Keychain. The script asks for them while it runs, unless you choose **Write them into the script file**. In that case the file holds them in plain text, so delete it when you're done. Keys the console makes for itself (device adoption, mesh, its API token) are never written back.
+
+<a id="nmap"></a>
+
+### Nmap (optional)
+
+Nmap lets the device detective and the security scorecard scan devices on your network. It's optional; everything else works without it.
+
+- **Windows:** download the installer from [nmap.org/download](https://nmap.org/download) and accept the Npcap option.
+- **Mac:** download the installer from the same page, or in Terminal: `brew install nmap`.
+- **Linux:** `sudo apt install nmap` (or your distribution's equivalent).
+
+Restart the app afterwards; the startup check shows **Nmap found**. The app only ever runs basic TCP connect scans (no administrator rights needed), only on private LAN addresses that the console knows as clients, and only when you click a scan button or approve flinchbot's request. Every scan is logged in 🧾 Changes.
+
+## 9. Updating the app
 
 - **Downloaded ZIP:**
   1. Download the new ZIP.
@@ -207,14 +253,16 @@ Your settings, connections and passwords aren't touched by an update. `start.bat
 
 <a id="where-stored"></a>
 
-## 9. Where your information is stored, and what is sent where
+## 10. Where your information is stored, and what is sent where
 
 | What | Where |
 |---|---|
 | AI choice, API key(s), models, port | `.env` file in the app folder |
 | Connection details (name, address, port, site, username, SSH on/off, SSH username and port) | `data\connections.json` |
 | Change log, speed tests this app ran | `data\audit.jsonl`, `data\speedtests.jsonl` |
-| UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
+| AI token use and estimated cost, prices and budget | `data\usage.jsonl`, `data\prices.json` |
+| Factory-reset kit snapshots (passwords in them encrypted) | `data\resetkit\` |
+| UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
 
 If that password store isn't available, passwords fall back to `data/secrets.json` and the app shows a warning.
 
@@ -224,6 +272,8 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 - When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
 - Wi-Fi passwords and other secret fields are **removed first**. (Files you attach and SSH command output are sent as they are; that removal only applies to data the app reads from the UniFi API.)
 - ChatGPT requests are sent with OpenAI's "don't store" option.
+- **↻ Update prices** (AI usage) downloads LiteLLM's public price list from GitHub. Nothing is sent with that request.
+- Nmap scans stay on your own network.
 - Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the computer). Only the font request goes out; no network data does.
 - Nothing is sent anywhere else, and the app can't be reached from other computers.
 
@@ -234,7 +284,7 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 
 <a id="troubleshooting"></a>
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Message / symptom | What to do |
 |---|---|
@@ -260,6 +310,12 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 | *"Reply hit the …-token output limit"* | Say "continue", ask a narrower question, or raise `MAX_OUTPUT_TOKENS` in `.env` (max 21000). |
 | *"The app was restarted. Reload this page"* | Press F5. The page's security token changes each time the app starts. |
 | Firewall rules the AI creates don't seem to work | Newer UniFi versions use **Zone-Based Firewall**. This app creates classic rules, which may not apply there. Check in the UniFi UI. |
+| *Nmap isn't installed* (🔍 Scan is greyed out) | Nmap is optional. Install it ([Nmap](#nmap)), then restart the app. |
+| A scan finds nothing on a device you know is there | Phones, tablets and many smart-home devices answer on no ports at all. A firewall on the device (Windows, macOS) hides ports too. |
+| Restore script: *Sign-in FAILED* | Use a **local** admin of the console (step 3), not your UI.com account, and check SSH is to the console itself. |
+| Restore script: *NOT FOUND: nothing in … has name = …* | That command needs something that isn't there yet (its comment says what). Run that one first, then this one again. |
+| Restore script: *FAILED: HTTP 400 …* | The console refused that setting; its reason follows. Usually a newer UniFi version names a setting differently: set that one by hand in the UniFi UI and carry on with the rest. |
+| The cost meter shows **—** for a model | The app has no price for it. Click the meter → **↻ Update prices**, or ✎ to type the price from your provider's pricing page. |
 
 Still stuck? Run the diagnostic and send its output to whoever is helping you. It contains no passwords.
 ```

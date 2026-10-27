@@ -138,7 +138,7 @@ class MockUniFi:
         tail = p.split("/default/", 1)[1]
         if tail == "stat/health":
             return {"data": [{"subsystem": "wan", "status": "ok"}, {"subsystem": "wlan", "status": "ok"}]}
-        if tail == "stat/device":
+        if tail == "stat/device" and "device" not in self.objects:
             return {"data": [
                 {"_id": "d1", "name": "Gateway", "model": "UCG-Ultra", "type": "ugw", "mac": "aa:bb:cc:00:00:01",
                  "ip": "10.0.0.1", "state": 1, "version": "4.1", "num_sta": 0, "port_table": [{"x": 1}] * 50},
@@ -169,6 +169,46 @@ class MockUniFi:
                 raise _Status(400 if tail.startswith("rest/alarm") else 404,
                               {"meta": {"rc": "error", "msg": "api.err.InvalidObject"}})
             return {"data": [{"msg": "AP disconnected", "datetime": "2026-10-27T10:00:00Z"}]}
+        v2 = p.startswith("/v2/")
+        m = re.fullmatch(r"rest/setting/([\w-]+)/([^/?]+)", tail)
+        if m and "setting" in self.objects and method == "PUT":
+            store = self.objects["setting"]
+            if m.group(2) not in store or store[m.group(2)].get("key") != m.group(1):
+                raise _Status(400, {"meta": {"rc": "error", "msg": "api.err.IdInvalid"}})
+            store[m.group(2)].update(body or {})
+            return {"data": [dict(store[m.group(2)])]}
+        m = re.fullmatch(r"stat/(user|device)/([0-9a-f:]{17})", tail)
+        if m and (m.group(1) == "user" and "user" in self.objects or m.group(1) == "device" and "device" in self.objects):
+            found = [dict(o) for o in self.objects[m.group(1)].values() if o.get("mac") == m.group(2)]
+            if not found:
+                raise _Status(400, {"meta": {"rc": "error", "msg": "api.err.UnknownUser"}})
+            return {"data": found}
+        if tail == "stat/device" and "device" in self.objects:
+            return {"data": [dict(o) for o in self.objects["device"].values()]}
+        m = re.fullmatch(r"(?:rest/)?([\w/-]+?)(?:/([0-9a-f]{24}))?", tail) if (v2 or tail.startswith("rest/")) else None
+        if m and m.group(1) not in ("wlanconf", "networkconf") and m.group(1) in self.objects and (
+                v2 or m.group(1) in ("device", "user") or tail.startswith("rest/")):
+            store, oid = self.objects[m.group(1)], m.group(2)
+            wrap = (lambda d: d) if v2 else (lambda d: {"meta": {"rc": "ok"}, "data": d})
+            if oid is None and method == "GET":
+                return wrap([dict(o) for o in store.values()])
+            if oid is None and method == "POST":
+                if m.group(1) == "user" and any(o.get("mac") == (body or {}).get("mac") for o in store.values()):
+                    raise _Status(400, {"meta": {"rc": "error", "msg": "api.err.MacUsed"}})
+                oid = f"{self.next_id:024x}"
+                self.next_id += 1
+                store[oid] = dict(body or {}, _id=oid, site_id="s1")
+                return wrap(dict(store[oid]) if v2 else [dict(store[oid])])
+            if oid not in store:
+                raise _Status(400, {"meta": {"rc": "error", "msg": "api.err.IdInvalid"}})
+            if method == "GET":
+                return wrap(dict(store[oid]) if v2 else [dict(store[oid])])
+            if method == "PUT":
+                store[oid].update(body or {})
+                return wrap(dict(store[oid]) if v2 else [dict(store[oid])])
+            if method == "DELETE":
+                del store[oid]
+                return wrap([])
         m = re.fullmatch(r"rest/(wlanconf|networkconf)(?:/([^/?]+))?", tail)
         if m:
             store, oid = self.objects[m.group(1)], m.group(2)

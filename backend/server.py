@@ -40,13 +40,21 @@ from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
 from ssh_client import SSHClient, SSHError, format_hostkey, test_ssh  # noqa: E402
 import envcheck                                                        # noqa: E402
 import history                                                         # noqa: E402
+import resetkit                                                        # noqa: E402
+import detective                                                       # noqa: E402
+import handbook                                                        # noqa: E402
+import nmap_scan                                                       # noqa: E402
+import portmap                                                         # noqa: E402
+import pricing                                                         # noqa: E402
+import scorecard                                                       # noqa: E402
+from agent import EXECUTORS, ToolInputError, scorecard_data, validate_input   # noqa: E402
 import platform                                                        # noqa: E402
 import topology                                                        # noqa: E402
 import wan                                                             # noqa: E402
 from unifi_client import summarize_event                               # noqa: E402
 from urllib.parse import parse_qs                                      # noqa: E402
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -158,7 +166,14 @@ def wan_history(days):
 
 
 changelog = history.ChangeLog(state.client, cfg.active_profile)
-agent = Agent(state.client, agent_settings, agent_context, get_ssh=state.ssh, changes=changelog, get_wan=wan_history)
+
+
+def record_usage(provider, model, usage, kind, chat_id):
+    pricing.record(provider, model, usage, kind, chat_id, (cfg.active_profile() or {}).get("name"))
+
+
+agent = Agent(state.client, agent_settings, agent_context, get_ssh=state.ssh, changes=changelog, get_wan=wan_history,
+              on_usage=record_usage)
 
 
 def _last_speedtest_ms(connection_id):
@@ -785,12 +800,22 @@ def r_backup(_):
         _backup_lock.release()
 
 
+def _with_usage(out):
+    try:
+        u = pricing.summary(agent.chat_id)
+        out["usage"] = {"chat": u["chat"], "month": u["month"], "budget": u["budget"],
+                        "near_budget": u["near_budget"], "over_budget": u["over_budget"]}
+    except Exception:
+        pass
+    return out
+
+
 def r_chat(b):
-    return agent.chat(str(b.get("message", "")), b.get("files"))
+    return _with_usage(agent.chat(str(b.get("message", "")), b.get("files")))
 
 
 def r_decide(b):
-    return agent.decide(bool(b.get("approve")))
+    return _with_usage(agent.decide(bool(b.get("approve"))))
 
 
 def r_reset(_):
@@ -815,6 +840,248 @@ def r_report(_):
         return report
     finally:
         _report_lock.release()
+
+
+# ── actions started by a button in a tool window (the click is the approval) ──
+_LABEL_FOR = {"set_switch_port": "Change switch port settings", "power_cycle_port": "Power-cycle (PoE) a switch port",
+              "set_client_name": "Name a client", "scan_client": "Scan a device with Nmap"}
+
+
+def button_action(tool, inp, target=""):
+    """Run one write tool from a button: same validation, change log and undo as the chat."""
+    try:
+        inp = validate_input(inp)
+    except ToolInputError as e:
+        raise ValueError(str(e))
+    c = state.client()
+    prep, note = changelog.prepare(tool, inp)
+    try:
+        result = EXECUTORS[tool](c, inp)
+    except ToolInputError as e:
+        raise ValueError(str(e))
+    except UniFiError as e:
+        changelog.record(tool, inp, _LABEL_FOR[tool], "approved", {"content": str(e), "is_error": True},
+                         via="button", target=target)
+        raise
+    rec = changelog.record(tool, inp, _LABEL_FOR[tool], "approved",
+                           {"content": json.dumps(redact(result), default=str)[:400], "is_error": False},
+                           prep, via="button", note=note, target=target, result_obj=result)
+    agent.add_note(f"The user did this from a tool window: {_LABEL_FOR[tool]} {target}.")
+    return {"result": redact(result), "change": {"id": rec["id"], "can_undo": bool(rec.get("rollback")),
+                                                 "undo": (rec.get("rollback") or {}).get("describe")}}
+
+
+# ── switch port map ───────────────────────────────────────────────────────────
+def r_portmap(_):
+    c, p = state.client(), cfg.active_profile()
+    nets = []
+    try:
+        nets = c.get_networks()
+    except UniFiError:
+        pass
+    model = portmap.build(c.get_devices(), c.get_clients(), nets)
+    return dict(model, svg=portmap.render_svg(model), network=p["name"])
+
+
+def r_port_set(b):
+    mac, idx = b.get("mac"), b.get("port_idx")
+    inp = {k: b[k] for k in ("mac", "port_idx", "name", "poe_mode", "enabled") if k in b}
+    return button_action("set_switch_port", inp, f"{b.get('device') or mac}, port {idx}")
+
+
+def r_port_cycle(b):
+    return button_action("power_cycle_port", {"mac": b.get("mac"), "port_idx": b.get("port_idx")},
+                         f"{b.get('device') or b.get('mac')}, port {b.get('port_idx')}")
+
+
+# ── device detective ──────────────────────────────────────────────────────────
+def r_detective(_):
+    c = state.client()
+    users, v2 = [], []
+    try:
+        users = c._data(c.get(c.api("rest/user")))
+    except UniFiError:
+        pass
+    try:
+        v2 = c.get(c.v2("clients/active"))
+    except UniFiError:
+        pass
+    cands = detective.candidates(c.get_clients(), v2 if isinstance(v2, list) else [], users)
+    return {"clients": cands, "nmap": nmap_scan.info(), "network": cfg.active_profile()["name"]}
+
+
+def r_detective_scan(b):
+    return button_action("scan_client", {"mac": b.get("mac")}, b.get("label") or b.get("mac") or "")
+
+
+def r_detective_name(b):
+    inp = {"mac": b.get("mac"), "name": b.get("name")}
+    if b.get("note"):
+        inp["note"] = b["note"]
+    return button_action("set_client_name", inp, f"{b.get('name')} ({b.get('mac')})")
+
+
+# ── security scorecard ────────────────────────────────────────────────────────
+_scan_lock = threading.Lock()
+
+
+def r_scorecard(_):
+    c = state.client()
+    findings, passed = scorecard.check(scorecard_data(c))
+    findings = scorecard.sort(findings)
+    return dict(scorecard.grade(findings), findings=findings, passed=passed, nmap=nmap_scan.info(),
+                network=cfg.active_profile()["name"])
+
+
+def r_scorecard_scan(_):
+    """Nmap sweep of every connected client with a private IP, for risky open ports."""
+    if not _scan_lock.acquire(blocking=False):
+        raise AgentError("A scan is already running.")
+    try:
+        c = state.client()
+        clients = c.get_clients()
+        ips = []
+        for cl in clients:
+            try:
+                ips.append(nmap_scan.check_target(cl.get("ip")))
+            except nmap_scan.ScanError:
+                continue
+        try:
+            hosts = nmap_scan.sweep(ips)
+        except nmap_scan.ScanError as e:
+            raise ValueError(str(e))
+        findings = scorecard.sort(scorecard.from_scan(hosts, clients))
+        changelog.record("nmap_sweep", {"hosts": len(ips)}, "Scan the LAN for risky open ports (Nmap)", "approved",
+                         {"content": f"{len(ips)} devices checked, {len(hosts)} with risky ports open", "is_error": False},
+                         via="button")
+        return {"findings": findings, "checked": len(ips), "limit": nmap_scan.MAX_SWEEP_HOSTS}
+    finally:
+        _scan_lock.release()
+
+
+# ── network handbook ──────────────────────────────────────────────────────────
+def r_handbook(b):
+    c, p = state.client(), cfg.active_profile()
+
+    def opt(fn):
+        try:
+            return fn()
+        except UniFiError:
+            return []
+    data = scorecard_data(c)
+    data.update(health=opt(c.get_health), sysinfo=opt(c.get_system_info), routes=opt(c.get_routing),
+                traffic_routes=opt(lambda: c.get(c.v2("trafficroutes"))),
+                users=opt(lambda: c._data(c.get(c.api("rest/user")))))
+    with_pw = str(b.get("passwords") or "") in ("1", "true", "yes")
+    html_text = handbook.build(data, p["name"], p["host"], include_passwords=with_pw,
+                               changes=changelog.list(limit=40, connection_id=p["id"]), app_version=APP_VERSION)
+    net = re.sub(r"[^A-Za-z0-9._-]+", "-", p["name"]).strip("-") or "network"
+    return {"html": html_text, "filename": f"network-handbook_{net}_{datetime.now().strftime('%Y-%m-%d')}"
+                                           f"{'_WITH-PASSWORDS' if with_pw else ''}.html"}
+
+
+# ── AI usage and cost ─────────────────────────────────────────────────────────
+def r_usage(_):
+    return dict(pricing.summary(agent.chat_id), model=cfg.provider_model(cfg.active_provider()),
+                current_price=pricing.price(cfg.provider_model(cfg.active_provider()))[0],
+                current_price_source=pricing.price(cfg.provider_model(cfg.active_provider()))[1])
+
+
+def r_usage_update_prices(_):
+    try:
+        n = pricing.update_from_litellm()
+    except OSError as e:
+        raise ValueError(f"Couldn't download the price list: {e}")
+    return dict(r_usage(None), updated=n)
+
+
+def r_usage_price(b):
+    model = str(b.get("model") or "").strip()
+    if not model or len(model) > 100:
+        raise ValueError("Which model?")
+    pricing.set_custom(model, None if b.get("remove") else b.get("prices") or {})
+    return r_usage(None)
+
+
+def r_usage_budget(b):
+    pricing.set_budget(b.get("dollars"))
+    return r_usage(None)
+
+
+# ── factory-reset kit ─────────────────────────────────────────────────────────
+_kit_lock = threading.Lock()
+
+
+def _kit_net():
+    p = cfg.active_profile()
+    if not p:
+        raise UniFiError("No UniFi connection yet.", "noconn")
+    return state.client(), p
+
+
+def r_kit_list(_):
+    p = cfg.active_profile()
+    return {"snapshots": resetkit.list_snapshots(), "active": (p or {}).get("id"),
+            "active_name": (p or {}).get("name")}
+
+
+def r_kit_snapshot(_):
+    """Read the whole configuration of the active console (read-only) and keep it."""
+    if not _kit_lock.acquire(blocking=False):
+        raise AgentError("A snapshot is already being taken.")
+    try:
+        c, p = _kit_net()
+        snap = resetkit.snapshot(c, p)
+        sid = resetkit.save(snap)
+        return {"id": sid, "snapshots": resetkit.list_snapshots()}
+    finally:
+        _kit_lock.release()
+
+
+def _kit_baseline(b):
+    """With compare=true: the active console as it is now (e.g. just after the reset)."""
+    if not b.get("compare"):
+        return None
+    c, p = _kit_net()
+    base, _found = resetkit.split(resetkit.snapshot(c, p))
+    return base
+
+
+def r_kit_variance(b):
+    snap = resetkit.load(b.get("id"))
+    base = _kit_baseline(b)
+    v = resetkit.variance(snap, base)
+    return dict(v, snapshot={k: snap.get(k) for k in ("id", "taken_at", "connection", "host", "site",
+                                                      "network_version", "secret_count")},
+                compared_with=(cfg.active_profile() or {}).get("name") if base else None)
+
+
+def r_kit_script(b):
+    sid, embed = b.get("id"), bool(b.get("embed_secrets"))
+    snap = resetkit.load(sid)
+    full = resetkit.load(sid, with_secrets=True) if embed else None
+    sel = b.get("selected")
+    selected = set(map(str, sel)) if isinstance(sel, list) else None
+    text, stats = resetkit.script(snap, full=full, selected=selected, embed_secrets=embed,
+                                  baseline=_kit_baseline(b))
+    net = re.sub(r"[^A-Za-z0-9._-]+", "-", snap.get("connection") or "unifi").strip("-") or "unifi"
+    return {"text": text, "stats": stats, "filename": f"unifi-restore_{net}_{sid}{'_WITH-SECRETS' if embed else ''}.sh"}
+
+
+def r_kit_report(b):
+    snap = resetkit.load(b.get("id"))
+    v = resetkit.variance(snap, _kit_baseline(b))
+    net = re.sub(r"[^A-Za-z0-9._-]+", "-", snap.get("connection") or "unifi").strip("-") or "unifi"
+    return {"markdown": resetkit.report_markdown(snap, v), "filename": f"unifi-customised_{net}_{snap['id']}.md"}
+
+
+def r_kit_secrets(b):
+    return {"secrets": resetkit.secrets_of(b.get("id"))}
+
+
+def r_kit_delete(b):
+    resetkit.delete(b.get("id"))
+    return r_kit_list(None)
 
 
 ROUTES = {
@@ -843,6 +1110,26 @@ ROUTES = {
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/reset"):                   r_reset,
     ("POST", "/api/report"):                  r_report,
+    ("GET",  "/api/resetkit"):                r_kit_list,
+    ("POST", "/api/resetkit/snapshot"):       r_kit_snapshot,
+    ("POST", "/api/resetkit/variance"):       r_kit_variance,
+    ("POST", "/api/resetkit/script"):         r_kit_script,
+    ("POST", "/api/resetkit/report"):         r_kit_report,
+    ("POST", "/api/resetkit/secrets"):        r_kit_secrets,
+    ("POST", "/api/resetkit/delete"):         r_kit_delete,
+    ("GET",  "/api/portmap"):                 r_portmap,
+    ("POST", "/api/portmap/port"):            r_port_set,
+    ("POST", "/api/portmap/power-cycle"):     r_port_cycle,
+    ("GET",  "/api/detective"):               r_detective,
+    ("POST", "/api/detective/scan"):          r_detective_scan,
+    ("POST", "/api/detective/name"):          r_detective_name,
+    ("GET",  "/api/scorecard"):               r_scorecard,
+    ("POST", "/api/scorecard/scan"):          r_scorecard_scan,
+    ("GET",  "/api/handbook"):                r_handbook,
+    ("GET",  "/api/usage"):                   r_usage,
+    ("POST", "/api/usage/update-prices"):     r_usage_update_prices,
+    ("POST", "/api/usage/price"):             r_usage_price,
+    ("POST", "/api/usage/budget"):            r_usage_budget,
 }
 
 HTTP_PORT = None

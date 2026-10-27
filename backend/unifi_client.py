@@ -475,6 +475,36 @@ class UniFiClient:
     def update_device(self, device_id, settings):
         return self.put(self.api(f"rest/device/{device_id}"), settings)
 
+    def device_record(self, mac):
+        data = self.get_device(mac)
+        d = data[0] if isinstance(data, list) and data else data if isinstance(data, dict) else None
+        if not d or not d.get("_id"):
+            raise UniFiError(f"No UniFi device with MAC {mac} on this console.", "notfound", 404)
+        return d
+
+    def set_port_override(self, mac, port_idx, changes):
+        """Change one switch port's settings, keeping every other port's overrides as they are."""
+        d = self.device_record(mac)
+        ovs = [dict(o) for o in d.get("port_overrides") or [] if isinstance(o, dict)]
+        entry = next((o for o in ovs if o.get("port_idx") == port_idx), None)
+        if entry is None:
+            entry = {"port_idx": port_idx}
+            ovs.append(entry)
+        entry.update(changes)
+        self.update_device(d["_id"], {"port_overrides": ovs})
+        return {"device": d.get("name") or mac, "port_idx": port_idx, "port_settings": entry}
+
+    def restore_port_override(self, mac, port_idx, before):
+        """Put one port's override back as it was (None = it had none)."""
+        d = self.device_record(mac)
+        ovs = [dict(o) for o in d.get("port_overrides") or [] if isinstance(o, dict) and o.get("port_idx") != port_idx]
+        if before:
+            ovs.append(before)
+        self.update_device(d["_id"], {"port_overrides": ovs})
+
+    def power_cycle_port(self, mac, port_idx):
+        return self._devmgr("power-cycle", mac, port_idx=int(port_idx))
+
     # ── CLIENT WRITE ──────────────────────────────────────────────────────────
     def _stamgr(self, cmd, mac):
         return self.post(self.api("cmd/stamgr"), {"cmd": cmd, "mac": mac.lower()})
@@ -484,6 +514,20 @@ class UniFiClient:
     def disconnect_client(self, mac):  return self._stamgr("kick-sta", mac)
     def update_client(self, user_id, settings):
         return self.put(self.api(f"rest/user/{user_id}"), settings)
+
+    def client_record(self, mac):
+        data = self._data(self.get(self.api(f"stat/user/{mac.lower()}")))
+        u = data[0] if isinstance(data, list) and data else None
+        if not u or not u.get("_id"):
+            raise UniFiError(f"No client with MAC {mac} is known to this console.", "notfound", 404)
+        return u
+
+    def set_client_name(self, mac, name, note=None):
+        u = self.client_record(mac)
+        body = {"name": name}
+        if note is not None:
+            body.update(note=note, noted=bool(note))
+        return self.update_client(u["_id"], body)
 
     # ── WIFI WRITE ────────────────────────────────────────────────────────────
     def update_wlan(self, wlan_id, settings):

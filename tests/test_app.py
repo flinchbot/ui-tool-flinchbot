@@ -112,7 +112,7 @@ class FakeAnthropic:
         FakeAnthropic.received.append(kw)
         blocks = FakeAnthropic.script.pop(0)
         stop = "tool_use" if any(b.type == "tool_use" for b in blocks) else "end_turn"
-        return types.SimpleNamespace(content=blocks, stop_reason=stop)
+        return types.SimpleNamespace(content=blocks, stop_reason=stop, usage=getattr(FakeAnthropic, "usage", None))
 
 
 providers.Anthropic = FakeAnthropic
@@ -850,7 +850,7 @@ class EnvCheckTests(unittest.TestCase):
         import io
         import envcheck
         results = envcheck.run()
-        self.assertEqual([r[0] for r in results], ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet"])
+        self.assertEqual([r[0] for r in results], ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet", "Nmap"])
         self.assertFalse([r for r in results if r[1] == envcheck.FAIL], results)
         out = io.StringIO()
         self.assertIn(envcheck.report(results, out), (envcheck.OK, envcheck.WARN))
@@ -1310,6 +1310,511 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((w["schedule_hours"], w["summary"]["tests"]), (6, 1))
         self.assertTrue(w["svg"].startswith("<svg"))
         self.assertEqual(self.req("GET", "/api/changes")[1]["changes"][0]["label"], "Run a WAN speed test")
+
+
+# ── v2.6: secrets, reset kit, port map, detective, scorecard, nmap, pricing ────
+import detective                    # noqa: E402
+import kit_fixture as kf            # noqa: E402
+import nmap_scan                    # noqa: E402
+import portmap                      # noqa: E402
+import pricing                      # noqa: E402
+import resetkit                     # noqa: E402
+import scorecard                    # noqa: E402
+from rollback import is_secret_key  # noqa: E402
+
+
+class SecretFieldTests(unittest.TestCase):
+    def test_secret_names(self):
+        for k in ("x_passphrase", "wireguard_client_configuration_file", "private_preshared_keys", "x_mgmt_key",
+                  "radius_secret", "openvpn_configuration", "psk"):
+            self.assertTrue(is_secret_key(k), k)
+        for k in ("zone_key", "public_key", "wireguard_client_configuration_filename", "name", "key"):
+            self.assertFalse(is_secret_key(k), k)
+
+    def test_wireguard_config_never_reaches_the_ai(self):
+        net = {"name": "Mullvad", "wireguard_client_configuration_file": kf.WG_CONF,
+               "private_preshared_keys": [{"password": "ppsk-1"}]}
+        text = agent_mod.to_tool_text([net])
+        self.assertNotIn("PrivateKey", text)
+        self.assertNotIn("ppsk-1", text)
+        self.assertIn("Mullvad", text)
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "needs openssl for the mock console")
+class ResetKitTests(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        self.a, self.b = MockUniFi(n_clients=0), MockUniFi(n_clients=0)
+        self.a.objects, self.b.objects = kf.configured(), kf.fresh()
+        prof = lambda m: {"id": "p1", "name": "Home", "host": "127.0.0.1", "port": m.port, "console_type": "unifi_os",
+                          "auth": "password", "username": "claude", "site": "default"}
+        self.prof_a, self.prof_b = prof(self.a), prof(self.b)
+        self.snap = resetkit.snapshot(UniFiClient(self.prof_a, "pw"), self.prof_a)
+        self.public, self.found = resetkit.split(self.snap)
+
+    def tearDown(self):
+        self.a.stop()
+        self.b.stop()
+
+    def items(self, v):
+        return {(i["section"], i["label"]): i for i in v["items"]}
+
+    def test_variance_without_baseline(self):
+        v = resetkit.variance(self.public)
+        it = self.items(v)
+        for key in (("networks", "IoT"), ("networks", "Mullvad CA"), ("zones", "IoT"), ("policies", "IoT to DNS"),
+                    ("policies", "Block vacuum"), ("traffic_routes", "Mullvad CA"), ("wlans", "Mike's IoT")):
+            self.assertEqual(it[key]["kind"], "added", key)
+        self.assertNotIn(("policies", "Allow Return Traffic"), it)                    # built-in policy
+        lan = it[("networks", "Default")]
+        self.assertEqual((lan["kind"], lan["changed_fields"]), ("changed", ["dhcpd_start", "dhcpd_stop", "ip_subnet"]))
+        self.assertEqual(it[("clients", "Hue Bridge (ec:b5:fa:17:e2:72)")]["kind"], "changed")
+        self.assertNotIn(("clients", "nobody (aa:aa:aa:aa:aa:01)"), it)               # not customised
+        self.assertEqual(it[("devices", "Office switch (1c:0b:8b:18:fa:88)")]["changed_fields"], ["name", "port_overrides"])
+        self.assertEqual(it[("settings", "mgmt")]["kind"], "current")
+        # policies keep their original order
+        order = [i["label"] for i in v["items"] if i["section"] == "policies"]
+        self.assertEqual(order, ["Block vacuum", "IoT to DNS"])
+
+    def test_exact_variance_against_the_reset_console(self):
+        base, _ = resetkit.split(resetkit.snapshot(UniFiClient(self.prof_b, "pw"), self.prof_b))
+        it = self.items(resetkit.variance(self.public, base))
+        self.assertNotIn(("networks", "Internet 1"), it)                              # same as factory
+        self.assertNotIn(("settings", "country"), it)
+        self.assertEqual(it[("settings", "mgmt")]["changed_fields"], ["led_enabled"])  # secret fields can't differ
+        self.assertEqual(it[("networks", "Default")]["changed_fields"], ["dhcpd_start", "dhcpd_stop", "ip_subnet"])
+
+    def test_script_has_no_old_ids_or_secrets_and_drops_console_keys(self):
+        text, stats = resetkit.script(self.public)
+        old_ids = [o["_id"] for objs in self.a.objects.values() for o in objs.values()]
+        self.assertFalse([i for i in old_ids if i in text])                            # every reference is a lookup
+        for secret in (kf.WIFI_PW, "PrivateKey", "ssh-pw", "console-made", "deadbeef"):
+            self.assertNotIn(secret, text)
+        self.assertEqual(stats["prompts"], 3)                                          # WG config, Wi-Fi, SSH password
+        self.assertIn("RUN LAST", text)
+        self.assertLess(text.index("Create network “IoT”"), text.index("Create firewall zone “IoT”"))
+        self.assertGreater(text.rindex("RUN LAST"), text.rindex("settings section"))   # moving the LAN comes last
+        self.assertEqual(stats["unknown_ids"], [])
+
+    def _bash_or_skip(self):
+        if not kf.find_bash():
+            self.skipTest("no bash available")
+
+    def check_restored(self):
+        B = self.b.objects
+        nets = {n["name"]: n for n in B["networkconf"].values()}
+        self.assertEqual(nets["Default"]["ip_subnet"], "10.42.0.1/16")
+        self.assertEqual(nets["Mullvad CA"]["wireguard_client_configuration_file"], kf.WG_CONF)
+        w = next(iter(B["wlanconf"].values()))
+        self.assertEqual(w["x_passphrase"], kf.WIFI_PW)
+        self.assertNotIn("x_iapp_key", w)
+        self.assertEqual(w["networkconf_id"], nets["IoT"]["_id"])                      # old id mapped to the new one
+        apg = next(iter(B["apgroups"]))
+        self.assertEqual(w["ap_group_ids"], [apg])
+        zones = {z["name"]: z for z in B["firewall/zone"].values()}
+        self.assertEqual(zones["IoT"]["network_ids"], [nets["IoT"]["_id"]])
+        pol = {p["name"]: p for p in B["firewall-policies"].values()}
+        self.assertEqual(pol["IoT to DNS"]["source"]["zone_id"], zones["IoT"]["_id"])
+        route = next(iter(B["trafficroutes"].values()))
+        self.assertEqual(route["network_id"], nets["Mullvad CA"]["_id"])
+        user = next(iter(B["user"].values()))
+        self.assertEqual((user["name"], user["fixed_ip"], user["network_id"]), ("Hue Bridge", "192.168.2.20", nets["IoT"]["_id"]))
+        dev = next(iter(B["device"].values()))
+        self.assertEqual(dev["port_overrides"][0]["native_networkconf_id"], nets["IoT"]["_id"])
+        mgmt = next(s for s in B["setting"].values() if s["key"] == "mgmt")
+        self.assertEqual((mgmt["x_ssh_password"], mgmt["x_mgmt_key"]), ("ssh-pw", "new-console-key"))
+
+    def test_script_with_secrets_written_in_restores_a_reset_console(self):
+        self._bash_or_skip()
+        text, _ = resetkit.script(self.public, full=self.snap, embed_secrets=True)
+        self.assertIn("CONTAINS PASSWORDS", text)
+        code, out, err = kf.run_script(text, self.b.port, "claude\npw\n")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Signed in.", out)
+        self.assertNotIn("FAILED", err)
+        self.check_restored()
+
+    def test_script_asks_for_secrets_and_restores_them_exactly(self):
+        self._bash_or_skip()
+        text, _ = resetkit.script(self.public)
+        code, out, err = kf.run_script(text, self.b.port, "claude\npw\n" + kf.WG_CONF + "END\n" + kf.WIFI_PW + "\nssh-pw\n")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("FAILED", err)
+        self.check_restored()
+
+    def test_selected_items_only(self):
+        self._bash_or_skip()
+        text, st = resetkit.script(self.public, selected={"networks:name:IoT", "wlans:name:Mike's IoT"}, embed_secrets=True,
+                                   full=self.snap)
+        self.assertEqual(st["items"], 2)
+        code, _, err = kf.run_script(text, self.b.port, "claude\npw\n")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(n["name"] for n in self.b.objects["networkconf"].values()), ["Default", "Internet 1", "IoT"])
+        self.assertEqual(self.b.objects["trafficroutes"], {})
+
+    def test_saved_snapshot_keeps_secrets_encrypted(self):
+        sid = resetkit.save(self.snap)
+        with open(os.path.join(resetkit.KIT_DIR, f"{sid}.json"), encoding="utf-8") as f:
+            raw = f.read()
+        for secret in (kf.WIFI_PW, "PrivateKey", "ssh-pw"):
+            self.assertNotIn(secret, raw)
+        full = resetkit.load(sid, with_secrets=True)
+        w = next(o for o in full["sections"]["wlans"])
+        self.assertEqual(w["x_passphrase"], kf.WIFI_PW)
+        shown = {x["field"]: x["value"] for x in resetkit.secrets_of(sid)}
+        self.assertEqual(shown["WireGuard config file"], kf.WG_CONF)
+        self.assertEqual([s["id"] for s in resetkit.list_snapshots("p1")], [sid])
+        resetkit.delete(sid)
+        self.assertEqual(resetkit.list_snapshots(), [])
+        self.assertIsNone(cfg.get_secret(f"kit-{sid}"))
+        with self.assertRaises(resetkit.KitError):
+            resetkit.load("../../etc/passwd")
+
+
+def _sw(mac, name, ports, uplink=None, typ="usw", **kw):
+    return dict({"mac": mac, "name": name, "model": "USW", "type": typ, "ip": "10.0.0.2", "state": 1,
+                 "port_table": ports, "uplink": uplink or {}}, **kw)
+
+
+class PortMapTests(unittest.TestCase):
+    def test_build_and_svg(self):
+        sw = _sw("aa:00:00:00:00:01", "Core", [
+            {"port_idx": 1, "up": True, "speed": 10000, "is_uplink": False},
+            {"port_idx": 2, "up": True, "speed": 100, "full_duplex": True},
+            {"port_idx": 3, "up": True, "speed": 100},
+            {"port_idx": 4, "up": True, "speed": 1000, "full_duplex": False, "rx_errors": 5000},
+            {"port_idx": 5, "up": True, "speed": 1000, "port_poe": True, "poe_power": "7.25", "poe_mode": "auto"},
+            {"port_idx": 6, "up": True, "speed": 1000}],
+            uplink={"uplink_mac": "aa:00:00:00:00:99", "port_idx": 1},
+            port_overrides=[{"port_idx": 5, "name": "Camera"}],
+            lldp_table=[{"local_port_idx": 6, "chassis_id": "bb:00:00:00:00:01", "port_id": "eth0"}])
+        gw = _sw("aa:00:00:00:00:99", "Gateway", [{"port_idx": 1, "up": True, "speed": 10000}], typ="udm")
+        ap = {"mac": "aa:00:00:00:00:02", "name": "Hall AP", "type": "uap", "uplink": {"uplink_mac": "aa:00:00:00:00:01", "uplink_remote_port": 2}}
+        ups = _sw("aa:00:00:00:00:03", "UPS", [{"port_idx": 1, "up": True, "speed": 100}],
+                  uplink={"uplink_mac": "aa:00:00:00:00:01", "uplink_remote_port": 3, "port_idx": 1})
+        clients = [{"mac": "cc:00:00:00:00:01", "name": "NAS", "ip": "10.0.0.50", "is_wired": True, "sw_mac": "aa:00:00:00:00:01", "sw_port": 6},
+                   {"mac": "bb:00:00:00:00:01", "hostname": "printer", "ip": "10.0.0.60", "is_wired": True}]
+        m = portmap.build([sw, gw, ap, ups], clients)
+        self.assertEqual([d["name"] for d in m["devices"]][0], "Gateway")                # gateway first
+        core = next(d for d in m["devices"] if d["name"] == "Core")
+        p = {x["idx"]: x for x in core["ports"]}
+        self.assertEqual(p[1]["uplink_to"], "Gateway")
+        self.assertTrue(p[1]["is_uplink"])
+        self.assertIn("Hall AP is on a 100M link", p[2]["issues"])                      # an AP held back
+        self.assertEqual(p[3]["issues"], [])                                            # a UPS on 100M is normal
+        self.assertEqual(p[4]["severity"], "bad")
+        self.assertIn("half duplex", p[4]["issues"])
+        self.assertEqual((p[5]["name"], p[5]["poe_watts"]), ("Camera", 7.2))
+        self.assertEqual([c["name"] for c in p[6]["clients"]], ["NAS"])
+        self.assertEqual(p[6]["lldp"][0]["name"], "printer")                            # LLDP MAC -> known name
+        self.assertEqual(core["poe_watts"], 7.2)
+        import xml.etree.ElementTree as ET
+        ET.fromstring(portmap.render_svg(m))                                            # well-formed SVG
+
+
+class DetectiveTests(unittest.TestCase):
+    def test_random_mac_and_hints(self):
+        self.assertTrue(detective.random_mac("da:a1:19:00:00:01"))
+        self.assertFalse(detective.random_mac("00:1a:2b:3c:4d:5e"))
+        self.assertEqual(detective.hint_from_hostname("ESP_3A2B1C"), "ESP8266/ESP32 microcontroller (DIY or smart-home gadget)")
+        self.assertIsNone(detective.hint_from_hostname(""))
+
+    def test_candidates(self):
+        now = 1_800_000_000
+        clients = [{"mac": "00:11:22:33:44:01", "name": "Known", "first_seen": now - 30 * 86400},
+                   {"mac": "00:11:22:33:44:02", "name": "Known but new", "first_seen": now - 3600},
+                   {"mac": "da:11:22:33:44:03", "hostname": "", "first_seen": now - 30 * 86400},
+                   {"mac": "00:11:22:33:44:04", "hostname": "Galaxy-S30", "oui": "Samsung", "first_seen": now - 30 * 86400}]
+        v2 = [{"mac": "00:11:22:33:44:04", "model_name": "Samsung Galaxy S30", "fingerprint": {"confidence": 80}}]
+        c = detective.candidates(clients, v2, [], now=now)
+        macs = [x["mac"] for x in c]
+        self.assertNotIn("00:11:22:33:44:01", macs)                                     # named and not new
+        self.assertEqual(macs[0], "da:11:22:33:44:03")                                  # nothing known about it
+        g = next(x for x in c if x["mac"].endswith("04"))
+        self.assertEqual(g["unifi_guess"], "Samsung Galaxy S30")
+        self.assertIn("(80% sure)", g["clues"][0])
+        self.assertTrue(next(x for x in c if x["mac"].endswith("02"))["new"])
+
+
+class NmapTests(unittest.TestCase):
+    def test_only_private_targets(self):
+        self.assertEqual(nmap_scan.check_target("192.168.1.20"), "192.168.1.20")
+        for bad in ("8.8.8.8", "127.0.0.1", "example.com", "", "10.0.0.1; rm -rf /", "224.0.0.1"):
+            with self.assertRaises(nmap_scan.ScanError):
+                nmap_scan.check_target(bad)
+
+    def test_parse_xml(self):
+        xml = ('<?xml version="1.0"?><!DOCTYPE nmaprun><nmaprun><host><status state="up"/>'
+               '<address addr="192.168.1.20" addrtype="ipv4"/><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>'
+               '<hostnames><hostname name="cam.lan"/></hostnames><ports>'
+               '<port protocol="tcp" portid="23"><state state="open"/><service name="telnet" product="BusyBox telnetd"/></port>'
+               '<port protocol="tcp" portid="80"><state state="closed"/><service name="http"/></port>'
+               '</ports></host></nmaprun>')
+        h = nmap_scan._parse(xml)[0]
+        self.assertEqual((h["ip"], h["mac"], h["hostnames"]), ("192.168.1.20", "AA:BB:CC:DD:EE:FF", ["cam.lan"]))
+        self.assertEqual([(p["port"], p["product"]) for p in h["open_ports"]], [(23, "BusyBox telnetd")])
+        self.assertIn("Telnet", h["open_ports"][0]["risk"])
+
+
+class ScorecardTests(unittest.TestCase):
+    def test_checks_and_grade(self):
+        zones = [{"_id": "zi", "name": "Internal", "zone_key": "internal"}, {"_id": "ze", "name": "External", "zone_key": "external"},
+                 {"_id": "zt", "name": "IoT", "zone_key": None}]
+        data = {
+            "wlans": [{"name": "Open", "security": "open", "enabled": True},
+                      {"name": "Home", "security": "wpapsk", "wpa_mode": "wpa2", "x_passphrase": "short123", "enabled": True},
+                      {"name": "Good", "security": "wpapsk", "wpa_mode": "wpa2", "wpa3_transition": True,
+                       "x_passphrase": "correct horse battery staple", "enabled": True}],
+            "settings": [{"key": "usg", "upnp_enabled": True}, {"key": "ips", "ips_mode": "disabled"}],
+            "port_forwards": [{"name": "RDP", "dst_port": "3389", "fwd": "10.0.0.5", "fwd_port": "3389", "enabled": True}],
+            "zones": zones,
+            "policies": [
+                {"name": "Let all in", "action": "ALLOW", "protocol": "all", "source": {"zone_id": "ze", "matching_target": "ANY"},
+                 "destination": {"zone_id": "zi", "matching_target": "ANY"}},
+                {"name": "IoT to LAN", "action": "ALLOW", "protocol": "all", "source": {"zone_id": "zt", "matching_target": "ANY"},
+                 "destination": {"zone_id": "zi", "matching_target": "ANY"}},
+                {"name": "DNS", "action": "ALLOW", "protocol": "all",
+                 "source": {"zone_id": "zt", "matching_target": "ANY", "port_matching_type": "SPECIFIC", "port": "53"},
+                 "destination": {"zone_id": "zi", "matching_target": "ANY"}},
+                {"name": "Builtin", "predefined": True, "action": "ALLOW", "source": {"zone_id": "ze"}, "destination": {"zone_id": "zi"}}],
+            "devices": [{"name": "AP", "upgradable": True, "version": "1", "upgrade_to_firmware": "2"}],
+        }
+        F, passed = scorecard.check(data)
+        by = {f["title"]: f for f in F}
+        self.assertEqual(by["“Open” has no password"]["severity"], "critical")
+        self.assertEqual(by["“Home” has a short password (8 characters)"]["severity"], "medium")
+        self.assertIn("“Home” is WPA2 only", by)
+        self.assertNotIn("“Good” is WPA2 only", by)
+        self.assertEqual(by["UPnP is on"]["severity"], "high")
+        self.assertEqual(by["Remote Desktop is reachable from the internet"]["severity"], "high")
+        self.assertEqual(by["Policy “Let all in” lets the internet in"]["severity"], "critical")
+        self.assertEqual(by["“IoT to LAN” gives IoT full access to Internal"]["severity"], "medium")
+        self.assertEqual(by["“DNS” matches a SOURCE port (53)"]["severity"], "low")
+        self.assertFalse([f for f in F if "Builtin" in f["title"]])
+        self.assertNotIn("short123", json.dumps(F))                                    # the password itself never leaks
+        g = scorecard.grade(F)
+        self.assertEqual(g["grade"], "F")
+        self.assertEqual(scorecard.grade([])["score"], 100)
+
+    def test_scan_findings(self):
+        F = scorecard.from_scan([{"ip": "10.0.0.9", "open_ports": [{"port": 23, "protocol": "tcp", "name": "telnet", "risk": "Telnet"}]}],
+                                [{"ip": "10.0.0.9", "name": "Camera", "mac": "aa"}])
+        self.assertEqual((F[0]["severity"], F[0]["title"]), ("high", "Camera has 1 risky port open"))
+
+
+class PricingTests(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+
+    def test_costs(self):
+        u = {"input": 1_000_000, "cache_write": 0, "cache_read": 0, "output": 1_000_000}
+        self.assertEqual(pricing.cost("claude-sonnet-5-5", u)[0], 12.0)
+        self.assertEqual(pricing.cost("claude-sonnet-5-5-20261001", u)[0], 12.0)          # dated snapshot
+        self.assertEqual(pricing.cost("claude-sonnet-5-5", {"cache_read": 1_000_000})[0], 0.10)
+        self.assertEqual(pricing.cost("claude-haiku-5-5", {"input": 50_000})[0], 0.005)
+        self.assertEqual(pricing.cost("claude-haiku-5-5", {"input": 200_000})[0], 0.1)    # long-prompt rate
+        self.assertEqual(pricing.cost("gpt-unknown", u), (None, None))
+        pricing.set_custom("gpt-unknown", {"input": 1, "output": 2, "cache_read": 0.1, "cache_write": 0})
+        self.assertEqual(pricing.cost("gpt-unknown", u)[0], 3.0)
+        with self.assertRaises(ValueError):
+            pricing.set_custom("x", {"input": -1, "output": 1, "cache_read": 0, "cache_write": 0})
+
+    def test_litellm_update_without_network(self):
+        payload = json.dumps({"gpt-6.1-sol": {"litellm_provider": "openai", "input_cost_per_token": 2e-06,
+                                              "output_cost_per_token": 1e-05, "cache_read_input_token_cost": 1e-07},
+                              "mistral-x": {"litellm_provider": "mistral", "input_cost_per_token": 1e-06},
+                              "sample_spec": {"note": "ignored"}}).encode()
+        import urllib.request as ur
+        orig = ur.urlopen
+        ur.urlopen = lambda *a, **k: types.SimpleNamespace(read=lambda n=None: payload, __enter__=None)
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=None): return payload
+        ur.urlopen = lambda *a, **k: R()
+        try:
+            self.assertEqual(pricing.update_from_litellm(), 1)
+        finally:
+            ur.urlopen = orig
+        p, src = pricing.price("gpt-6.1-sol")
+        self.assertEqual((p["input"], p["output"], p["cache_read"]), (2.0, 10.0, 0.1))
+        self.assertIn("LiteLLM", src)
+
+    def test_usage_log_and_budget(self):
+        pricing.record("anthropic", "claude-sonnet-5-5", {"input": 1000, "output": 500, "cache_read": 10_000}, "chat", "c1")
+        pricing.record("anthropic", "claude-sonnet-5-5", {"input": 1000, "output": 500}, "chat", "c2")
+        s = pricing.summary("c1")
+        self.assertEqual((s["chat"]["calls"], s["chat"]["tokens"]), (1, 11_500))
+        self.assertEqual(s["month"]["calls"], 2)
+        self.assertAlmostEqual(s["chat"]["cost"], 0.008, places=6)
+        pricing.set_budget(0.01)
+        self.assertTrue(pricing.summary()["over_budget"])
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "needs openssl for the mock console")
+class NewToolAgentTests(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        self.m = MockUniFi(n_clients=3)
+        self.m.objects.update({k: v for k, v in kf.configured().items() if k in ("device", "user")})
+        self.client = UniFiClient({"host": "127.0.0.1", "port": self.m.port, "username": "claude",
+                                   "auth": "password", "console_type": "unifi_os"}, "pw")
+        self.profile = {"id": "p1", "name": "Test", "host": "127.0.0.1", "site": "default"}
+        self.changes = history.ChangeLog(lambda: self.client, lambda: self.profile)
+        self.usage = []
+        self.agent = agent_mod.Agent(lambda: self.client, lambda: self.settings,
+                                     lambda: {"name": "Test", "site": "default", "console": "x", "ssh_enabled": False},
+                                     changes=self.changes, on_usage=lambda *a: self.usage.append(a))
+        self.settings = {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test",
+                         "model": "claude-sonnet-5-5", "max_rounds": 5, "max_tokens": 16000}
+        FakeAnthropic.script, FakeAnthropic.received = [], []
+
+    def tearDown(self):
+        self.m.stop()
+
+    def test_port_change_needs_approval_keeps_other_ports_and_undoes(self):
+        dev = next(iter(self.m.objects["device"].values()))
+        FakeAnthropic.script = [[tool("t1", "get_port_map", {})],
+                                [tool("t2", "set_switch_port", {"mac": "1C:0B:8B:18:FA:88", "port_idx": 2, "name": "Camera", "poe_mode": "off"})],
+                                [text("Done.")]]
+        r = self.agent.chat("rename port 2 and turn its PoE off")
+        out = json.loads(FakeAnthropic.received[1]["messages"][-1]["content"][0]["content"])
+        self.assertEqual(out["devices"][0]["ports"][1]["issues"], ["4,200 errors"])
+        self.assertEqual(r["pending"][0]["target"], "Office switch (1c:0b:8b:18:fa:88), port 2")
+        self.assertEqual(len(dev["port_overrides"]), 1)                                   # nothing changed yet
+        r = self.agent.decide(True)
+        self.assertTrue(r["changes"][0]["can_undo"])
+        ovs = {o["port_idx"]: o for o in dev["port_overrides"]}
+        self.assertEqual(ovs[2], {"port_idx": 2, "name": "Camera", "poe_mode": "off"})
+        self.assertEqual(ovs[3]["name"], "NAS")                                            # other port untouched
+        self.assertTrue(self.changes.undo(r["changes"][0]["id"])["ok"])
+        self.assertEqual([o["port_idx"] for o in dev["port_overrides"]], [3])
+
+    def test_client_name_and_bad_inputs(self):
+        FakeAnthropic.script = [[tool("t1", "set_client_name", {"mac": "aa:aa:aa:aa:aa:01", "name": "Printer"})],
+                                [text("Named.")]]
+        self.agent.chat("name it")
+        r = self.agent.decide(True)
+        user = next(u for u in self.m.objects["user"].values() if u["mac"] == "aa:aa:aa:aa:aa:01")
+        self.assertEqual(user["name"], "Printer")
+        self.assertTrue(self.changes.undo(r["changes"][0]["id"])["ok"])
+        self.assertEqual(user["name"], "")
+        FakeAnthropic.script = [[tool("t2", "set_switch_port", {"mac": "1c:0b:8b:18:fa:88", "port_idx": 999, "name": "x"})],
+                                [text("Sorry.")]]
+        self.agent.chat("break it")
+        r = self.agent.decide(True)
+        self.assertFalse(r["changes"][0]["ok"])
+        self.assertIn("out of range", r["changes"][0]["label"] + json.dumps(FakeAnthropic.received[-1]["messages"][-1]))
+
+    def test_scan_client_needs_approval_and_only_known_clients(self):
+        FakeAnthropic.script = [[tool("t1", "scan_client", {"mac": "00:00:00:00:00:99"})], [text("ok")]]
+        r = self.agent.chat("scan it")
+        self.assertEqual(r["pending"][0]["tool"], "scan_client")
+        self.agent.decide(True)
+        self.assertIn("isn't connected right now", json.dumps(FakeAnthropic.received[-1]["messages"][-1]))
+
+    def test_usage_is_reported_per_call(self):
+        FakeAnthropic.usage = types.SimpleNamespace(input_tokens=1200, output_tokens=300, cache_creation_input_tokens=5000,
+                                                    cache_read_input_tokens=0)
+        try:
+            FakeAnthropic.script = [[text("hi")]]
+            self.agent.chat("hello")
+        finally:
+            del FakeAnthropic.usage
+        prov, model, u, kind, chat_id = self.usage[0]
+        self.assertEqual((prov, model, kind, chat_id), ("anthropic", "claude-sonnet-5-5", "chat", self.agent.chat_id))
+        self.assertEqual(u, {"input": 1200, "cache_write": 5000, "cache_read": 0, "output": 300})
+        old = self.agent.chat_id
+        self.agent.reset()
+        self.assertNotEqual(self.agent.chat_id, old)
+
+
+@unittest.skipUnless(HAVE_OPENSSL, "needs openssl for the mock console")
+class ToolEndpointTests(unittest.TestCase):
+    """The new tool windows over HTTP, against a mock console with a configured network."""
+    req = ServerTests.req
+
+    @classmethod
+    def setUpClass(cls):
+        reset_store()
+        cls.m = MockUniFi(n_clients=3)
+        cls.m.objects.update(kf.configured())
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+        cls.port = cls.httpd.server_address[1]
+        srv.HTTP_PORT = cls.port
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        conn = {"name": "Home", "host": "127.0.0.1", "port": cls.m.port, "auth": "password",
+                "username": "claude", "secret": "pw"}
+        _, t, _ = cls.req(cls, "POST", "/api/connections/test", conn)
+        _, saved, _ = cls.req(cls, "POST", "/api/connections", dict(conn, console_type=t["console_type"],
+                                                                    fingerprint=t["fingerprint"]))
+        assert saved.get("active"), saved
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.m.stop()
+
+    def test_1_tool_windows(self):
+        s, pm, _ = self.req("GET", "/api/portmap")
+        self.assertEqual(s, 200, pm)
+        self.assertTrue(pm["svg"].startswith("<svg"))
+        sw = next(d for d in pm["devices"] if d["name"] == "Office switch")
+        s, r, _ = self.req("POST", "/api/portmap/port", {"mac": sw["mac"], "port_idx": 4, "name": "Spare", "device": sw["name"]})
+        self.assertEqual(s, 200, r)
+        self.assertTrue(r["change"]["can_undo"])
+        s, u, _ = self.req("POST", "/api/changes/undo", {"id": r["change"]["id"]})
+        self.assertTrue(u["ok"], u)
+        self.assertEqual(self.req("POST", "/api/portmap/port", {"mac": sw["mac"], "port_idx": "x"})[0], 400)
+
+        s, det, _ = self.req("GET", "/api/detective")
+        self.assertEqual(s, 200, det)
+        self.assertIn("installed", det["nmap"])
+        s, r, _ = self.req("POST", "/api/detective/name", {"mac": "aa:aa:aa:aa:aa:01", "name": "Printer"})
+        self.assertEqual(s, 200, r)
+
+        s, sc, _ = self.req("GET", "/api/scorecard")
+        self.assertEqual(s, 200, sc)
+        self.assertIn(sc["grade"], "ABCDF")
+        self.assertNotIn(kf.WIFI_PW, json.dumps(sc))
+
+        s, hb, _ = self.req("GET", "/api/handbook")
+        self.assertIn("network handbook", hb["html"])
+        self.assertNotIn("wo$rd", hb["html"])
+        s, hb, _ = self.req("GET", "/api/handbook?passwords=1")
+        self.assertIn("pa&quot;ss", hb["html"])
+        self.assertIn("_WITH-PASSWORDS", hb["filename"])
+
+        s, us, _ = self.req("GET", "/api/usage")
+        self.assertEqual(s, 200, us)
+        self.assertIn("month", us)
+        self.assertEqual(self.req("POST", "/api/usage/budget", {"dollars": -5})[0], 400)
+
+        s, log, _ = self.req("GET", "/api/changes?scope=here")
+        labels = [c["label"] for c in log["changes"]]
+        self.assertIn("Name a client", labels)
+        self.assertIn("Change switch port settings", labels)
+
+    def test_2_reset_kit(self):
+        s, snap, _ = self.req("POST", "/api/resetkit/snapshot", {})
+        self.assertEqual(s, 200, snap)
+        sid = snap["id"]
+        s, v, _ = self.req("POST", "/api/resetkit/variance", {"id": sid})
+        self.assertGreater(v["summary"]["added"], 3)
+        s, sc, _ = self.req("POST", "/api/resetkit/script", {"id": sid})
+        self.assertNotIn(kf.WIFI_PW, sc["text"])
+        self.assertTrue(sc["filename"].endswith(".sh"))
+        s, sc, _ = self.req("POST", "/api/resetkit/script", {"id": sid, "embed_secrets": True,
+                                                             "selected": ["wlans:name:Mike's IoT"]})
+        self.assertIn(json.dumps(kf.WIFI_PW)[1:-1].replace("'", "'\\''"), sc["text"])
+        self.assertEqual(sc["stats"]["items"], 1)
+        s, sec, _ = self.req("POST", "/api/resetkit/secrets", {"id": sid})
+        self.assertIn(kf.WG_CONF, [x["value"] for x in sec["secrets"]])
+        s, rep, _ = self.req("POST", "/api/resetkit/report", {"id": sid, "compare": True})
+        self.assertIn("exact", rep["markdown"])
+        self.assertEqual(self.req("POST", "/api/resetkit/variance", {"id": "nope"})[0], 400)
+        s, lst, _ = self.req("POST", "/api/resetkit/delete", {"id": sid})
+        self.assertEqual(lst["snapshots"], [])
 
 
 if __name__ == "__main__":

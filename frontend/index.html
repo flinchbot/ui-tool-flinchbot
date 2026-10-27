@@ -270,6 +270,16 @@
   .wan-stat .v { font-size:1.25rem; font-weight:700; } .wan-stat .l { font-size:0.6875rem; color:var(--muted); margin-top:2px; }
   .wan-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; font-size:0.8125rem; }
   .wan-controls select { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:6px 8px; font-family:inherit; }
+  .inline-input { width:110px; padding:6px 8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--radius); font:inherit; }
+  .usage-chip { padding:4px 10px; font-size:0.75rem; font-family:var(--font-mono); }
+  .usage-chip.warn { border-color:var(--warn); color:var(--warn); } .usage-chip.bad { border-color:var(--danger); color:var(--danger); }
+  ul.clues { margin:4px 0 0 18px; font-size:0.75rem; color:var(--muted); line-height:1.55; }
+  .data-table td.bad { color:var(--danger); font-weight:600; } .data-table td.warn { color:var(--warn); }
+  .mono { font-family:var(--font-mono); font-size:0.6875rem; }
+  .kit-item { display:flex; align-items:flex-start; gap:8px; padding:5px 0; font-size:0.8125rem; cursor:pointer; }
+  .kit-item input { margin-top:3px; } .kit-item .what { flex:1; } .kit-item small { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
+  .kit-opt { display:flex; align-items:center; gap:6px; font-size:0.8125rem; margin:6px 0; cursor:pointer; }
+  ol.steps { margin:6px 0 4px 18px; font-size:0.8125rem; line-height:1.6; }
   .data-table { width:100%; border-collapse:collapse; font-size:0.75rem; margin-top:6px; }
   .data-table th, .data-table td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
   .data-table th { color:var(--muted); font-weight:600; }
@@ -307,6 +317,17 @@
       <button class="btn" id="topoBtn" title="Map of the UniFi devices with the clients that have issues">🗺 Topology</button>
       <button class="btn" id="wanBtn" title="Internet speed and WAN events over time; scheduled speed tests">📈 WAN</button>
       <button class="btn" id="changesBtn" title="Every change made through this app, with Undo where possible">🧾 Changes</button>
+      <div style="position:relative">
+        <button class="btn" id="toolsBtn" title="Port map, device detective, security scorecard, handbook, factory-reset kit, AI cost" aria-haspopup="true">🧰 Tools ▾</button>
+        <div id="toolsMenu" class="menu" style="left:auto;right:0;min-width:300px" hidden>
+          <button class="menu-item" data-tool="ports"><span class="check">🔌</span><span>Switch port map<small>what is plugged into every port, PoE, errors</small></span></button>
+          <button class="menu-item" data-tool="detective"><span class="check">🕵</span><span>Device detective<small>who is that unnamed or new device?</small></span></button>
+          <button class="menu-item" data-tool="scorecard"><span class="check">🛡</span><span>Security scorecard<small>grade the network; fix with flinchbot</small></span></button>
+          <button class="menu-item" data-tool="handbook"><span class="check">📘</span><span>Network handbook<small>printable documentation of the whole network</small></span></button>
+          <button class="menu-item" data-tool="resetkit"><span class="check">♻</span><span>Factory-reset kit<small>what is customised, plus SSH restore commands</small></span></button>
+          <button class="menu-item" data-tool="usage"><span class="check">💰</span><span>AI usage and cost<small>tokens and estimated spend</small></span></button>
+        </div>
+      </div>
       <button class="btn" id="backupBtn" title="Download a backup of this console's UniFi Network settings (.unf) to this computer. Restore it in UniFi: Settings → System → Backups.">💾 Backup</button>
       <button class="btn" id="refreshBtn" title="Reload network data">↻ Refresh</button>
       <button class="btn" id="clearBtn" title="Start a new conversation">✕ Clear chat</button>
@@ -344,6 +365,7 @@
         <div><h2>Network Assistant</h2><div class="sub" id="chatSub"></div></div>
         <div style="display:flex;align-items:center;gap:12px">
           <span class="muted">Changes always ask for your approval first</span>
+          <button class="btn usage-chip" id="usageChip" title="AI tokens and estimated cost">💰 —</button>
           <div style="position:relative">
             <button class="btn" id="exportBtn" title="Save this conversation" aria-haspopup="true">⤓ Export</button>
             <div id="exportMenu" class="menu" style="left:auto;right:0;min-width:220px" hidden>
@@ -648,6 +670,7 @@ async function runChat(path, body) {
     const d = await api('POST', path, body);
     $('typing')?.remove();
     if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
+    if (d.usage) renderUsageChip(d.usage);
     if (d.pending && d.pending.length) addApproval(d.pending);
     if (path.endsWith('decide')) refreshNetwork();
     ok = d;
@@ -721,6 +744,7 @@ function clearChatView(note) {
 async function resetChat() {
   try { await api('POST', '/api/reset', {}); } catch (e) { toast(e.message, true); return; }
   clearChatView();
+  refreshUsage();
 }
 
 // ── modal plumbing ────────────────────────────────────────────────────────
@@ -1576,6 +1600,369 @@ async function runBackup() {
   finally { btn.disabled = false; btn.textContent = label; }
 }
 
+// ── shared helpers for the tool windows ──────────────────────────────────
+function needConnection() { if (!status || !status.active) { openConnections(null, true); return true; } return false; }
+function busyModal(title, text) {
+  openModal(...modalHead(title, null, false),
+    h('div', { style: 'display:flex;gap:14px;align-items:center;margin:8px 0 6px' }, h('div', { class: 'spinner' }), h('div', {}, text)));
+}
+function failModal(title, e, retry) {
+  openModal(...modalHead(title), result('bad', e.message),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Close'),
+      retry ? h('button', { class: 'btn primary', onclick: retry }, 'Try again') : null));
+}
+const fmtWhen = iso => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied.'), () => toast('Copy failed.', true)); }
+
+
+// ── pan/zoom viewer for a server-made SVG ──────────────────────────────────
+function svgViewer(svgText, cls = 'topo-view') {
+  const svg = importSvg(svgText);
+  const view = h('div', { class: cls }, svg);
+  let scale = 1, tx = 0, ty = 0, drag = null;
+  const apply = () => { svg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; };
+  const fit = () => {
+    const vw = view.clientWidth, vh = view.clientHeight, sw = Number(svg.getAttribute('width')), sh = Number(svg.getAttribute('height'));
+    scale = Math.min(1, vw / sw, vh / sh); tx = Math.max(0, (vw - sw * scale) / 2); ty = 0; apply();
+  };
+  const zoom = (f, cx, cy) => {
+    const s = Math.min(6, Math.max(0.15, scale * f));
+    if (cx === undefined) { cx = view.clientWidth / 2; cy = view.clientHeight / 2; }
+    tx = cx - (cx - tx) * (s / scale); ty = cy - (cy - ty) * (s / scale); scale = s; apply();
+  };
+  view.addEventListener('wheel', e => { e.preventDefault(); const b = view.getBoundingClientRect(); zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - b.left, e.clientY - b.top); }, { passive: false });
+  view.addEventListener('pointerdown', e => { drag = { x: e.clientX - tx, y: e.clientY - ty }; view.classList.add('dragging'); view.setPointerCapture(e.pointerId); });
+  view.addEventListener('pointermove', e => { if (drag) { tx = e.clientX - drag.x; ty = e.clientY - drag.y; apply(); } });
+  view.addEventListener('pointerup', () => { drag = null; view.classList.remove('dragging'); });
+  view.addEventListener('pointercancel', () => { drag = null; view.classList.remove('dragging'); });
+  return { view, fit, zoom };
+}
+function askFlinchbot(display, text) { closeModal(); sendMessage({ display, text }); }
+function undoNote(r) { return r.change && r.change.can_undo ? ' Undo is in 🧾 Changes.' : ''; }
+
+// ── switch port map ────────────────────────────────────────────────────────
+async function openPortMap() {
+  if (needConnection()) return;
+  busyModal('Switch port map', `Reading ports, PoE and connected clients from “${status.active.name}”…`);
+  let r;
+  try { r = await api('GET', '/api/portmap'); } catch (e) { failModal('Switch port map', e, openPortMap); return; }
+  const v = svgViewer(r.svg);
+  const portAct = async (path, body, msg) => {
+    try { const x = await api('POST', path, body); toast(msg + undoNote(x)); openPortMap(); } catch (e) { toast(e.message, true); }
+  };
+  const tables = r.devices.map(d => h('details', { class: 'chg', open: d.error_ports ? true : null },
+    h('summary', {}, h('span', { class: 'what' }, d.name, h('small', {}, ` · ${d.model} · ${d.ip} · ${d.ports_up}/${d.ports.length} up${d.poe_watts ? ` · PoE ${d.poe_watts} W${d.poe_budget ? ' of ' + d.poe_budget + ' W' : ''}` : ''}`)),
+      d.error_ports ? h('span', { class: 'badge high' }, `${d.error_ports} with errors`) : null),
+    h('div', { class: 'body' }, h('table', { class: 'data-table' },
+      h('thead', {}, h('tr', {}, ...['Port', 'Name', 'Link', 'PoE', 'Connected', 'Issues', ''].map(t => h('th', {}, t)))),
+      h('tbody', {}, ...d.ports.map(p => {
+        const what = [...p.devices.map(x => `${x.name} (${x.model})`), ...p.lldp.map(x => x.name),
+          ...p.clients.slice(0, 4).map(c => `${c.name} ${c.ip}`), p.clients.length > 4 ? `+${p.clients.length - 4} more` : null,
+          p.uplink_to && !p.devices.length ? `↑ ${p.uplink_to}` : null].filter(Boolean).join('; ');
+        const rename = h('button', { class: 'btn', title: 'Rename this port', onclick: () => {
+          const name = prompt(`New name for port ${p.idx} on ${d.name}:`, p.name.startsWith('Port ') ? '' : p.name);
+          if (name && name.trim()) portAct('/api/portmap/port', { mac: d.mac, port_idx: p.idx, name: name.trim(), device: d.name }, `Port ${p.idx} renamed.`);
+        } }, '✎');
+        const cycle = p.poe_watts ? h('button', { class: 'btn', title: 'Cut PoE power for a few seconds to reboot what is plugged in', onclick: () => {
+          if (confirm(`Power-cycle port ${p.idx} on ${d.name}? ${what || 'The device on it'} loses power and restarts.`))
+            portAct('/api/portmap/power-cycle', { mac: d.mac, port_idx: p.idx, device: d.name }, `Port ${p.idx} power-cycled.`);
+        } }, '⏻') : null;
+        return h('tr', {}, h('td', {}, String(p.idx)), h('td', {}, p.name), h('td', {}, p.speed_label || (p.enabled ? '—' : 'off')),
+          h('td', {}, p.poe_watts ? `${p.poe_watts} W` : ''), h('td', {}, what),
+          h('td', { class: p.severity === 'bad' ? 'bad' : p.issues.length ? 'warn' : '' }, p.issues.join(', ')),
+          h('td', { style: 'white-space:nowrap' }, rename, cycle));
+      }))))));
+  openModal(...modalHead('Switch port map', `${r.network} · ${fmtWhen(r.generated_at)} · hover a port in the drawing for details`), v.view,
+    h('div', { class: 'topo-bar' }, h('span', { class: 'muted' }, 'Error counts are since each switch last restarted. A red outline means 1,000+ errors or half duplex.'),
+      h('button', { class: 'btn', onclick: () => v.zoom(1 / 1.3) }, '−'), h('button', { class: 'btn', onclick: () => v.zoom(1.3) }, '+'),
+      h('button', { class: 'btn', onclick: v.fit }, 'Fit'),
+      h('button', { class: 'btn', onclick: () => download(`unifi-ports_${safeName(r.network)}_${stamp(new Date())}.svg`, r.svg, 'image/svg+xml;charset=utf-8') }, '⤓ SVG')),
+    h('div', { class: 'chg-list', style: 'max-height:34vh' }, ...tables),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn left', onclick: () => askFlinchbot('Check my switch ports', 'Use get_port_map and check my switch ports: errors, half duplex, slow links, PoE budget, anything odd. For each problem say what it likely is (cable, connector, device) and what to do.') }, '💬 Ask flinchbot about the ports'),
+      h('button', { class: 'btn', onclick: openPortMap }, '↻ Refresh'), h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+  v.fit();
+}
+
+// ── device detective ───────────────────────────────────────────────────────
+async function openDetective(showAll = false) {
+  if (needConnection()) return;
+  busyModal('Device detective', `Looking for unnamed and new devices on “${status.active.name}”…`);
+  let r;
+  try { r = await api('GET', '/api/detective'); } catch (e) { failModal('Device detective', e, () => openDetective(showAll)); return; }
+  const nm = r.nmap;
+  const list = showAll ? r.clients : r.clients.slice(0, 40);
+  const rows = list.map(c => {
+    const out = h('div', {});
+    const label = c.name || c.hostname || c.display_name || c.mac;
+    const scan = h('button', { class: 'btn', disabled: !nm.installed || !c.ip || null,
+      title: nm.installed ? 'Nmap scan of this device (about a minute)' : 'Install Nmap to scan devices (see below)' }, '🔍 Scan');
+    scan.addEventListener('click', async () => {
+      scan.disabled = true; scan.textContent = 'Scanning… (up to 2 min)';
+      try {
+        const x = await api('POST', '/api/detective/scan', { mac: c.mac, label });
+        const ports = x.result.open_ports || [];
+        out.replaceChildren(h('div', { class: 'note', style: 'margin:6px 0' },
+          ports.length ? `Open ports: ${ports.map(p => `${p.port}/${p.protocol} ${[p.name, p.product, p.version].filter(Boolean).join(' ')}`).join(' · ')}`
+                       : 'No open TCP ports among the 200 most common (typical for phones and many IoT devices).'));
+        c.scan = ports;
+      } catch (e) { toast(e.message, true); }
+      scan.disabled = false; scan.textContent = '🔍 Scan';
+    });
+    const name = h('button', { class: 'btn', onclick: async () => {
+      const n = prompt(`Name for ${label} (${c.mac}):`, c.name || c.unifi_guess || '');
+      if (!n || !n.trim()) return;
+      try { const x = await api('POST', '/api/detective/name', { mac: c.mac, name: n.trim() }); toast(`Named “${n.trim()}”.` + undoNote(x)); openDetective(showAll); }
+      catch (e) { toast(e.message, true); }
+    } }, '✎ Name');
+    const ask = h('button', { class: 'btn', onclick: () => askFlinchbot(`Who is ${label}?`,
+      `Help me identify this client. MAC ${c.mac}, IP ${c.ip || 'none'}, hostname “${c.hostname || ''}”, maker “${c.vendor || 'unknown'}”, ` +
+      `UniFi's guess “${c.unifi_guess || 'none'}”, ${c.random_mac ? 'private/random MAC, ' : ''}connected via ${c.where || '?'} on ${c.network || '?'}` +
+      `${c.scan ? `, open ports ${c.scan.map(p => p.port + ' ' + (p.product || p.name || '')).join(', ')}` : ''}. ` +
+      `Use get_client and other tools (and scan_client if useful). Tell me what it most likely is, then propose a name with set_client_name.`) }, '💬 Ask');
+    return h('div', { class: 'chg' }, h('div', { class: 'body', style: 'padding:8px 10px' },
+      h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' },
+        h('b', {}, label), c.new ? h('span', { class: 'badge high' }, 'new') : null, c.random_mac ? h('span', { class: 'badge muted' }, 'private MAC') : null,
+        h('span', { class: 'muted mono' }, `${c.ip || 'no IP'} · ${c.mac}${c.where ? ' · ' + c.where : ''}${c.first_seen ? ' · first seen ' + new Date(c.first_seen * 1000).toLocaleDateString() : ''}`),
+        h('span', { style: 'flex:1' }), name, scan, ask),
+      h('ul', { class: 'clues' }, ...c.clues.map(x => h('li', {}, x))), out));
+  });
+  const nmapNote = nm.installed ? h('div', { class: 'muted', style: 'font-size:0.75rem' }, `Nmap ${nm.version || ''} found. Scans are TCP connect scans of one device at a time and are logged in 🧾 Changes.`)
+    : h('div', { class: 'note', style: 'margin:6px 0' }, 'Install Nmap to scan devices: ',
+        h('a', { href: 'https://nmap.org/download', target: '_blank', rel: 'noopener' }, 'nmap.org/download'),
+        IS_MAC_UA ? ' (or in Terminal: brew install nmap)' : ' (Windows installer; accept the Npcap option)', ', then restart the app. ',
+        h('a', { href: '/setup#nmap', target: '_blank', rel: 'noopener' }, 'More in the setup guide.'));
+  openModal(...modalHead('Device detective', `${r.network} · ${r.clients.length} unnamed or new clients, most mysterious first`),
+    nmapNote,
+    h('div', { class: 'chg-list', style: 'max-height:58vh' }, rows.length ? rows : h('div', { class: 'muted' }, 'Every client has a name, and nothing new joined this week.')),
+    h('div', { class: 'actions' },
+      r.clients.length > 40 && !showAll ? h('button', { class: 'btn left', onclick: () => openDetective(true) }, `Show all ${r.clients.length}`) : null,
+      h('button', { class: 'btn', onclick: () => askFlinchbot('Identify my unknown devices', 'Use get_unknown_clients and work through my unnamed and new devices. Group the ones you can identify with confidence and propose names (set_client_name) for those; list the ones you can\'t identify and what I could check.') }, '💬 Ask flinchbot to work through them'),
+      h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+}
+
+// ── security scorecard ─────────────────────────────────────────────────────
+const SC_WEIGHT = { critical: 25, high: 12, medium: 6, low: 2 };
+function scGrade(findings) {
+  const score = Math.max(0, 100 - findings.reduce((n, f) => n + (SC_WEIGHT[f.severity] || 0), 0));
+  return { score, grade: score >= 90 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : score >= 60 ? 'D' : 'F' };
+}
+async function openScorecard(extra = null) {
+  if (needConnection()) return;
+  busyModal('Security scorecard', `Checking the configuration of “${status.active.name}”…`);
+  let r;
+  try { r = await api('GET', '/api/scorecard'); } catch (e) { failModal('Security scorecard', e, openScorecard); return; }
+  const findings = [...r.findings, ...((extra && extra.findings) || [])];
+  const g = scGrade(findings), sevs = ['critical', 'high', 'medium', 'low'];
+  const card = f => h('details', { class: 'chg', open: f.severity === 'critical' || f.severity === 'high' || null },
+    h('summary', {}, h('span', { class: `badge ${f.severity}` }, f.severity), h('span', { class: 'what' }, f.title, h('small', {}, ' · ', f.category))),
+    h('div', { class: 'body' }, h('div', {}, f.detail),
+      f.affected.length ? h('div', { class: 'muted mono', style: 'margin-top:4px' }, f.affected.slice(0, 12).join(' · ')) : null,
+      h('div', { style: 'margin-top:6px' }, h('b', {}, 'Fix: '), f.fix.join(' ')),
+      h('button', { class: 'btn', style: 'margin-top:6px', onclick: () => askFlinchbot(`Fix: ${f.title}`, f.ask) }, '💬 Fix with flinchbot')));
+  const scanBtn = h('button', { class: 'btn', disabled: !r.nmap.installed || null,
+    title: r.nmap.installed ? 'Nmap checks every connected device for risky open ports (telnet, SMB, RDP, VNC, MQTT…)' : 'Install Nmap from nmap.org to use this' },
+    extra ? `↻ Scan again (${extra.checked} checked)` : '🔍 Scan devices for risky ports (Nmap)');
+  scanBtn.addEventListener('click', async () => {
+    if (!confirm('Scan every connected device for risky open ports with Nmap? It takes a few minutes and some devices log it as a port scan.')) return;
+    scanBtn.disabled = true; scanBtn.textContent = 'Scanning… (a few minutes)';
+    try { const x = await api('POST', '/api/scorecard/scan', {}); openScorecard(x); }
+    catch (e) { toast(e.message, true); scanBtn.disabled = false; scanBtn.textContent = '🔍 Scan devices for risky ports (Nmap)'; }
+  });
+  const color = { A: 'var(--ok)', B: 'var(--ok)', C: 'var(--medium)', D: 'var(--warn)', F: 'var(--danger)' }[g.grade];
+  openModal(...modalHead('Security scorecard', `${r.network} · ${fmtWhen(r.generated_at)} · rule-based, from the console's own settings`),
+    h('div', { class: 'wan-stats' },
+      h('div', { class: 'wan-stat', style: 'flex:0 0 150px;text-align:center' }, h('div', { class: 'v', style: `font-size:2.5rem;color:${color}` }, g.grade), h('div', { class: 'l' }, `${g.score} / 100`)),
+      ...sevs.map(s => h('div', { class: 'wan-stat' }, h('div', { class: 'v' }, String(findings.filter(f => f.severity === s).length)), h('div', { class: 'l' }, s)))),
+    extra ? h('div', { class: 'note', style: 'margin:6px 0' }, `Nmap checked ${extra.checked} devices${extra.checked >= extra.limit ? ` (the first ${extra.limit})` : ''}: ${extra.findings.length} with risky ports open.`) : null,
+    h('div', { class: 'chg-list', style: 'max-height:46vh' }, findings.length ? findings.map(card) : h('div', { class: 'muted' }, 'No problems found.'),
+      r.passed.length ? h('details', { class: 'chg' }, h('summary', {}, h('span', { class: 'badge ok' }, 'ok'), h('span', { class: 'what' }, `${r.passed.length} checks passed`)),
+        h('ul', { class: 'clues' }, ...r.passed.map(p => h('li', {}, p)))) : null),
+    h('div', { class: 'actions' }, h('span', { class: 'left' }, scanBtn),
+      h('button', { class: 'btn', onclick: () => askFlinchbot('Review my security scorecard', 'Use get_security_scorecard. Explain my biggest risks in plain words, in order, and propose the first fix.') }, '💬 Discuss with flinchbot'),
+      h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+}
+
+// ── network handbook ───────────────────────────────────────────────────────
+function openHandbook() {
+  if (needConnection()) return;
+  const pw = h('input', { type: 'checkbox' });
+  const go = h('button', { class: 'btn primary' }, '📘 Create handbook');
+  go.addEventListener('click', async () => {
+    if (pw.checked && !confirm('The handbook will contain your Wi-Fi passwords. Keep the file private. Continue?')) return;
+    go.disabled = true; go.textContent = 'Reading the network…';
+    try {
+      const r = await api('GET', `/api/handbook?passwords=${pw.checked ? 1 : 0}`);
+      download(r.filename, r.html, 'text/html;charset=utf-8');
+      const url = URL.createObjectURL(new Blob([r.html], { type: 'text/html' }));
+      window.open(url, '_blank', 'noopener'); setTimeout(() => URL.revokeObjectURL(url), 60000);
+      closeModal();
+    } catch (e) { toast(e.message, true); go.disabled = false; go.textContent = '📘 Create handbook'; }
+  });
+  openModal(...modalHead('Network handbook', `A printable document of “${status.active.name}”: networks and VLANs, Wi-Fi, devices with firmware, topology, every switch port, firewall policies, port forwards, routes, named clients and fixed IPs, and recent changes.`),
+    h('label', { class: 'kit-opt' }, pw, ' Include Wi-Fi passwords (for a copy you keep somewhere safe)'),
+    h('p', { class: 'muted', style: 'font-size:0.8125rem' }, 'It downloads as an .html file and opens in a new tab. To make a PDF, use the browser’s Print → Save as PDF.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), go));
+}
+
+// ── AI usage and cost ──────────────────────────────────────────────────────
+const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n || 0);
+const fmtUsd = v => v === null || v === undefined ? '—' : v > 0 && v < 0.01 ? '<$0.01' : '$' + Number(v).toFixed(v < 10 ? 2 : 0);
+function renderUsageChip(u) {
+  const chip = $('usageChip'); if (!chip || !u) return;
+  const c = u.chat || {};
+  chip.textContent = `💰 ${fmtTok(c.tokens || 0)} · ${fmtUsd(c.cost || 0)}`;
+  chip.title = `This chat: ${(c.tokens || 0).toLocaleString()} tokens, about ${fmtUsd(c.cost || 0)} (estimate).\nThis month: ${fmtUsd((u.month || {}).cost || 0)}${u.budget ? ' of ' + fmtUsd(u.budget) + ' budget' : ''}.\nClick for details.`;
+  chip.classList.toggle('warn', !!u.near_budget); chip.classList.toggle('bad', !!u.over_budget);
+}
+async function refreshUsage() { try { renderUsageChip(await api('GET', '/api/usage')); } catch {} }
+async function openUsage() {
+  let r;
+  try { r = await api('GET', '/api/usage'); } catch (e) { toast(e.message, true); return; }
+  renderUsageChip(r);
+  const tile = (label, s) => h('div', { class: 'wan-stat' }, h('div', { class: 'v' }, fmtUsd(s.cost)),
+    h('div', { class: 'l' }, `${label} · ${fmtTok(s.tokens)} tokens · ${s.calls} calls${s.unpriced ? ` · ${s.unpriced} unpriced` : ''}`));
+  const p = x => x ? `$${x.input} in · $${x.output} out · $${x.cache_read} cached · $${x.cache_write} cache write` : 'no price known';
+  const budget = h('input', { type: 'number', min: '0', step: '1', value: r.budget || '', placeholder: 'none', class: 'inline-input' });
+  const upd = h('button', { class: 'btn' }, '↻ Update prices (LiteLLM)');
+  upd.addEventListener('click', async () => { upd.disabled = true; try { const x = await api('POST', '/api/usage/update-prices', {}); toast(`Prices updated: ${x.updated} Claude and GPT models.`); openUsage(); } catch (e) { toast(e.message, true); upd.disabled = false; } });
+  const edit = model => {
+    const cur = (r.by_model.find(m => m.model === model) || {}).price || r.current_price || {};
+    const v = prompt(`Your own prices for ${model}, in $ per million tokens:\ninput, output, cached read, cache write\n(leave empty to remove your override)`,
+      [cur.input, cur.output, cur.cache_read, cur.cache_write].filter(x => x !== undefined).join(', '));
+    if (v === null) return;
+    const n = v.split(',').map(x => Number(x.trim()));
+    const body = v.trim() ? { model, prices: { input: n[0], output: n[1], cache_read: n[2], cache_write: n[3] } } : { model, remove: true };
+    if (v.trim() && (n.length !== 4 || n.some(x => !isFinite(x)))) { toast('Give four numbers separated by commas.', true); return; }
+    api('POST', '/api/usage/price', body).then(() => openUsage(), e => toast(e.message, true));
+  };
+  const models = r.by_model.length ? r.by_model : [{ model: r.model, price: r.current_price, price_source: r.current_price_source, cost: 0, tokens: 0, calls: 0 }];
+  openModal(...modalHead('AI usage and cost', 'Token counts are exact: each AI response reports them. Dollars are an estimate from published prices; your provider’s bill is the final word.'),
+    h('div', { class: 'wan-stats' }, tile('this chat', r.chat), tile('today', r.today), tile('last 7 days', r.last7), tile('this month', r.month)),
+    r.over_budget ? h('div', { class: 'note bad', style: 'margin:6px 0' }, `Over this month's budget of ${fmtUsd(r.budget)}.`) :
+      r.near_budget ? h('div', { class: 'note warn', style: 'margin:6px 0' }, `Over 80% of this month's budget of ${fmtUsd(r.budget)}.`) : null,
+    h('table', { class: 'data-table' }, h('thead', {}, h('tr', {}, ...['Model', 'This month', 'Tokens', 'Price per million tokens', 'Price from', ''].map(t => h('th', {}, t)))),
+      h('tbody', {}, ...models.map(m => h('tr', {}, h('td', { class: 'mono' }, m.model), h('td', {}, fmtUsd(m.cost)), h('td', {}, fmtTok(m.tokens)),
+        h('td', {}, p(m.price)), h('td', {}, m.price_source || '—'), h('td', {}, h('button', { class: 'btn', onclick: () => edit(m.model) }, '✎')))))),
+    h('div', { class: 'muted', style: 'font-size:0.75rem;margin:8px 0' }, 'Prices: ',
+      h('a', { href: r.sources.anthropic, target: '_blank', rel: 'noopener' }, 'Anthropic'), ' · ',
+      h('a', { href: r.sources.openai, target: '_blank', rel: 'noopener' }, 'OpenAI'), ' · ',
+      'LiteLLM’s public list ', r.prices_updated ? `(updated ${fmtWhen(r.prices_updated)})` : '(not downloaded yet)',
+      `. Built-in Claude prices are from ${r.builtin_date}. Cached input is billed at a fraction of the normal price, which is why long chats cost less than their token count suggests.`),
+    h('div', { class: 'wan-controls' }, h('span', { class: 'muted' }, 'Monthly budget (warning only), $'), budget,
+      h('button', { class: 'btn', onclick: () => api('POST', '/api/usage/budget', { dollars: Number(budget.value || 0) }).then(() => { toast('Budget saved.'); openUsage(); }, e => toast(e.message, true)) }, 'Save')),
+    h('div', { class: 'actions' }, h('span', { class: 'left' }, upd), h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+}
+
+// ── factory-reset kit ──────────────────────────────────────────────────────
+async function openResetKit() {
+  let r;
+  try { r = await api('GET', '/api/resetkit'); } catch (e) { toast(e.message, true); return; }
+  const take = h('button', { class: 'btn primary', disabled: !r.active || null }, r.active ? `📸 Take a snapshot of “${r.active_name}”` : 'Add a connection first');
+  take.addEventListener('click', async () => {
+    busyModal('Factory-reset kit', `Reading the whole configuration of “${r.active_name}” (read-only)…`);
+    try { const s = await api('POST', '/api/resetkit/snapshot', {}); openKitSnapshot(s.id); }
+    catch (e) { failModal('Snapshot failed', e, openResetKit); }
+  });
+  const rows = r.snapshots.map(s => {
+    const n = Object.values(s.counts || {}).reduce((a, b) => a + b, 0);
+    return h('div', { class: 'chg' }, h('div', { style: 'display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap' },
+      h('span', { class: 'when' }, fmtWhen(s.taken_at)),
+      h('span', { class: 'what' }, s.connection, h('small', {}, ` · ${s.host}${s.network_version ? ' · Network ' + s.network_version : ''} · ${n} objects${s.secret_count ? ' · ' + s.secret_count + ' passwords/keys, encrypted' : ''}`)),
+      h('button', { class: 'btn', onclick: () => openKitSnapshot(s.id) }, 'Open'),
+      h('button', { class: 'btn', title: 'Delete this snapshot and its saved passwords', onclick: async () => {
+        if (!confirm(`Delete the snapshot of “${s.connection}” from ${fmtWhen(s.taken_at)}? Its saved passwords go too.`)) return;
+        try { await api('POST', '/api/resetkit/delete', { id: s.id }); openResetKit(); } catch (e) { toast(e.message, true); } } }, 'Delete')));
+  });
+  openModal(...modalHead('Factory-reset kit', 'Before a factory reset, take a snapshot. It lists everything you customised and writes SSH commands that bring any of it back afterwards.'),
+    h('ol', { class: 'steps' },
+      h('li', {}, 'Now: take a snapshot below. Also download a UniFi backup (💾 Backup) as a full safety net.'),
+      h('li', {}, 'After the reset: set the console up, create a local admin, turn on SSH, and fix this app’s connection (address, password, trust the new certificate).'),
+      h('li', {}, 'Open the snapshot and tick “Compare with … now” for an exact list of what is missing. Choose what you want back and download the SSH script.')),
+    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:8px 0' }, take,
+      h('a', { href: '/setup#reset-kit', target: '_blank', rel: 'noopener', style: 'margin-left:12px;font-size:0.8125rem' }, 'Step-by-step guide')),
+    h('h3', { style: 'margin:14px 0 6px;font-size:0.875rem' }, 'Saved snapshots'),
+    h('div', { class: 'chg-list' }, rows.length ? rows : h('div', { class: 'muted' }, 'None yet.')),
+    h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+}
+
+async function openKitSnapshot(id, compare = false) {
+  busyModal('Factory-reset kit', compare ? `Comparing with “${status.active.name}” as it is now…` : 'Working out what is customised…');
+  let v;
+  try { v = await api('POST', '/api/resetkit/variance', { id, compare }); }
+  catch (e) { failModal('Factory-reset kit', e, () => openKitSnapshot(id, compare)); return; }
+  const snap = v.snapshot, KIND = { added: ['ok', 'added'], changed: ['high', 'changed'], current: ['muted', 'built-in'] };
+  const boxes = [], groups = {};
+  for (const it of v.items) (groups[it.section] = groups[it.section] || { title: it.title, items: [] }).items.push(it);
+  const sections = Object.values(groups).map(g => {
+    const inner = g.items.map(it => {
+      const cb = h('input', { type: 'checkbox', checked: it.kind !== 'current' || null, 'data-id': it.id });
+      boxes.push(cb);
+      const [cls, word] = KIND[it.kind];
+      const changed = it.changed_fields && it.kind === 'changed' && !/clients|devices/.test(it.section);
+      return h('label', { class: 'kit-item' }, cb, h('span', { class: `badge ${cls}` }, word),
+        h('span', { class: 'what' }, it.label, it.summary ? h('small', {}, ' · ', it.summary) : null,
+          changed ? h('small', {}, ' · changed: ', it.changed_fields.slice(0, 8).join(', ')) : null,
+          ...(it.notes || []).map(n => h('small', { style: 'display:block' }, n))));
+    });
+    const all = h('button', { class: 'btn', type: 'button', style: 'padding:2px 8px;font-size:0.6875rem' }, 'all / none');
+    all.addEventListener('click', e => { e.preventDefault(); const cbs = inner.map(l => l.querySelector('input')); const on = !cbs.every(c => c.checked); cbs.forEach(c => c.checked = on); });
+    return h('details', { class: 'chg', open: g.items.some(i => i.kind !== 'current') || null },
+      h('summary', {}, h('span', { class: 'what' }, `${g.title} `, h('small', {}, `(${g.items.length})`)), all),
+      h('div', { class: 'body' }, ...inner));
+  });
+  const cmp = h('input', { type: 'checkbox', checked: compare || null });
+  cmp.addEventListener('change', () => openKitSnapshot(id, cmp.checked));
+  const embed = h('select', {}, h('option', { value: '0' }, 'Ask for them while the script runs (recommended)'),
+    h('option', { value: '1' }, 'Write them into the script file'));
+  const selected = () => boxes.filter(b => b.checked).map(b => b.dataset.id);
+  const dl = async kind => {
+    try {
+      if (kind === 'script') {
+        const em = embed.value === '1';
+        if (em && !confirm('The script file will contain your Wi-Fi passwords and VPN private keys in plain text. Keep it private and delete it when you are done. Continue?')) return;
+        const r = await api('POST', '/api/resetkit/script', { id, compare, selected: selected(), embed_secrets: em });
+        download(r.filename, r.text, 'text/x-shellscript;charset=utf-8');
+        toast(`Saved ${r.filename}: ${r.stats.items} items${r.stats.prompts ? `, asks for ${r.stats.prompts} password(s) or key(s)` : ''}.`);
+      } else {
+        const r = await api('POST', '/api/resetkit/report', { id, compare });
+        download(r.filename, r.markdown, 'text/markdown;charset=utf-8');
+      }
+    } catch (e) { toast(e.message, true); }
+  };
+  const s = v.summary;
+  const tile = (n, l) => h('div', { class: 'wan-stat' }, h('div', { class: 'v' }, String(n)), h('div', { class: 'l' }, l));
+  openModal(...modalHead('Factory-reset kit', `${snap.connection} (${snap.host}) · snapshot ${fmtWhen(snap.taken_at)}${snap.network_version ? ' · Network ' + snap.network_version : ''}`),
+    h('div', { class: 'wan-stats' }, tile(s.added, 'added by you'), tile(s.changed, 'changed from default'), tile(s.current, 'built-in, current values')),
+    h('label', { class: 'kit-opt' }, cmp, ' Compare with ', h('b', {}, status.active ? `“${status.active.name}”` : 'the active connection'),
+      ' now (after the reset) and list only what differs'),
+    v.exact ? null : h('div', { class: 'note', style: 'margin:6px 0' }, 'Things you added are exact. Built-in objects and settings can’t be compared with a factory console the app has never seen, so they show their current values, unticked. Tick the ones you want written back, or compare after the reset.'),
+    ...Object.entries(v.unavailable || {}).map(([k, e]) => h('div', { class: 'note warn', style: 'margin:6px 0' }, `Not read: ${k} (${e})`)),
+    h('div', { class: 'chg-list', style: 'max-height:46vh' }, sections.length ? sections : h('div', { class: 'muted' }, 'Nothing differs.')),
+    field('Passwords, Wi-Fi keys and VPN configs', embed, `Either way, the snapshot keeps them encrypted on this computer, with the key in ${storeName()}.`),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn left', onclick: openResetKit }, '← Snapshots'),
+      snap.secret_count ? h('button', { class: 'btn', onclick: () => showKitSecrets(id) }, '🔑 Show passwords') : null,
+      h('button', { class: 'btn', onclick: () => dl('report') }, '⤓ Report (.md)'),
+      h('button', { class: 'btn primary', onclick: () => dl('script') }, '⤓ SSH script (.sh)')));
+  $('modal').classList.add('wide');
+}
+
+async function showKitSecrets(id) {
+  if (!confirm('Show the saved passwords, Wi-Fi keys and VPN configs on screen?')) return;
+  let r;
+  try { r = await api('POST', '/api/resetkit/secrets', { id }); } catch (e) { toast(e.message, true); return; }
+  openModal(...modalHead('Saved passwords and keys', 'Copy one when a restore command asks for it. For a multi-line VPN config, paste all of it, then type END on its own line.'),
+    h('div', { class: 'chg-list' }, ...r.secrets.map(x => h('div', { class: 'chg' }, h('div', { class: 'body', style: 'padding:8px 10px' },
+      h('div', {}, h('b', {}, x.object), ` · ${x.section} · ${x.field}`),
+      h('pre', {}, x.value),
+      h('button', { class: 'btn', onclick: () => copyText(x.value) }, 'Copy'))))),
+    h('div', { class: 'actions' }, h('button', { class: 'btn left', onclick: () => openKitSnapshot(id) }, '← Back'), h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+}
 // ── themes ───────────────────────────────────────────────────────────────
 function openThemes() {
   if (!window.Themes) { toast('Themes could not be loaded.', true); return; }
@@ -1662,6 +2049,16 @@ $('topoBtn').addEventListener('click', openTopology);
 $('wanBtn').addEventListener('click', () => openWan());
 $('changesBtn').addEventListener('click', () => openChanges());
 $('backupBtn').addEventListener('click', runBackup);
+$('usageChip').addEventListener('click', openUsage);
+$('toolsBtn').addEventListener('click', e => { e.stopPropagation(); $('toolsMenu').hidden = !$('toolsMenu').hidden; });
+document.addEventListener('click', e => { if (!e.target.closest('#toolsMenu') && e.target.id !== 'toolsBtn') $('toolsMenu').hidden = true; });
+$('toolsMenu').addEventListener('click', e => {
+  const b = e.target.closest('[data-tool]'); if (!b) return;
+  $('toolsMenu').hidden = true;
+  ({ ports: openPortMap, detective: openDetective, scorecard: openScorecard, handbook: openHandbook,
+     resetkit: openResetKit, usage: openUsage })[b.dataset.tool]();
+});
+
 function showReportOrNew() {
   if (lastReport.network === (status && status.active && status.active.name)) showReport(lastReport); else runReport();
 }
@@ -1675,6 +2072,7 @@ async function init() {
   if (!s) return;
   if (!s.configured) openSettings(true);
   else if (!s.has_connections) openConnections(null, true, true);
+  refreshUsage();
   await refreshNetwork();
   if (s.pending && s.pending.length) addApproval(s.pending);
 }
