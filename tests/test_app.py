@@ -254,7 +254,7 @@ class AgentTests(unittest.TestCase):
         self.client = UniFiClient({"host": "127.0.0.1", "port": self.m.port, "username": "claude",
                                    "auth": "password", "console_type": "unifi_os"}, "pw")
         self.agent = agent_mod.Agent(lambda: self.client,
-                                     lambda: {"api_key": "sk-ant-test", "model": "m", "max_rounds": 5},
+                                     lambda: {"api_key": "sk-ant-test", "model": "m", "max_rounds": 5, "max_tokens": 16000},
                                      lambda: {"name": "Test", "site": "default", "console": "UniFi OS console"})
         FakeAnthropic.script, FakeAnthropic.received = [], []
 
@@ -319,6 +319,24 @@ class AgentTests(unittest.TestCase):
         last = msgs[-1]["content"]
         self.assertEqual(last[0]["type"], "tool_result")                           # results first
         self.assertEqual(last[-1], {"type": "text", "text": "actually never mind"})
+
+    def test_output_limit_never_runs_a_cut_off_tool_call(self):
+        FakeAnthropic.script = [[text("Looking"), tool("t1", "restart_device", {"mac": "aa"})]]
+        orig = FakeAnthropic.create
+        def cut(self_, **kw):
+            FakeAnthropic.received.append(kw)
+            return types.SimpleNamespace(content=FakeAnthropic.script.pop(0), stop_reason="max_tokens")
+        FakeAnthropic.create = cut
+        try:
+            r = self.agent.chat("go")
+        finally:
+            FakeAnthropic.create = orig
+        self.assertIsNone(r["pending"])
+        self.assertIn("output limit", r["reply"])
+        self.assertEqual(FakeAnthropic.received[0]["max_tokens"], 16000)
+        self.assertFalse(any(b.get("type") == "tool_use" for b in self.agent.history[-1]["content"]))
+        FakeAnthropic.script = [[text("Continuing.")]]
+        self.assertEqual(self.agent.chat("continue")["reply"], "Continuing.")   # history still valid
 
     def test_round_cap(self):
         FakeAnthropic.script = [[tool(f"t{i}", "get_health", {})] for i in range(5)]

@@ -75,9 +75,15 @@ def agent_settings():
         rounds = int(cfg.get_setting("MAX_TOOL_ROUNDS"))
     except ValueError:
         rounds = 15
+    try:
+        out_tokens = int(cfg.get_setting("MAX_OUTPUT_TOKENS"))
+    except ValueError:
+        out_tokens = 16000
     return {"api_key": cfg.get_setting("ANTHROPIC_API_KEY"),
             "model": cfg.get_setting("CLAUDE_MODEL"),
-            "max_rounds": max(1, min(rounds, 50))}
+            "max_rounds": max(1, min(rounds, 50)),
+            # 21,000 is the SDK's ceiling for a non-streaming request
+            "max_tokens": max(2000, min(out_tokens, 21000))}
 
 
 def agent_context():

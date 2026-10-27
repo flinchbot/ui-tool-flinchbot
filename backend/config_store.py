@@ -36,6 +36,7 @@ DEFAULTS = {
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
+    "MAX_OUTPUT_TOKENS": "16000",
 }
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.

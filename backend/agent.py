@@ -459,20 +459,29 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             raise AgentError("No Anthropic API key yet. Open Settings (gear icon) to add one.")
         client = Anthropic(api_key=settings["api_key"])
         max_rounds = settings.get("max_rounds", 15)
+        max_tokens = settings.get("max_tokens", 16000)
         texts = []
         for _ in range(max_rounds):
             self._trim()
             resp = client.messages.create(
-                model=settings["model"], max_tokens=4096, system=self._system_prompt(),
+                model=settings["model"], max_tokens=max_tokens, system=self._system_prompt(),
                 tools=TOOLS, messages=copy.deepcopy(self.history))
             blocks = [_block_to_dict(b) for b in resp.content] or [{"type": "text", "text": "(no response)"}]
             self.history.append({"role": "assistant", "content": blocks})
             texts += [b["text"] for b in blocks if b.get("type") == "text" and b.get("text", "").strip()]
             calls = [b for b in blocks if b.get("type") == "tool_use"]
 
+            if resp.stop_reason == "max_tokens":
+                # Out of output budget (Claude's built-in reasoning counts toward it too).
+                # A tool call cut off mid-way may be incomplete, so never run it.
+                if calls:
+                    self.history[-1]["content"] = [b for b in blocks if b.get("type") != "tool_use"] or \
+                                                  [{"type": "text", "text": "(cut off)"}]
+                texts.append(f"_(Reply hit the {max_tokens:,}-token output limit before finishing. Say "
+                             f"\"continue\", ask a narrower question, or raise MAX_OUTPUT_TOKENS in .env.)_")
+                return {"reply": "\n\n".join(texts), "pending": None}
+
             if not calls:
-                if resp.stop_reason == "max_tokens":
-                    texts.append("_(Reply was cut off at the length limit - ask me to continue.)_")
                 return {"reply": "\n\n".join(texts) or "(No response)", "pending": None}
 
             results, writes = [], []
