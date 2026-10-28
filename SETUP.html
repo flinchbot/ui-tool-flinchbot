@@ -467,6 +467,14 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <td>In Terminal, in the app folder, run <code>bash start.command</code>, or <code>chmod +x start.command</code> once.</td>
 </tr>
 <tr>
+<td><em>"UniFi x flinchbot … is already running on port 8080"</em></td>
+<td>The app is already open in another window, maybe an older copy you didn't close before updating. Close that window (or press Ctrl+C in it), then start the app again.</td>
+</tr>
+<tr>
+<td><em>"Unknown endpoint …"</em> in a window of an older version (before 2.7.1)</td>
+<td>An older copy of the app is still running, and its files were updated underneath it. Close every app window and start it once.</td>
+</tr>
+<tr>
 <td><em>"Could not start on 127.0.0.1:8080"</em></td>
 <td>Another program uses port 8080. Run <code>start.bat --port 8090</code> (Windows) or <code>./start.command --port 8090</code> (Mac), or change the port in Settings.</td>
 </tr>

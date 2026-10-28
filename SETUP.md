@@ -321,6 +321,8 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 | *"running from inside the downloaded ZIP file"* | Right-click the ZIP → **Extract All…** into a permanent folder (step 5) and start it from there. |
 | Mac: *"start.command" can't be opened because Apple cannot check it* | Right-click `start.command` → **Open** → **Open** (once). |
 | Mac: *"permission denied"* when starting | In Terminal, in the app folder, run `bash start.command`, or `chmod +x start.command` once. |
+| *"UniFi x flinchbot … is already running on port 8080"* | The app is already open in another window, maybe an older copy you didn't close before updating. Close that window (or press Ctrl+C in it), then start the app again. |
+| *"Unknown endpoint …"* in a window of an older version (before 2.7.1) | An older copy of the app is still running, and its files were updated underneath it. Close every app window and start it once. |
 | *"Could not start on 127.0.0.1:8080"* | Another program uses port 8080. Run `start.bat --port 8090` (Windows) or `./start.command --port 8090` (Mac), or change the port in Settings. |
 | *"Timed out reaching https://…"* | This PC can't reach the console. Is it on that network or VPN? Can you open `https://<console IP>` in the browser? |
 | *"refused the connection"* | Wrong port. See the port table in step 3. |

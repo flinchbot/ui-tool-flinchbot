@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -54,8 +55,9 @@ import topology                                                        # noqa: E
 import wan                                                             # noqa: E402
 from unifi_client import summarize_event                               # noqa: E402
 from urllib.parse import parse_qs                                      # noqa: E402
+import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -295,9 +297,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_page(self):
-        path = os.path.join(cfg.FRONTEND_DIR, "index.html")
-        with open(path, encoding="utf-8") as f:
-            html = f.read().replace("__APP_TOKEN__", APP_TOKEN).replace("__APP_VERSION__", APP_VERSION)
+        html = page_template().replace("__APP_TOKEN__", APP_TOKEN).replace("__APP_VERSION__", APP_VERSION)
         body = html.encode()
         self._headers(200, "text/html; charset=utf-8", len(body))
         self.send_header("Content-Security-Policy",
@@ -391,6 +391,44 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(405)      # no CORS: cross-site callers are not welcome
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+
+_PAGE = None
+
+
+def page_template():
+    """The page as it was when the app started. Read once: files copied over a
+    running app must not hand it a newer page that calls endpoints it lacks."""
+    global _PAGE
+    if _PAGE is None:
+        with open(os.path.join(cfg.FRONTEND_DIR, "index.html"), encoding="utf-8") as f:
+            _PAGE = f.read()
+    return _PAGE
+
+
+class AppServer(ThreadingHTTPServer):
+    """On Windows, SO_REUSEADDR lets a second program bind a port that is already
+    listening, and the first one keeps answering. Claim the port exclusively there,
+    so a second copy of the app fails to start instead of hiding behind the first."""
+    allow_reuse_address = not cfg.IS_WINDOWS
+    daemon_threads = True
+
+    def server_bind(self):
+        if cfg.IS_WINDOWS and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def running_copy(host, port):
+    """-> the version of UniFi x flinchbot already answering on that port, or None."""
+    h = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    try:
+        with urllib.request.urlopen(f"http://{h}:{port}/", timeout=3) as r:
+            page = r.read(400_000).decode("utf-8", "replace")
+    except Exception:
+        return None
+    m = re.search(r"themes\.css\?v=([0-9][0-9.]*)", page)
+    return m.group(1) if m and "flinchbot" in page else None
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -1194,13 +1232,18 @@ def main():
     host = cfg.get_setting("SERVER_HOST") or "127.0.0.1"
     HTTP_PORT = args.port or int(cfg.get_setting("SERVER_PORT") or 8080)
     try:
-        httpd = ThreadingHTTPServer((host, HTTP_PORT), Handler)
+        httpd = AppServer((host, HTTP_PORT), Handler)
     except OSError as e:
-        print(f"\n  Could not start on {host}:{HTTP_PORT} ({e.strerror or e}).")
-        print("  Another program is probably using that port. Close it, or start with")
-        print(f"  a different port:   {cfg.launcher()} --port 8090\n")
+        other = running_copy(host, HTTP_PORT)
+        if other:
+            print(f"\n  UniFi x flinchbot {other} is already running on port {HTTP_PORT}, in another window.")
+            print("  Close that window (or press Ctrl+C in it), then start the app again.")
+            print(f"  To run both at once, start this one on another port:   {cfg.launcher()} --port 8090\n")
+        else:
+            print(f"\n  Could not start on {host}:{HTTP_PORT} ({e.strerror or e}).")
+            print("  Another program is probably using that port. Close it, or start with")
+            print(f"  a different port:   {cfg.launcher()} --port 8090\n")
         sys.exit(1)
-    httpd.daemon_threads = True
     kept = updater.take_handover(cfg.BASE_DIR, HTTP_PORT)     # restarted after an update?
     if kept:
         APP_TOKEN = kept

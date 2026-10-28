@@ -2144,6 +2144,54 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(s, 400)
 
 
+class SingleCopyTests(unittest.TestCase):
+    """Two copies of the app on one port: the second must not start, and must say why."""
+
+    def serve(self, cls=None):
+        httpd = (cls or srv.AppServer)(("127.0.0.1", 0), srv.Handler)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd.server_address[1]
+
+    def test_second_copy_cannot_take_the_port(self):
+        port = self.serve()
+        with self.assertRaises(OSError):
+            srv.AppServer(("127.0.0.1", port), srv.Handler)
+        self.assertEqual(srv.running_copy("127.0.0.1", port), srv.APP_VERSION)
+
+    @unittest.skipUnless(os.name == "nt", "SO_REUSEADDR only shares a listening port on Windows")
+    def test_older_copy_already_running_is_detected(self):
+        port = self.serve(ThreadingHTTPServer)          # older versions bound with SO_REUSEADDR
+        with self.assertRaises(OSError):
+            srv.AppServer(("127.0.0.1", port), srv.Handler)
+
+    def test_running_copy_ignores_other_programs(self):
+        class Other(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = b"<html>some other program</html>"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        port = self.serve(lambda addr, _h: ThreadingHTTPServer(addr, Other))
+        self.assertIsNone(srv.running_copy("127.0.0.1", port))
+        self.assertIsNone(srv.running_copy("127.0.0.1", 1))     # nothing listening
+
+    def test_page_is_the_one_the_app_started_with(self):
+        port = self.serve()
+        me = types.SimpleNamespace(port=port)
+        srv.page_template()
+        saved = srv._PAGE
+        self.addCleanup(setattr, srv, "_PAGE", saved)
+        srv._PAGE = saved.replace("</body>", "<!-- as started --></body>")
+        _, page, _ = ServerTests.req(me, "GET", "/", token=False)
+        self.assertIn("<!-- as started -->", page)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)
