@@ -7,7 +7,8 @@ private .venv is ready, before the app itself).
     ... envcheck.py --open python-mac                 (just open that guide section)
 
 It prints a short report: computer and OS, Python, packages, where passwords
-are kept, folder access, and whether the AI providers can be reached. Problems
+are kept, folder access, whether the AI providers can be reached, and whether
+Python has root certificates for the app's own downloads. Problems
 come with a fix and a link to the right section of SETUP.html.
 Exit code 1 means the app can't run (the launcher stops); warnings exit 0.
 
@@ -182,6 +183,32 @@ def check_internet(timeout=3.0):
                                                 "internet connection works."), None
 
 
+def check_certificates():
+    """Root certificates for the app's own downloads (update checks, the price list).
+    Offline: counts what the app's TLS setup loads, nothing is sent. The AI providers
+    don't depend on this (their SDKs read the system's trust store themselves)."""
+    sys.path.insert(0, str(BASE_DIR / "backend"))
+    import config_store as cfg
+    n, certifi_ver, folder = cfg.ssl_roots()
+    if n or folder:
+        where = [f"certifi {certifi_ver}"] if certifi_ver else []
+        if sys.platform.startswith("win"):
+            where.append("Windows store")
+        elif folder:
+            where.append(folder)
+        return OK, f"{n} root certificates" + (f" ({' + '.join(where)})" if where else ""), None, None
+    if sys.platform == "darwin":
+        fix = ("Python on this Mac has no root certificates, so update checks and price downloads fail with "
+               "CERTIFICATE_VERIFY_FAILED. In Finder, open Applications > Python 3.x and double-click "
+               "Install Certificates.command, then start the app again. (Or delete the .venv folder and start "
+               "the app again, so the certifi package is reinstalled.)")
+    else:
+        fix = ("Python found no root certificates, so update checks and price downloads will fail with "
+               "CERTIFICATE_VERIFY_FAILED. Delete the .venv folder and start the app again, so the certifi "
+               "package is reinstalled.")
+    return WARN, "none found", fix, "python-mac" if sys.platform == "darwin" else "start-it"
+
+
 def check_nmap():
     """Optional: Nmap powers device scans in the device detective and the security scorecard."""
     import nmap_scan                    # stdlib only, next to this file
@@ -193,7 +220,7 @@ def check_nmap():
 
 CHECKS = [("Computer", check_os), ("Python", check_python), ("Packages", check_packages),
           ("Passwords", check_password_store), ("Folder", check_folder), ("Internet", check_internet),
-          ("Nmap", check_nmap)]
+          ("Certs", check_certificates), ("Nmap", check_nmap)]
 
 
 def run():

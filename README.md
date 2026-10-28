@@ -45,7 +45,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
 - **Chat export** to Markdown or HTML.
 - **Themes:** Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner, Candle Maker, Notre Dame Football, FC Bayern München, 80s Arcade and Oktoberfest. Each is a full re-skin (colours, fonts, text size, layout) with light and dark versions; the choice is saved per browser, and moving backgrounds respect reduced-motion. Fonts come from Google Fonts on first use.
 - **Windows and macOS:** `start.bat` on Windows, `start.command` on a Mac (also works on Linux). The same folder, `.env` and `data/` work on both.
-- **Startup environment check:** the launcher checks for Python 3.10+, a writable folder and running from inside the ZIP, then `backend/envcheck.py` reports the OS, Python, packages, password store, internet reachability and whether the optional Nmap is installed. Problems come with the fix, and the launcher offers to open the Python download page and the matching section of the setup guide.
+- **Startup environment check:** the launcher checks for Python 3.10+, a writable folder and running from inside the ZIP, then `backend/envcheck.py` reports the OS, Python, packages, password store, internet reachability, whether Python has root certificates for the app's own downloads (updates, price list), and whether the optional Nmap is installed. Problems come with the fix, and the launcher offers to open the Python download page and the matching section of the setup guide.
 - **Locked to this computer:**
   - Listens on `127.0.0.1` only.
   - Every request needs a per-launch token.

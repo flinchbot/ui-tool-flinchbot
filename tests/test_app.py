@@ -892,7 +892,11 @@ class EnvCheckTests(unittest.TestCase):
         import io
         import envcheck
         results = envcheck.run()
-        self.assertEqual([r[0] for r in results], ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet", "Nmap"])
+        self.assertEqual([r[0] for r in results],
+                         ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet", "Certs", "Nmap"])
+        certs = dict((r[0], r) for r in results)["Certs"]
+        self.assertEqual(certs[1], envcheck.OK, certs)
+        self.assertIn("root certificates", certs[2])
         self.assertFalse([r for r in results if r[1] == envcheck.FAIL], results)
         out = io.StringIO()
         self.assertIn(envcheck.report(results, out), (envcheck.OK, envcheck.WARN))
@@ -913,6 +917,38 @@ class EnvCheckTests(unittest.TestCase):
             self.assertIn("Delete the .venv folder", problem)
         finally:
             envcheck.PACKAGES = saved
+
+    def test_missing_root_certificates_are_explained(self):
+        """python.org Python on a Mac with no certifi: the startup check says so and how to fix it."""
+        import envcheck
+        saved_roots, saved_platform = cfg.ssl_roots, sys.platform
+        try:
+            cfg.ssl_roots = lambda: (0, None, None)
+            sys.platform = "darwin"
+            status, detail, problem, anchor = envcheck.check_certificates()
+            self.assertEqual((status, detail, anchor), (envcheck.WARN, "none found", "python-mac"))
+            self.assertIn("Install Certificates.command", problem)
+            self.assertIn("CERTIFICATE_VERIFY_FAILED", problem)
+            sys.platform = "linux"
+            status, _, problem, anchor = envcheck.check_certificates()
+            self.assertEqual((status, anchor), (envcheck.WARN, "start-it"))
+            self.assertIn("Delete the .venv folder", problem)
+            # Certificates only in a hashed folder (Linux, Homebrew) don't show in the count but still count.
+            cfg.ssl_roots = lambda: (0, None, "/etc/ssl/certs")
+            self.assertEqual(envcheck.check_certificates()[0], envcheck.OK)
+        finally:
+            cfg.ssl_roots, sys.platform = saved_roots, saved_platform
+
+    def test_download_context_trusts_certifi_and_the_system_store(self):
+        import ssl
+        import certifi
+        only_certifi = ssl.create_default_context(cafile=certifi.where()).cert_store_stats()["x509_ca"]
+        system = ssl.create_default_context().cert_store_stats()["x509_ca"]
+        both = cfg.ssl_context().cert_store_stats()["x509_ca"]
+        self.assertGreater(only_certifi, 50)
+        self.assertGreaterEqual(both, max(only_certifi, system))   # a union: certifi never replaces the OS store
+        self.assertEqual(cfg.ssl_context().verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(cfg.ssl_context().check_hostname)
 
     def test_guide_links_point_at_real_sections(self):
         """Every '#section' the launchers and envcheck open must exist in SETUP.html."""

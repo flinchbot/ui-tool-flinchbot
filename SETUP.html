@@ -78,9 +78,14 @@
 <li>The <code>python3</code> that comes with macOS is too old or only a placeholder, so install it this way even if <code>python3</code> seems to exist.</li>
 </ul>
 </li>
-<li>Check it worked: open <strong>Terminal</strong> (press <strong>⌘ + Space</strong>, type <code>Terminal</code>, press Return) and type:
+<li>
+<p>Check it worked: open <strong>Terminal</strong> (press <strong>⌘ + Space</strong>, type <code>Terminal</code>, press Return) and type:
    <code>python3 --version</code>
-   You should see something like <code>Python 3.14.3</code>.</li>
+   You should see something like <code>Python 3.14.3</code>.</p>
+</li>
+<li>
+<p>In Finder, open <strong>Applications → Python 3.x</strong> and double-click <strong>Install Certificates.command</strong>. It gives Python the list of trusted websites it needs to download app updates and AI prices. (The app brings its own copy too, but this makes sure.) Close the window it opens when it says it's done. Skip this step if you installed Python with Homebrew.</p>
+</li>
 </ol>
 <a id="python-windows"></a>
 <p><strong>On Windows:</strong></p>
@@ -589,8 +594,8 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <td>The app has no price for it. Click the meter → <strong>↻ Update prices</strong>, or ✎ to type the price from your provider's pricing page.</td>
 </tr>
 <tr>
-<td><em>Couldn't download the price list: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate</em></td>
-<td>Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the <code>certifi</code> package), so restart the app once so the launcher installs it. On an older version, open <strong>Applications → Python 3.x</strong> in Finder and double-click <strong>Install Certificates.command</strong>.</td>
+<td><em>Couldn't download the price list</em> or <em>Couldn't reach GitHub</em>: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate</td>
+<td>Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the <code>certifi</code> package), and the startup check shows <strong>Certs</strong> with how many it found. On an older version the updater can't reach GitHub to fetch that fix: open <strong>Applications → Python 3.x</strong> in Finder, double-click <strong>Install Certificates.command</strong>, then click <strong>Check now</strong> under Updates.</td>
 </tr>
 </tbody>
 </table>

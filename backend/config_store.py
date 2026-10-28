@@ -31,15 +31,41 @@ IS_MAC = sys.platform == "darwin"
 
 def ssl_context():
     """TLS context for downloads from the internet (GitHub, LiteLLM's price list).
-    python.org Python on a Mac ships no CA list until "Install Certificates.command"
-    is run, so plain urlopen fails with CERTIFICATE_VERIFY_FAILED there; certifi
-    (installed with the AI SDKs) carries its own list. The UniFi client is separate:
+    It trusts both the system's root certificates (as far as Python can read them:
+    the Windows store, or OpenSSL's folder on a Mac/Linux) and certifi's bundle.
+    python.org Python on a Mac has an empty OpenSSL folder until "Install
+    Certificates.command" is run, so certifi is what makes downloads work there;
+    keeping the system store too means a company's own root certificate (TLS
+    inspection proxies) still works on Windows. The UniFi client is separate:
     it pins the console's self-signed certificate instead."""
+    ctx = ssl.create_default_context()
     try:
         import certifi
-        return ssl.create_default_context(cafile=certifi.where())
+        ctx.load_verify_locations(cafile=certifi.where())
     except Exception:
-        return ssl.create_default_context()
+        pass
+    return ctx
+
+
+def ssl_roots():
+    """What ssl_context() will trust, for the startup check.
+    -> (number of root certificates loaded, certifi version or None, system cert folder or None)"""
+    try:
+        from importlib.metadata import version
+        certifi_ver = version("certifi")
+    except Exception:
+        certifi_ver = None
+    n = ssl_context().cert_store_stats().get("x509_ca", 0)
+    # Certificates in a hashed folder (Linux, Homebrew) are read only when needed, so they
+    # don't show in the count: report the folder instead if it holds any.
+    folder = None
+    capath = ssl.get_default_verify_paths().capath
+    try:
+        if capath and any(os.scandir(capath)):
+            folder = capath
+    except OSError:
+        pass
+    return n, certifi_ver, folder
 
 
 def platform_name():

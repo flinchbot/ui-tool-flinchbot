@@ -34,6 +34,7 @@ Python is the language the app is written in. You install it once and never have
    python3 --version
    ```
    You should see something like `Python 3.14.3`.
+3. In Finder, open **Applications → Python 3.x** and double-click **Install Certificates.command**. It gives Python the list of trusted websites it needs to download app updates and AI prices. (The app brings its own copy too, but this makes sure.) Close the window it opens when it says it's done. Skip this step if you installed Python with Homebrew.
 
 <a id="python-windows"></a>
 
@@ -353,7 +354,7 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 | Restore script: *NOT FOUND: nothing in … has name = …* | That command needs something that isn't there yet (its comment says what). Run that one first, then this one again. |
 | Restore script: *FAILED: HTTP 400 …* | The console refused that setting; its reason follows. Usually a newer UniFi version names a setting differently: set that one by hand in the UniFi UI and carry on with the rest. |
 | The cost meter shows **—** for a model | The app has no price for it. Click the meter → **↻ Update prices**, or ✎ to type the price from your provider's pricing page. |
-| *Couldn't download the price list: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate* | Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the `certifi` package), so restart the app once so the launcher installs it. On an older version, open **Applications → Python 3.x** in Finder and double-click **Install Certificates.command**. |
+| *Couldn't download the price list* or *Couldn't reach GitHub*: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate | Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the `certifi` package), and the startup check shows **Certs** with how many it found. On an older version the updater can't reach GitHub to fetch that fix: open **Applications → Python 3.x** in Finder, double-click **Install Certificates.command**, then click **Check now** under Updates. |
 
 Still stuck? Run the diagnostic and send its output to whoever is helping you. It contains no passwords.
 ```
