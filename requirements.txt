@@ -1,12 +1,14 @@
-# Anthropic SDK - tested with 2.3.0 (Oct 2026). Upper bound guards against a future breaking major release.
+# Each comment reads "what it is for - notes". The launcher shows the part before " - "
+# next to each package it installs.
+# Claude (Anthropic's AI) - tested with 2.3.0 (Oct 2026). Upper bound guards against a future breaking major release.
 anthropic>=0.49,<3
-# Stores UniFi passwords / API keys in Windows Credential Manager.
+# Keeps UniFi passwords and API keys in Windows Credential Manager / the macOS Keychain - tested with 25.7.0.
 keyring>=25
-# OpenAI SDK (ChatGPT models via the Responses API) - tested with 3.40.0 (Oct 2026).
+# ChatGPT (OpenAI's AI, via the Responses API) - tested with 3.40.0 (Oct 2026).
 openai>=3.0,<4
 # SSH to the console (optional per connection) - tested with 3.5.1.
 paramiko>=3.4,<4
-# Encrypts the passwords kept in factory-reset kit snapshots (also needed by paramiko) - tested with 50.0.2.
+# Encrypts the passwords kept in factory-reset kit snapshots - also needed by paramiko; tested with 50.0.2.
 cryptography>=42
-# Root certificates for downloads (price list, updates): python.org Python on a Mac has none of its own.
+# Root certificates for the app's downloads (updates, price list) - python.org Python on a Mac has none of its own.
 certifi>=2024.2

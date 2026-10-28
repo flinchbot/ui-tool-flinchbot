@@ -57,7 +57,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.10.1"
+APP_VERSION = "2.10.2"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)

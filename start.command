@@ -134,8 +134,8 @@ fi
 # --- install / update requirements only when requirements.txt changed ---------
 if ! cmp -s requirements.txt .venv/requirements.installed; then
   echo "  Installing required packages - this needs internet and takes a minute ..."
-  if .venv/bin/python -m pip install --disable-pip-version-check -q --upgrade pip &&
-     .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt; then
+  # Lists every package it adds or upgrades, and why (also kept in .venv/install-log.txt).
+  if .venv/bin/python backend/install_deps.py; then
     cp requirements.txt .venv/requirements.installed
   else
     rm -f .venv/requirements.installed

@@ -885,6 +885,52 @@ class AgentTests(unittest.TestCase):
         self.assertIsInstance(a.history[0]["content"], str)
 
 
+class InstallReportTests(unittest.TestCase):
+    """backend/install_deps.py: the launcher's list of what was installed, and why."""
+
+    def test_every_requirement_has_a_purpose(self):
+        import install_deps
+        wanted = install_deps.requested()
+        self.assertEqual(list(wanted), ["anthropic", "keyring", "openai", "paramiko", "cryptography", "certifi"])
+        for name, purpose in wanted.items():
+            self.assertTrue(purpose, f"{name} has no comment above it in requirements.txt")
+            self.assertNotIn(" - ", purpose)            # only the part before " - " is shown
+
+    def test_list_of_changes(self):
+        import install_deps
+        before = {"pip": ("pip", "26.0", []), "idna": ("idna", "3.20", []), "keyring": ("keyring", "25.0", [])}
+        after = {"pip": ("pip", "26.2", []), "idna": ("idna", "3.20", []),
+                 "keyring": ("keyring", "25.7", ["jaraco-classes"]),
+                 "anthropic": ("anthropic", "2.3.0", ["httpx2", "anyio"]),
+                 "openai": ("openai", "3.40.0", ["httpx2", "anyio"]),
+                 "httpx2": ("httpx2", "2.16.0", ["idna"]),
+                 "anyio": ("anyio", "4.15.1", []),
+                 "jaraco-classes": ("jaraco.classes", "3.4.0", [])}
+        wanted = {"anthropic": "Claude", "keyring": "Passwords", "openai": "ChatGPT"}
+        rows = install_deps.changes(before, after, wanted)
+        self.assertEqual(rows[:3], [("anthropic", None, "2.3.0", "for this app: Claude"),
+                                    ("keyring", "25.0", "25.7", "for this app: Passwords"),
+                                    ("openai", None, "3.40.0", "for this app: ChatGPT")])
+        why = {r[0]: r[3] for r in rows}
+        self.assertEqual(why["httpx2"], "needed by anthropic, openai")
+        self.assertEqual(why["jaraco.classes"], "needed by keyring")       # dotted names match their dashed form
+        self.assertEqual(why["pip"], "the installer itself")
+        self.assertNotIn("idna", why)                                         # unchanged packages aren't listed
+        text = "\n".join(install_deps.render(rows, 1))
+        self.assertIn("Installed or updated 7 packages:", text)
+        self.assertIn("25.0 -> 25.7", text)
+        self.assertIn("1 other package was already up to date.", text)
+        self.assertEqual(install_deps.render([], 31), ["  All 31 packages were already up to date."])
+
+    def test_launchers_use_it(self):
+        root = os.path.dirname(HERE)
+        for launcher in ("start.bat", "start.command"):
+            with open(os.path.join(root, launcher), encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("install_deps.py", body, launcher)
+            self.assertNotIn("-q -r requirements.txt", body, launcher)
+
+
 class EnvCheckTests(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
 

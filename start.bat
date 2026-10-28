@@ -56,8 +56,8 @@ REM --- install / update requirements only when requirements.txt changed -----
 fc /b requirements.txt .venv\requirements.installed >nul 2>&1
 if errorlevel 1 (
   echo  Installing required packages - this needs internet and takes a minute ...
-  ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q --upgrade pip
-  ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt
+  REM Lists every package it adds or upgrades, and why (also kept in .venv\install-log.txt).
+  ".venv\Scripts\python.exe" backend\install_deps.py
   if errorlevel 1 goto :pipfail
   copy /y requirements.txt .venv\requirements.installed >nul
 )
