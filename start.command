@@ -80,6 +80,7 @@ no_python() {
 
 cd "$(dirname "$0")" || exit 1
 FB_DIR="$(pwd -P)"
+export FB_LAUNCHER=start.command
 printf '\033]0;UniFi x flinchbot\007'      # window title
 echo
 echo "  UniFi x flinchbot - checking this computer ..."
@@ -147,4 +148,7 @@ fi
 .venv/bin/python backend/envcheck.py || fail "Fix the problems marked XX above, then start the app again."
 
 # --- run the app (opens your browser automatically) ---------------------------
-exec .venv/bin/python backend/server.py "$@"
+# Exit code 75 means an update was installed: run this file again from the top
+# so the new version starts. Keep this ONE line: bash reads a script from disk
+# as it goes, and after an update the rest of the file is different.
+.venv/bin/python backend/server.py "$@"; rc=$?; if [ "$rc" -eq 75 ]; then exec /bin/bash "$FB_DIR/start.command" "$@"; fi; exit "$rc"

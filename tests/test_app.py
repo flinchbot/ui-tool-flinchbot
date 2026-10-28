@@ -1817,6 +1817,333 @@ class ToolEndpointTests(unittest.TestCase):
         self.assertEqual(lst["snapshots"], [])
 
 
+
+# ── updates from GitHub ───────────────────────────────────────────────────────
+import io                           # noqa: E402
+import subprocess                   # noqa: E402
+import zipfile                      # noqa: E402
+from http.server import BaseHTTPRequestHandler  # noqa: E402
+
+import updater                      # noqa: E402
+
+OLD_SERVER = 'APP_VERSION = "2.7.0"\nprint("old")\n'
+NEW_SERVER = 'APP_VERSION = "2.7.1"\nprint("new")\n'
+
+
+TOP = "flinchbot-ui-tool-flinchbot-abc1234"
+
+
+def make_zip(files, raw=None):
+    """A GitHub-style source ZIP: everything inside one top folder (raw: entries as named)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(TOP + "/", "")
+        for rel, data in files.items():
+            z.writestr(f"{TOP}/{rel}", data)
+        for name, data in (raw or {}).items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+NEW_FILES = {
+    "backend/server.py": NEW_SERVER,
+    "backend/newmod.py": "x = 1\n",
+    "frontend/index.html": "<html>new</html>\n",
+    "start.bat": "@echo off\necho new\n",                 # LF on purpose: the updater makes it CRLF
+    "start.command": "#!/bin/bash\necho new\n",
+    ".env": "ANTHROPIC_API_KEY=stolen\n",                 # never written
+    ".env.example": "ANTHROPIC_API_KEY=\n",              # an ordinary file: updated
+    "data/connections.json": "{}",                       # never written
+    ".venv/pyvenv.cfg": "x",                             # never written
+}
+
+
+class FakeGitHub:
+    """Just enough of api.github.com (and codeload) for the updater."""
+
+    def __init__(self, zip_bytes, commits=None, require_token=None, version="2.7.1"):
+        self.zip, self.require, self.seen = zip_bytes, require_token, []
+        self.commits = commits or [
+            {"sha": "abc1234" + "0" * 33, "commit": {"message": f"v{version}: faster port map\n\n- detail one",
+                                                     "committer": {"date": "2026-10-27T10:00:00Z"}}},
+            {"sha": "bbb" + "0" * 37, "commit": {"message": "Fix a typo", "committer": {"date": "2026-10-26T10:00:00Z"}}},
+            {"sha": "ccc" + "0" * 37, "commit": {"message": "v2.7.0: updater", "committer": {"date": "2026-10-25T10:00:00Z"}}},
+            {"sha": "ddd" + "0" * 37, "commit": {"message": "older", "committer": {"date": "2026-10-24T10:00:00Z"}}},
+        ]
+        self.version = version
+        gh = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                gh.seen.append((self.headers.get("Host", "").split(":")[0], self.path, self.headers.get("Authorization")))
+                if self.path.startswith("/codeload/"):
+                    return self.reply(200, gh.zip, "application/zip")
+                if gh.require and self.headers.get("Authorization") != f"Bearer {gh.require}":
+                    return self.reply(404, b'{"message": "Not Found"}')
+                if self.path.startswith("/repos/o/r/commits?"):
+                    return self.reply(200, json.dumps(gh.commits).encode())
+                if self.path.startswith("/repos/o/r/contents/backend/server.py?ref="):
+                    return self.reply(200, f'APP_VERSION = "{gh.version}"\n'.encode(), "text/plain")
+                if self.path.startswith("/repos/o/r/zipball/"):
+                    self.send_response(302)
+                    self.send_header("Location", f"http://localhost:{gh.port}/codeload/x.zip")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if self.path == "/repos/o/r":
+                    return self.reply(200, b'{"full_name": "o/r"}')
+                self.reply(404, b"{}")
+
+            def reply(self, code, body, ctype="application/json"):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class UpdaterTests(unittest.TestCase):
+    def setUp(self):
+        self.app = tempfile.mkdtemp(prefix="fb-app-")
+        self.addCleanup(shutil.rmtree, self.app, True)
+        self.files = {
+            "backend/server.py": OLD_SERVER,
+            "frontend/index.html": "<html>old</html>\n",
+            "start.bat": "@echo off\r\necho old\r\n",
+            "start.command": "#!/bin/bash\necho old\n",
+            "old_only.txt": "kept\n",
+            ".env": "ANTHROPIC_API_KEY=mine\n",
+            "data/connections.json": '{"profiles": ["mine"]}',
+            ".venv/pyvenv.cfg": "home = mine",
+        }
+        for rel, text in self.files.items():
+            path = os.path.join(self.app, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        for name in ("GITHUB_TOKEN", "GH_TOKEN", "UPDATE_REPO", "UPDATE_BRANCH"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ.pop(name, None)
+        os.environ["UPDATE_REPO"] = "o/r"
+        saved = (updater.API, updater._gh_token, updater._saved_token)
+        self.addCleanup(lambda: setattr(updater, "API", saved[0]) or setattr(updater, "_gh_token", saved[1])
+                        or setattr(updater, "_saved_token", saved[2]))
+        updater._gh_token = lambda: None          # never borrow the real GitHub CLI's token
+        updater._saved_token = lambda: None
+
+    def gh(self, **kw):
+        g = FakeGitHub(kw.pop("zip", make_zip(NEW_FILES)), **kw)
+        self.addCleanup(g.stop)
+        updater.API = f"http://127.0.0.1:{g.port}"
+        return g
+
+    def read(self, rel, mode="r"):
+        with open(os.path.join(self.app, *rel.split("/")), mode, **({} if "b" in mode else {"encoding": "utf-8", "newline": ""})) as f:
+            return f.read()
+
+    def test_versions(self):
+        self.assertTrue(updater.is_newer("2.10.0", "2.9.9"))
+        self.assertTrue(updater.is_newer("v3", "2.99.1"))
+        self.assertFalse(updater.is_newer("2.7", "2.7.0"))
+        self.assertFalse(updater.is_newer("garbage", "2.7.0"))
+        self.assertEqual(updater.version_in(NEW_SERVER), "2.7.1")
+
+    def test_check_finds_newer_version_with_notes(self):
+        self.gh()
+        u = updater.status("2.7.0", self.app, force=True)
+        self.assertIsNone(u["error"])
+        self.assertTrue(u["newer"])
+        self.assertEqual(u["latest"], "2.7.1")
+        self.assertEqual([n["subject"] for n in u["notes"]], ["v2.7.1: faster port map", "Fix a typo"])
+        self.assertEqual(u["notes"][0]["body"], "- detail one")
+        u = updater.status("2.7.1", self.app)                  # same version: nothing to offer
+        self.assertFalse(u["newer"])
+        self.assertEqual(u["notes"], [])
+
+    def test_check_is_cached_and_can_be_turned_off(self):
+        g = self.gh()
+        updater.status("2.7.0", self.app, force=True)
+        n = len(g.seen)
+        updater.status("2.7.0", self.app)                       # within a day: answered from the last check
+        self.assertEqual(len(g.seen), n)
+        updater.set_auto(self.app, False)
+        path = os.path.join(self.app, "data", "updates", "state.json")
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+        st["checked_at_ts"] = 0                                 # a day has passed
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        self.assertTrue(updater.status("2.7.0", self.app)["newer"])     # still shows the last answer ...
+        self.assertEqual(len(g.seen), n)                                # ... without asking GitHub
+
+    def test_private_repo_needs_a_token_and_it_stays_on_the_api_host(self):
+        g = self.gh(require_token="good")
+        u = updater.status("2.7.0", self.app, force=True)
+        self.assertEqual(u["error_kind"], "auth")
+        self.assertIn("private", u["error"])
+        os.environ["GITHUB_TOKEN"] = "good"
+        u = updater.status("2.7.0", self.app, force=True)
+        self.assertTrue(u["newer"], u)
+        self.assertEqual(u["token_source"], "GITHUB_TOKEN")
+        updater.install("2.7.0", self.app)
+        api_calls = [s for s in g.seen if s[0] == "127.0.0.1"]
+        codeload = [s for s in g.seen if s[1].startswith("/codeload/")]
+        self.assertTrue(api_calls and all(a == "Bearer good" for _, _, a in api_calls if a))
+        self.assertEqual(codeload[0][0], "localhost")
+        self.assertIsNone(codeload[0][2])                        # token not sent to the redirect host
+
+    def test_install_over_the_top_then_roll_back(self):
+        self.gh()
+        r = updater.install("2.7.0", self.app)
+        self.assertEqual((r["version"], r["previous"]), ("2.7.1", "2.7.0"))
+        self.assertEqual(self.read("backend/server.py"), NEW_SERVER)
+        self.assertEqual(self.read("backend/newmod.py"), "x = 1\n")
+        self.assertEqual(self.read("start.bat", "rb"), b"@echo off\r\necho new\r\n")     # CRLF for cmd.exe
+        self.assertEqual(self.read("old_only.txt"), "kept\n")                         # over the top
+        self.assertEqual(self.read(".env.example"), "ANTHROPIC_API_KEY=\n")
+        for rel in (".env", "data/connections.json", ".venv/pyvenv.cfg"):
+            self.assertEqual(self.read(rel), self.files[rel], rel)                   # never touched
+        if os.name != "nt":
+            self.assertTrue(os.stat(os.path.join(self.app, "start.command")).st_mode & 0o100)
+        leftovers = [f for _, _, fs in os.walk(self.app) for f in fs if f.endswith(".fb-new")]
+        self.assertEqual(leftovers, [])
+        u = updater.status("2.7.1", self.app)
+        self.assertEqual([b["version"] for b in u["backups"]], ["2.7.0"])
+        self.assertEqual(u["installed"]["version"], "2.7.1")
+
+        self.assertEqual(updater.rollback(self.app, u["backups"][0]["name"]), "2.7.0")
+        self.assertEqual(self.read("backend/server.py"), OLD_SERVER)
+        self.assertEqual(self.read("start.bat", "rb"), b"@echo off\r\necho old\r\n")
+        self.assertFalse(os.path.exists(os.path.join(self.app, "backend", "newmod.py")))   # added by the update
+        self.assertEqual(self.read(".env"), self.files[".env"])
+
+    def test_bad_downloads_change_nothing(self):
+        before = {rel: self.read(rel) for rel in self.files}
+        cases = {
+            "unsafe path": make_zip(NEW_FILES, raw={f"{TOP}/../evil.txt": "x"}),
+            "two top folders": make_zip(NEW_FILES, raw={"other/x.txt": "x"}),
+            "missing launchers": make_zip({"backend/server.py": NEW_SERVER, "frontend/index.html": "x"}),
+            "wrong version": make_zip(dict(NEW_FILES, **{"backend/server.py": 'APP_VERSION = "9.9.9"\n'})),
+            "not a zip": b"<html>rate limited</html>",
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(updater.UpdateError) as e:
+                    updater.apply_zip(data, self.app, "2.7.0", expect_version="2.7.1")
+                self.assertEqual(e.exception.kind, "bad_zip")
+                self.assertEqual({rel: self.read(rel) for rel in self.files}, before)
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.app), "evil.txt")))
+
+    def test_git_checkout_is_never_overwritten(self):
+        self.gh()
+        os.mkdir(os.path.join(self.app, ".git"))
+        self.assertTrue(updater.status("2.7.0", self.app, force=True)["git_checkout"])
+        with self.assertRaises(updater.UpdateError) as e:
+            updater.install("2.7.0", self.app)
+        self.assertEqual(e.exception.kind, "git")
+        self.assertEqual(self.read("backend/server.py"), OLD_SERVER)
+
+    def test_restart_keeps_the_page_token(self):
+        updater.save_handover(self.app, "t" * 43, 8080)
+        self.assertIsNone(updater.take_handover(self.app, 8090))       # different port: not this app
+        updater.save_handover(self.app, "t" * 43, 8080)
+        self.assertEqual(updater.take_handover(self.app, 8080), "t" * 43)
+        self.assertIsNone(updater.take_handover(self.app, 8080))       # used once
+
+    def _restart_probe(self, launcher, run_line_marker, shell):
+        """Run the launcher's real run line with a fake app that replaces the launcher
+        and exits 75 (as an update does). The new launcher must start from its top;
+        nothing of it may be read from the old file's position."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(EnvCheckTests.ROOT, launcher), encoding="utf-8") as f:
+            src = f.read()
+        line = next(ln for ln in src.splitlines() if run_line_marker in ln and not ln.lstrip().startswith(("REM", "#")))
+        fake = os.path.join(d, "fake.py").replace("\\", "/")
+        marker = os.path.join(d, "ran").replace("\\", "/")
+        with open(fake, "w") as f:
+            f.write("import os, sys\n"
+                    f"if os.path.exists({marker!r}): print('RUN-2'); sys.exit(0)\n"
+                    f"open({marker!r}, 'w').close()\n"
+                    "open(sys.argv[1], 'wb').write(open(sys.argv[2], 'rb').read())\n"
+                    "sys.exit(75)\n")
+        py = sys.executable.replace("\\", "/")
+        if shell == "cmd":
+            eol, path, new_path = "\r\n", os.path.join(d, "launch.bat"), os.path.join(d, "new.bat")
+            run = line.replace('".venv\\Scripts\\python.exe" backend\\server.py', f'"{py}" "{fake}" "%~f0" "{new_path}"')
+            old = "@echo off" + eol + ("REM padding padding padding padding padding" + eol) * 5 + run + eol + "echo OLD-TAIL" + eol
+            new = "@echo off" + eol + "echo NEW-START" + eol + f'"{py}" "{fake}"' + eol + "exit /b 0" + eol + ("echo GARBAGE" + eol) * 300
+            cmd = ["cmd", "/c", path]
+        else:
+            eol, path, new_path = "\n", os.path.join(d, "launch.sh").replace("\\", "/"), os.path.join(d, "new.sh").replace("\\", "/")
+            run = line.replace('.venv/bin/python backend/server.py "$@"', f'"{py}" "{fake}" "{path}" "{new_path}"')
+            run = run.replace('"$FB_DIR/start.command"', f'"{path}"').replace("exec /bin/bash", f'exec "{shell}"')
+            old = "#!/bin/bash" + eol + ("# padding padding padding padding padding" + eol) * 5 + run + eol + "echo OLD-TAIL" + eol
+            new = "#!/bin/bash" + eol + "echo NEW-START" + eol + f'"{py}" "{fake}"' + eol + "exit 0" + eol + ("echo GARBAGE" + eol) * 300
+            cmd = [shell, path]
+        self.assertNotEqual(run, line, "the run line changed shape; update this test")
+        with open(path, "w", newline="") as f:
+            f.write(old)
+        with open(new_path, "w", newline="") as f:
+            f.write(new)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
+        self.assertIn("NEW-START", out)
+        self.assertIn("RUN-2", out)
+        self.assertNotIn("GARBAGE", out)
+        self.assertNotIn("OLD-TAIL", out)
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe")
+    def test_start_bat_restarts_cleanly_after_an_update(self):
+        self._restart_probe("start.bat", "backend\\server.py", "cmd")
+
+    def test_start_command_restarts_cleanly_after_an_update(self):
+        bash = kf.find_bash()
+        if not bash:
+            self.skipTest("no bash")
+        self._restart_probe("start.command", "backend/server.py", bash.replace("\\", "/"))
+
+    def test_endpoints(self):
+        self.gh()
+        saved_base = cfg.BASE_DIR
+        cfg.BASE_DIR = self.app
+        self.addCleanup(setattr, cfg, "BASE_DIR", saved_base)
+        self.addCleanup(os.environ.pop, "FB_LAUNCHER", None)
+        os.environ.pop("FB_LAUNCHER", None)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        me = types.SimpleNamespace(port=httpd.server_address[1])
+        req = lambda *a, **k: ServerTests.req(me, *a, **k)      # noqa: E731
+        s, u, _ = req("GET", "/api/update?check=1")
+        self.assertEqual(s, 200, u)
+        self.assertEqual((u["current"], u["latest"]), (srv.APP_VERSION, "2.7.1"))
+        self.assertEqual(u["newer"], updater.is_newer("2.7.1", srv.APP_VERSION))
+        s, r, _ = req("POST", "/api/update/settings", {"token": "not-a-token"})
+        self.assertEqual(s, 400)
+        self.assertIn("GitHub token", r["error"])
+        s, r, _ = req("POST", "/api/update/settings", {"auto": False})
+        self.assertEqual((s, r["auto"]), (200, False))
+        if updater.is_newer("2.7.1", srv.APP_VERSION):
+            s, r, _ = req("POST", "/api/update/install", {})
+            self.assertEqual(s, 200, r)
+            self.assertFalse(r["restart"])                     # not started by a launcher: no exit
+            self.assertEqual(self.read("backend/server.py"), NEW_SERVER)
+        s, r, _ = req("POST", "/api/update/rollback", {"name": "../../etc"})
+        self.assertEqual(s, 400)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

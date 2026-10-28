@@ -36,6 +36,7 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
   - **📘 Network handbook:** one printable HTML page documenting the whole network (networks, Wi-Fi, devices, topology, every switch port, firewall, routes, VPNs, fixed IPs). Wi-Fi passwords only if asked for.
   - **♻ Factory-reset kit:** snapshots the console's whole configuration, shows what differs from a factory-fresh console (exactly, once compared with the reset console), and writes a bash script of commented SSH commands that restore any part of it through the console's own API. Every reference is looked up by name at run time, since ids change on a reset. Secrets are prompted for, or written in on request; snapshot secrets are encrypted with a key in the OS password store. Tested end to end by running the generated script against a simulated factory-fresh console.
 - **💰 AI cost meter:** exact token counts from every response (input, output, cache reads and writes) and an estimated cost per chat, day, week and month, per model, with an optional monthly budget warning. Prices come from your own override, LiteLLM's public price list (one click to update), or the built-in Claude prices from Anthropic's pricing page.
+- **⬆ Updates from GitHub:** a daily check of the version on the main branch, with its change notes. **Install and restart** writes the new version over the app folder (never `.env`, `data/`, `.venv/` or a git checkout), keeps the replaced files for **Roll back**, and the launcher restarts the app and installs new requirements. Private repositories work with a saved token, `GITHUB_TOKEN`, or the GitHub CLI's sign-in.
 - **💾 One-click backup:** downloads a settings backup of the active console (`.unf`, the same file as UniFi's *Settings → System → Backups*) to your Downloads folder. Restore it from that same UniFi page.
 - **Text attachments:** attach logs, configs or CSVs to a question (📎 or drag-and-drop; 5 files / 150,000 characters per message). Read in the browser and kept only in the in-memory conversation; never written to disk. Binary files are refused.
 - **Chat export** to Markdown or HTML.
@@ -73,6 +74,7 @@ backend/nmap_scan.py   optional Nmap TCP connect scans (private LAN targets only
 backend/handbook.py    the printable network handbook (HTML)
 backend/resetkit.py    factory-reset kit: snapshot, variance, SSH restore script
 backend/pricing.py     token usage log and cost estimate (prices: override / LiteLLM / built-in)
+backend/updater.py     update check, install over the folder, roll back (GitHub)
 backend/config_store.py .env + connection profiles + OS password store
 backend/probe_events.py diagnostic: which endpoints the active console answers
 backend/envcheck.py    startup environment report; opens SETUP.html at a section
@@ -105,6 +107,7 @@ Not committed (see `.gitignore`):
 - **Server-side chat history.** The conversation lives in the running app (one per app instance), not per browser tab.
 - **Attachments and SSH output aren't redacted.** Secret-field removal applies to UniFi API data, not to files you attach or to what a command prints over SSH.
 - **Reset-kit restore commands depend on the private API.** They were tested against a simulated console, not a real factory reset. A setting that a newer UniFi version renamed makes that one command fail with the console's reason; the others carry on.
+- **A release is a version bump on main.** The updater compares `APP_VERSION` in `backend/server.py` on GitHub's main branch with the running one, so pushing a commit that raises it offers the update to everyone. Files a new version deletes are left in place (the update writes over the top).
 - **Cost is an estimate.** Token counts are exact; dollars use published prices and leave out taxes, discounts and batch/priority pricing.
 - **SSH read-only detection is an allowlist.** Only known commands with no state-changing options count as read-only; everything else needs approval. That errs on the side of asking, so expect an Approve card now and then for a harmless command.
 

@@ -198,6 +198,7 @@ The folder is self-contained, so you can move it or copy it to another PC later.
   - **📘 Network handbook:** one web page documenting the whole network: networks and VLANs with DHCP ranges, Wi-Fi, every device with firmware and uplink, the topology, every switch port, firewall policies, port forwards, routes, VPNs, named clients and fixed IPs. It downloads and opens in a new tab; **Print → Save as PDF** makes a PDF. Wi-Fi passwords are left out unless you tick the box.
   - **♻ Factory-reset kit:** see [Before a factory reset](#reset-kit).
   - **💰 AI usage and cost:** see below.
+  - **⬆ Updates:** see [Updating the app](#updates).
 - **💰 Cost meter** (above the chat): tokens used and the estimated cost of this conversation. Click it for today, the last 7 days and this month, per model, with an optional monthly budget that turns the meter orange at 80% and red when it's reached (a warning only; nothing is blocked). Token counts are exact, because every AI response reports them. Dollars are an estimate: tokens × the published price per million tokens. Neither Anthropic nor OpenAI offers a price feed, so the app uses, in order: a price you type in (✎), LiteLLM's public price list (**↻ Update prices** downloads it from GitHub; it covers Claude and GPT models), or Claude prices copied from Anthropic's pricing page. Your provider's invoice is the final word.
 - **⤓ Export** (above the chat): save the conversation as Markdown or a web page. Files go to your Downloads folder.
 - **🎨 Theme:** pick a look: Default, Matrix, Windows 95, Star Wars, My Little Pony, Blade Runner or Candle Maker. Each one changes colours, fonts, text size and screen layout, and each has a light and a dark version (or *Auto*, which follows the Windows or macOS setting). The choice is remembered in that browser. If animations are turned off in Windows or reduced in macOS, the moving backgrounds stay still. The movie and show themes are fan-inspired: colours and moods only, no logos or characters.
@@ -241,15 +242,40 @@ Nmap lets the device detective and the security scorecard scan devices on your n
 
 Restart the app afterwards; the startup check shows **Nmap found**. The app only ever runs basic TCP connect scans (no administrator rights needed), only on private LAN addresses that the console knows as clients, and only when you click a scan button or approve flinchbot's request. Every scan is logged in 🧾 Changes.
 
+<a id="updates"></a>
+
 ## 9. Updating the app
 
-- **Downloaded ZIP:**
-  1. Download the new ZIP.
-  2. Unzip it over the old folder (or into a new one).
-  3. Copy across your `.env` file and `data` folder.
-- **Git:** run `git pull` in the app folder.
+The app checks GitHub for a new version once a day. When there is one, **⬆ Update to v…** appears at the top right.
 
-Your settings, connections and passwords aren't touched by an update. `start.bat` / `start.command` notices new requirements and installs them on the next start.
+1. Click it to see what changed, then **Install … and restart**.
+   - The app downloads the new version from GitHub and writes its files over the app folder.
+   - Your `.env` file (settings and AI keys), the `data` folder (connections, change log, snapshots) and `.venv` are never touched, and saved passwords stay where they are.
+   - Before a file is replaced, it is copied into `data\updates\`. **Roll back** in the same window puts the previous version back (the last 3 are kept).
+2. The app restarts in its own window, installs any new packages, and the browser page reconnects by itself.
+
+**🧰 Tools → ⬆ Updates** checks at any time and has the switch for the daily check. The check only asks GitHub for the newest version number and its change notes; nothing about you or your network is sent.
+
+- **The repository is private:** the app needs a GitHub token that can read it. Paste it in the Updates window; it is kept in Credential Manager or the Keychain and only sent to GitHub. To make one, on github.com go to your picture → **Settings → Developer settings → Personal access tokens**:
+  - **If you own the repository:** **Fine-grained tokens → Generate new token**. Under *Repository access* choose **Only select repositories** and pick this one. Under *Permissions → Repository permissions*, set **Contents** to **Read-only**. Generate it and copy it (it starts with `github_pat_`).
+  - **If someone shared the repository with you:** fine-grained tokens can't reach another person's repository, so use **Tokens (classic) → Generate new token (classic)** with the **repo** scope. Note that it can read every repository you can.
+  - If the GitHub CLI (`gh`) is installed and signed in on this computer, the app uses it and you don't need a token.
+- **Git checkout** (you used `git clone`): the app doesn't overwrite it. Run `git pull` in the app folder, then restart the app.
+- **Versions before 2.7.0** don't have the updater. Update by hand once:
+  1. Download the new ZIP.
+  2. Unzip it over the old folder (your `.env` and `data` folder stay as they are).
+  3. Start the app again.
+- **A fork or another branch:** set `UPDATE_REPO=owner/name` (and `UPDATE_BRANCH=…`) in `.env`.
+
+<a id="update-rollback"></a>
+
+### If an update goes wrong
+
+If the new version won't start, put the previous one back from the app folder:
+- **Windows:** in the app folder, click the address bar, type `cmd`, press Enter, then run `.venv\Scripts\python backend\updater.py --rollback`.
+- **Mac:** in Terminal, in the app folder: `.venv/bin/python backend/updater.py --rollback`.
+
+Then start the app again.
 
 <a id="where-stored"></a>
 
@@ -262,7 +288,8 @@ Your settings, connections and passwords aren't touched by an update. `start.bat
 | Change log, speed tests this app ran | `data\audit.jsonl`, `data\speedtests.jsonl` |
 | AI token use and estimated cost, prices and budget | `data\usage.jsonl`, `data\prices.json` |
 | Factory-reset kit snapshots (passwords in them encrypted) | `data\resetkit\` |
-| UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
+| Update check result, and the files the last updates replaced (for Roll back) | `data\updates\` |
+| UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot, a GitHub token for updates (if you saved one) | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
 
 If that password store isn't available, passwords fall back to `data/secrets.json` and the app shows a warning.
 
@@ -274,6 +301,7 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 - ChatGPT requests are sent with OpenAI's "don't store" option.
 - **↻ Update prices** (AI usage) downloads LiteLLM's public price list from GitHub. Nothing is sent with that request.
 - Nmap scans stay on your own network.
+- **Updates:** once a day (and when you click **Check now**) the app asks GitHub (`api.github.com`) for the newest version number and its change notes, sending the GitHub token if you saved one. Installing downloads the new version from GitHub. Nothing about you or your network is sent.
 - Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the computer). Only the font request goes out; no network data does.
 - Nothing is sent anywhere else, and the app can't be reached from other computers.
 
@@ -312,6 +340,10 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 | Firewall rules the AI creates don't seem to work | Newer UniFi versions use **Zone-Based Firewall**. This app creates classic rules, which may not apply there. Check in the UniFi UI. |
 | *Nmap isn't installed* (🔍 Scan is greyed out) | Nmap is optional. Install it ([Nmap](#nmap)), then restart the app. |
 | A scan finds nothing on a device you know is there | Phones, tablets and many smart-home devices answer on no ports at all. A firewall on the device (Windows, macOS) hides ports too. |
+| Updates: *GitHub didn't find … If the repository is private* | The repository is private, so the app needs a GitHub token. See [Updating the app](#updates). |
+| Updates: *GitHub refused the token* | The token expired or was revoked. Make a new one and save it in **⬆ Updates**, or remove it. |
+| Updates: *This app folder is a git checkout* | Run `git pull` in the app folder, then restart the app. |
+| The app doesn't come back after an update | Look at the app's window for the message. If the new version won't start, see [If an update goes wrong](#update-rollback). |
 | Restore script: *Sign-in FAILED* | Use a **local** admin of the console (step 3), not your UI.com account, and check SSH is to the console itself. |
 | Restore script: *NOT FOUND: nothing in … has name = …* | That command needs something that isn't there yet (its comment says what). Run that one first, then this one again. |
 | Restore script: *FAILED: HTTP 400 …* | The console refused that setting; its reason follows. Usually a newer UniFi version names a setting differently: set that one by hand in the UniFi UI and carry on with the rest. |

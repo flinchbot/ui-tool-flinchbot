@@ -278,6 +278,11 @@
   .mono { font-family:var(--font-mono); font-size:0.6875rem; }
   .kit-item { display:flex; align-items:flex-start; gap:8px; padding:5px 0; font-size:0.8125rem; cursor:pointer; }
   .kit-item input { margin-top:3px; } .kit-item .what { flex:1; } .kit-item small { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
+  .update-btn { border-color:color-mix(in srgb,var(--ok) 55%,var(--border)); color:color-mix(in srgb,var(--ok) 45%,var(--text)); font-weight:600; }
+  .update-notes { max-height:34vh; overflow:auto; display:flex; flex-direction:column; gap:10px; margin:6px 0 14px; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius); }
+  .update-notes b { font-size:0.8125rem; }
+  .update-notes small { color:var(--muted); margin-left:6px; }
+  .update-notes .body { white-space:pre-wrap; font-size:0.75rem; line-height:1.55; color:var(--muted); margin-top:4px; }
   .kit-opt { display:flex; align-items:center; gap:6px; font-size:0.8125rem; margin:6px 0; cursor:pointer; }
   ol.steps { margin:6px 0 4px 18px; font-size:0.8125rem; line-height:1.6; }
   .data-table { width:100%; border-collapse:collapse; font-size:0.75rem; margin-top:6px; }
@@ -313,6 +318,7 @@
     </div>
     <div class="spacer"></div>
     <div class="header-actions">
+      <button class="btn update-btn" id="updateBtn" hidden>⬆ Update</button>
       <button class="btn" id="reportBtn" title="Review the whole network and build a prioritised checklist">📋 Action report</button>
       <button class="btn" id="topoBtn" title="Map of the UniFi devices with the clients that have issues">🗺 Topology</button>
       <button class="btn" id="wanBtn" title="Internet speed and WAN events over time; scheduled speed tests">📈 WAN</button>
@@ -326,6 +332,7 @@
           <button class="menu-item" data-tool="handbook"><span class="check">📘</span><span>Network handbook<small>printable documentation of the whole network</small></span></button>
           <button class="menu-item" data-tool="resetkit"><span class="check">♻</span><span>Factory-reset kit<small>what is customised, plus SSH restore commands</small></span></button>
           <button class="menu-item" data-tool="usage"><span class="check">💰</span><span>AI usage and cost<small>tokens and estimated spend</small></span></button>
+          <button class="menu-item" data-tool="updates"><span class="check">⬆</span><span>Updates<small>check GitHub for a new version of this app</small></span></button>
         </div>
       </div>
       <button class="btn" id="backupBtn" title="Download a backup of this console's UniFi Network settings (.unf) to this computer. Restore it in UniFi: Settings → System → Backups.">💾 Backup</button>
@@ -1858,6 +1865,103 @@ async function openUsage() {
   $('modal').classList.add('wide');
 }
 
+// ── updates from GitHub ────────────────────────────────────────────────────
+function renderUpdateBtn(u) {
+  const b = $('updateBtn'); if (!u) return;
+  b.hidden = !u.newer;
+  if (u.newer) {
+    b.textContent = `⬆ Update to v${u.latest}`;
+    b.title = `Version ${u.latest} of this app is on GitHub (you have ${u.current}). Click to see what’s new.`;
+  }
+}
+async function checkUpdates() { try { renderUpdateBtn(await api('GET', '/api/update')); } catch {} }
+
+async function openUpdates(force = false) {
+  busyModal('Updates', force ? 'Asking GitHub for the newest version…' : 'Loading…');
+  let u;
+  try { u = await api('GET', '/api/update' + (force ? '?check=1' : '')); }
+  catch (e) { failModal('Updates', e, () => openUpdates(true)); return; }
+  renderUpdateBtn(u);
+  const checked = u.checked_at ? ` Checked ${fmtWhen(u.checked_at)}.` : '';
+  const head = u.error ? result('bad', u.error)
+    : u.newer ? result('ok', h('b', {}, `Version ${u.latest} is available.`), ` You have ${u.current}.${checked}`)
+    : result('ok', `You have the newest version, ${u.current}.${checked}`);
+  const notes = u.newer && u.notes.length ? h('div', { class: 'update-notes' }, ...u.notes.map(n =>
+    h('div', {}, h('b', {}, n.subject), n.date ? h('small', {}, fmtWhen(n.date)) : null, n.body ? h('div', { class: 'body' }, n.body) : null))) : null;
+
+  // private repository: a GitHub token
+  const tok = secretInput({ placeholder: 'ghp_… or github_pat_…' });
+  const saveTok = h('button', { class: 'btn' }, 'Save token');
+  saveTok.addEventListener('click', async () => {
+    saveTok.disabled = true; saveTok.textContent = 'Checking…';
+    try { await api('POST', '/api/update/settings', { token: tok.input.value }); toast('Token saved.'); openUpdates(); }
+    catch (e) { toast(e.message, true); saveTok.disabled = false; saveTok.textContent = 'Save token'; }
+  });
+  const tokenBox = (u.error_kind === 'auth' || u.token_saved) ? h('div', { class: 'note', style: 'margin:6px 0 14px' },
+    u.token_saved ? h('div', {}, 'A GitHub token is saved in ', storeName(), '. ',
+        h('button', { class: 'btn', onclick: () => api('POST', '/api/update/settings', { remove_token: true }).then(() => openUpdates(true), e => toast(e.message, true)) }, 'Remove it'))
+      : h('div', {}, `Paste a GitHub token that can read ${u.repo}. It is kept in ${storeName()} and only sent to GitHub. `,
+          h('a', { href: '/setup#updates', target: '_blank', rel: 'noopener' }, 'How to make one')),
+    h('div', { class: 'field', style: 'display:flex;gap:8px;align-items:center;margin:8px 0 0' },
+      h('div', { style: 'flex:1' }, tok.wrap), saveTok)) : null;
+
+  const auto = h('input', { type: 'checkbox', checked: u.auto || null });
+  auto.addEventListener('change', () => api('POST', '/api/update/settings', { auto: auto.checked }).then(() => toast(auto.checked ? 'Daily check on.' : 'Daily check off.'), e => toast(e.message, true)));
+  const install = u.newer && !u.git_checkout ? h('button', { class: 'btn primary' }, `Install v${u.latest} and restart`) : null;
+  if (install) install.addEventListener('click', () => installUpdate(u));
+  const backups = u.backups.length && !u.git_checkout ? h('div', { style: 'margin:10px 0' },
+    h('h3', { style: 'margin:0 0 6px;font-size:0.875rem' }, 'Previous versions kept'),
+    ...u.backups.map(b => h('div', { class: 'kit-opt', style: 'cursor:default' },
+      h('span', {}, `v${b.version || '?'}`, h('small', { class: 'muted' }, ` · replaced ${b.at ? fmtWhen(b.at) : ''}`)),
+      h('button', { class: 'btn', onclick: () => rollbackUpdate(b) }, 'Roll back')))) : null;
+  openModal(...modalHead('Updates', `This app updates itself from GitHub (${u.repo}). Your settings, connections, passwords and the data folder are never touched.`),
+    head, notes, tokenBox,
+    u.git_checkout ? h('div', { class: 'note warn' }, 'This app folder is a git checkout, so it isn’t overwritten. Run ', h('code', {}, 'git pull'), ' in the folder, then restart the app.') : null,
+    u.token_source && !u.token_saved ? h('div', { class: 'muted', style: 'font-size:0.75rem;margin-bottom:8px' }, `GitHub sign-in: ${u.token_source}.`) : null,
+    h('label', { class: 'kit-opt' }, auto, ' Check for a new version once a day'),
+    backups,
+    h('div', { class: 'actions' }, h('span', { class: 'left' }, h('button', { class: 'btn', onclick: () => openUpdates(true) }, '↻ Check now')),
+      h('button', { class: 'btn', onclick: closeModal }, 'Close'), install));
+}
+
+async function installUpdate(u) {
+  if (!confirm(`Install version ${u.latest}?\n\nThe app’s files are replaced with the new version’s. Your settings, connections, passwords and the data folder are not touched, and the replaced files are kept so you can roll back.\n\nThe app then restarts and this page reconnects by itself.`)) return;
+  busyModal('Updating', `Downloading version ${u.latest} from GitHub and installing it…`);
+  let r;
+  try { r = await api('POST', '/api/update/install', {}); }
+  catch (e) { failModal('The update didn’t install', e, () => openUpdates(true)); return; }
+  waitForRestart(r.version, r.restart, `Version ${r.version} installed.`);
+}
+
+async function rollbackUpdate(b) {
+  if (!confirm(`Put back version ${b.version}? The files the update replaced are restored, and the app restarts.`)) return;
+  busyModal('Rolling back', `Putting back version ${b.version}…`);
+  let r;
+  try { r = await api('POST', '/api/update/rollback', { name: b.name }); }
+  catch (e) { failModal('Roll back failed', e, () => openUpdates()); return; }
+  waitForRestart(r.version, r.restart, `Version ${r.version} put back.`);
+}
+
+async function waitForRestart(version, restart, done) {
+  if (!restart) {
+    openModal(...modalHead('Restart the app'), result('ok', done),
+      h('p', {}, `Close the app’s window and start it again with ${launcherName()} to run it.`),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: closeModal }, 'OK')));
+    return;
+  }
+  busyModal('Restarting', `${done} The app is restarting; if the new version needs new packages, that takes a minute.`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 240000) {
+    await new Promise(res => setTimeout(res, 1500));
+    try {
+      const r = await fetch('/api/status', { headers: { 'X-App-Token': TOKEN } });
+      if (r.status === 401) { location.reload(); return; }             // new page token: reload picks it up
+      if (r.ok && (await r.json()).version === version) { location.reload(); return; }
+    } catch {}                                                           // down while it restarts
+  }
+  failModal('Still restarting', new Error(`The app hasn’t come back after 4 minutes. Look at its window for a message. If the new version won’t start, see “If an update goes wrong” in the setup guide.`));
+}
+
 // ── factory-reset kit ──────────────────────────────────────────────────────
 async function openResetKit() {
   let r;
@@ -2011,6 +2115,7 @@ function openAbout() {
       h('div', {}, 'Runs on this PC only. Changes to your network always need your approval.')),
     h('div', { class: 'actions', style: 'justify-content:center;margin-top:16px' },
       h('a', { class: 'btn', href: '/setup', target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, '📖 Setup guide'),
+      h('button', { class: 'btn', onclick: () => openUpdates(true) }, '⬆ Check for updates'),
       h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
 }
 
@@ -2050,13 +2155,14 @@ $('wanBtn').addEventListener('click', () => openWan());
 $('changesBtn').addEventListener('click', () => openChanges());
 $('backupBtn').addEventListener('click', runBackup);
 $('usageChip').addEventListener('click', openUsage);
+$('updateBtn').addEventListener('click', () => openUpdates());
 $('toolsBtn').addEventListener('click', e => { e.stopPropagation(); $('toolsMenu').hidden = !$('toolsMenu').hidden; });
 document.addEventListener('click', e => { if (!e.target.closest('#toolsMenu') && e.target.id !== 'toolsBtn') $('toolsMenu').hidden = true; });
 $('toolsMenu').addEventListener('click', e => {
   const b = e.target.closest('[data-tool]'); if (!b) return;
   $('toolsMenu').hidden = true;
   ({ ports: openPortMap, detective: openDetective, scorecard: openScorecard, handbook: openHandbook,
-     resetkit: openResetKit, usage: openUsage })[b.dataset.tool]();
+     resetkit: openResetKit, usage: openUsage, updates: () => openUpdates(true) })[b.dataset.tool]();
 });
 
 function showReportOrNew() {
@@ -2073,12 +2179,14 @@ async function init() {
   if (!s.configured) openSettings(true);
   else if (!s.has_connections) openConnections(null, true, true);
   refreshUsage();
+  checkUpdates();
   await refreshNetwork();
   if (s.pending && s.pending.length) addApproval(s.pending);
 }
 init();
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 30000);
 setInterval(() => { if (!document.hidden && status && status.connected) refreshNetwork(); }, 60000);
+setInterval(checkUpdates, 6 * 3600 * 1000);
 </script>
 </body>
 </html>

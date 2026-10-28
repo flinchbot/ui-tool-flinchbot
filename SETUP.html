@@ -294,6 +294,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <li><strong>📘 Network handbook:</strong> one web page documenting the whole network: networks and VLANs with DHCP ranges, Wi-Fi, every device with firmware and uplink, the topology, every switch port, firewall policies, port forwards, routes, VPNs, named clients and fixed IPs. It downloads and opens in a new tab; <strong>Print → Save as PDF</strong> makes a PDF. Wi-Fi passwords are left out unless you tick the box.</li>
 <li><strong>♻ Factory-reset kit:</strong> see <a href="#reset-kit">Before a factory reset</a>.</li>
 <li><strong>💰 AI usage and cost:</strong> see below.</li>
+<li><strong>⬆ Updates:</strong> see <a href="#updates">Updating the app</a>.</li>
 </ul>
 </li>
 <li><strong>💰 Cost meter</strong> (above the chat): tokens used and the estimated cost of this conversation. Click it for today, the last 7 days and this month, per model, with an optional monthly budget that turns the meter orange at 80% and red when it's reached (a warning only; nothing is blocked). Token counts are exact, because every AI response reports them. Dollars are an estimate: tokens × the published price per million tokens. Neither Anthropic nor OpenAI offers a price feed, so the app uses, in order: a price you type in (✎), LiteLLM's public price list (<strong>↻ Update prices</strong> downloads it from GitHub; it covers Claude and GPT models), or Claude prices copied from Anthropic's pricing page. Your provider's invoice is the final word.</li>
@@ -339,17 +340,43 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <li><strong>Linux:</strong> <code>sudo apt install nmap</code> (or your distribution's equivalent).</li>
 </ul>
 <p>Restart the app afterwards; the startup check shows <strong>Nmap found</strong>. The app only ever runs basic TCP connect scans (no administrator rights needed), only on private LAN addresses that the console knows as clients, and only when you click a scan button or approve flinchbot's request. Every scan is logged in 🧾 Changes.</p>
+<a id="updates"></a>
 <h2 id="s-9-updating-the-app">9. Updating the app</h2>
+<p>The app checks GitHub for a new version once a day. When there is one, <strong>⬆ Update to v…</strong> appears at the top right.</p>
+<ol>
+<li>Click it to see what changed, then <strong>Install … and restart</strong>.<ul>
+<li>The app downloads the new version from GitHub and writes its files over the app folder.</li>
+<li>Your <code>.env</code> file (settings and AI keys), the <code>data</code> folder (connections, change log, snapshots) and <code>.venv</code> are never touched, and saved passwords stay where they are.</li>
+<li>Before a file is replaced, it is copied into <code>data\updates\</code>. <strong>Roll back</strong> in the same window puts the previous version back (the last 3 are kept).</li>
+</ul>
+</li>
+<li>The app restarts in its own window, installs any new packages, and the browser page reconnects by itself.</li>
+</ol>
+<p><strong>🧰 Tools → ⬆ Updates</strong> checks at any time and has the switch for the daily check. The check only asks GitHub for the newest version number and its change notes; nothing about you or your network is sent.</p>
 <ul>
-<li><strong>Downloaded ZIP:</strong><ol>
+<li><strong>The repository is private:</strong> the app needs a GitHub token that can read it. Paste it in the Updates window; it is kept in Credential Manager or the Keychain and only sent to GitHub. To make one, on github.com go to your picture → <strong>Settings → Developer settings → Personal access tokens</strong>:<ul>
+<li><strong>If you own the repository:</strong> <strong>Fine-grained tokens → Generate new token</strong>. Under <em>Repository access</em> choose <strong>Only select repositories</strong> and pick this one. Under <em>Permissions → Repository permissions</em>, set <strong>Contents</strong> to <strong>Read-only</strong>. Generate it and copy it (it starts with <code>github_pat_</code>).</li>
+<li><strong>If someone shared the repository with you:</strong> fine-grained tokens can't reach another person's repository, so use <strong>Tokens (classic) → Generate new token (classic)</strong> with the <strong>repo</strong> scope. Note that it can read every repository you can.</li>
+<li>If the GitHub CLI (<code>gh</code>) is installed and signed in on this computer, the app uses it and you don't need a token.</li>
+</ul>
+</li>
+<li><strong>Git checkout</strong> (you used <code>git clone</code>): the app doesn't overwrite it. Run <code>git pull</code> in the app folder, then restart the app.</li>
+<li><strong>Versions before 2.7.0</strong> don't have the updater. Update by hand once:<ol>
 <li>Download the new ZIP.</li>
-<li>Unzip it over the old folder (or into a new one).</li>
-<li>Copy across your <code>.env</code> file and <code>data</code> folder.</li>
+<li>Unzip it over the old folder (your <code>.env</code> and <code>data</code> folder stay as they are).</li>
+<li>Start the app again.</li>
 </ol>
 </li>
-<li><strong>Git:</strong> run <code>git pull</code> in the app folder.</li>
+<li><strong>A fork or another branch:</strong> set <code>UPDATE_REPO=owner/name</code> (and <code>UPDATE_BRANCH=…</code>) in <code>.env</code>.</li>
 </ul>
-<p>Your settings, connections and passwords aren't touched by an update. <code>start.bat</code> / <code>start.command</code> notices new requirements and installs them on the next start.</p>
+<a id="update-rollback"></a>
+<h3>If an update goes wrong</h3>
+<p>If the new version won't start, put the previous one back from the app folder:</p>
+<ul>
+<li><strong>Windows:</strong> in the app folder, click the address bar, type <code>cmd</code>, press Enter, then run <code>.venv\Scripts\python backend\updater.py --rollback</code>.</li>
+<li><strong>Mac:</strong> in Terminal, in the app folder: <code>.venv/bin/python backend/updater.py --rollback</code>.</li>
+</ul>
+<p>Then start the app again.</p>
 <a id="where-stored"></a>
 <h2 id="s-10-where-your-information-is-stored-and-what-is-sent-where">10. Where your information is stored, and what is sent where</h2>
 <table>
@@ -381,7 +408,11 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <td><code>data\resetkit\</code></td>
 </tr>
 <tr>
-<td>UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot</td>
+<td>Update check result, and the files the last updates replaced (for Roll back)</td>
+<td><code>data\updates\</code></td>
+</tr>
+<tr>
+<td>UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot, a GitHub token for updates (if you saved one)</td>
 <td><strong>Windows:</strong> Credential Manager (Control Panel → Credential Manager → Windows Credentials). <strong>Mac:</strong> the Keychain (open <em>Keychain Access</em> and search). Entries are named <code>unifi-claude</code>, the app's original name, kept so saved passwords keep working.</td>
 </tr>
 </tbody>
@@ -395,6 +426,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <li>ChatGPT requests are sent with OpenAI's "don't store" option.</li>
 <li><strong>↻ Update prices</strong> (AI usage) downloads LiteLLM's public price list from GitHub. Nothing is sent with that request.</li>
 <li>Nmap scans stay on your own network.</li>
+<li><strong>Updates:</strong> once a day (and when you click <strong>Check now</strong>) the app asks GitHub (<code>api.github.com</code>) for the newest version number and its change notes, sending the GitHub token if you saved one. Installing downloads the new version from GitHub. Nothing about you or your network is sent.</li>
 <li>Themes download their fonts from Google Fonts the first time you use them (Windows 95 uses fonts already on the computer). Only the font request goes out; no network data does.</li>
 <li>Nothing is sent anywhere else, and the app can't be reached from other computers.</li>
 </ul>
@@ -509,6 +541,22 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <tr>
 <td>A scan finds nothing on a device you know is there</td>
 <td>Phones, tablets and many smart-home devices answer on no ports at all. A firewall on the device (Windows, macOS) hides ports too.</td>
+</tr>
+<tr>
+<td>Updates: <em>GitHub didn't find … If the repository is private</em></td>
+<td>The repository is private, so the app needs a GitHub token. See <a href="#updates">Updating the app</a>.</td>
+</tr>
+<tr>
+<td>Updates: <em>GitHub refused the token</em></td>
+<td>The token expired or was revoked. Make a new one and save it in <strong>⬆ Updates</strong>, or remove it.</td>
+</tr>
+<tr>
+<td>Updates: <em>This app folder is a git checkout</em></td>
+<td>Run <code>git pull</code> in the app folder, then restart the app.</td>
+</tr>
+<tr>
+<td>The app doesn't come back after an update</td>
+<td>Look at the app's window for the message. If the new version won't start, see <a href="#update-rollback">If an update goes wrong</a>.</td>
 </tr>
 <tr>
 <td>Restore script: <em>Sign-in FAILED</em></td>

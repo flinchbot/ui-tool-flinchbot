@@ -47,6 +47,7 @@ import nmap_scan                                                       # noqa: E
 import portmap                                                         # noqa: E402
 import pricing                                                         # noqa: E402
 import scorecard                                                       # noqa: E402
+import updater                                                         # noqa: E402
 from agent import EXECUTORS, ToolInputError, scorecard_data, validate_input   # noqa: E402
 import platform                                                        # noqa: E402
 import topology                                                        # noqa: E402
@@ -54,7 +55,7 @@ import wan                                                             # noqa: E
 from unifi_client import summarize_event                               # noqa: E402
 from urllib.parse import parse_qs                                      # noqa: E402
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -368,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result if result is not None else {"ok": True})
         except HttpError as e:
             self.send_json({"error": str(e), **e.extra}, e.status)
+        except updater.UpdateError as e:
+            self.send_json({"error": str(e), "kind": e.kind}, 400)
         except UniFiError as e:
             self.send_json({"error": str(e), "kind": e.kind}, 502)
         except SSHError as e:
@@ -1084,6 +1087,48 @@ def r_kit_delete(b):
     return r_kit_list(None)
 
 
+# ── updates from GitHub ───────────────────────────────────────────────────────
+def r_update(b):
+    return updater.status(APP_VERSION, cfg.BASE_DIR, force=b.get("check") == "1")
+
+
+def _restart_soon():
+    """Hand over to the launcher, which starts the new version (exit code 75)
+    with the same page token, so the open tab reconnects by itself."""
+    updater.save_handover(cfg.BASE_DIR, APP_TOKEN, HTTP_PORT)
+
+    def go():
+        print("\n  Restarting with the new version ...\n", flush=True)
+        os._exit(updater.RESTART_CODE)
+    threading.Timer(1.0, go).start()
+
+
+def r_update_install(_):
+    r = updater.install(APP_VERSION, cfg.BASE_DIR)
+    r["restart"] = updater.launched_by_launcher()
+    if r["restart"]:
+        _restart_soon()
+    return r
+
+
+def r_update_rollback(b):
+    version = updater.rollback(cfg.BASE_DIR, b.get("name"))
+    restart = updater.launched_by_launcher()
+    if restart:
+        _restart_soon()
+    return {"version": version, "restart": restart}
+
+
+def r_update_settings(b):
+    if "auto" in b:
+        updater.set_auto(cfg.BASE_DIR, bool(b["auto"]))
+    if b.get("remove_token"):
+        updater.delete_token()
+    elif b.get("token"):
+        updater.save_token(b["token"])
+    return updater.status(APP_VERSION, cfg.BASE_DIR, force=bool(b.get("token")))
+
+
 ROUTES = {
     ("GET",  "/api/status"):                  r_status,
     ("GET",  "/api/settings"):                r_settings_get,
@@ -1130,13 +1175,17 @@ ROUTES = {
     ("POST", "/api/usage/update-prices"):     r_usage_update_prices,
     ("POST", "/api/usage/price"):             r_usage_price,
     ("POST", "/api/usage/budget"):            r_usage_budget,
+    ("GET",  "/api/update"):                  r_update,
+    ("POST", "/api/update/install"):          r_update_install,
+    ("POST", "/api/update/rollback"):         r_update_rollback,
+    ("POST", "/api/update/settings"):         r_update_settings,
 }
 
 HTTP_PORT = None
 
 
 def main():
-    global HTTP_PORT
+    global HTTP_PORT, APP_TOKEN
     ap = argparse.ArgumentParser(description="UniFi x flinchbot")
     ap.add_argument("--port", type=int, help="override SERVER_PORT from .env")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser window")
@@ -1152,6 +1201,9 @@ def main():
         print(f"  a different port:   {cfg.launcher()} --port 8090\n")
         sys.exit(1)
     httpd.daemon_threads = True
+    kept = updater.take_handover(cfg.BASE_DIR, HTTP_PORT)     # restarted after an update?
+    if kept:
+        APP_TOKEN = kept
 
     url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "127.0.0.1") else host
     url = f"http://{url_host}:{HTTP_PORT}/"
@@ -1166,9 +1218,11 @@ def main():
     print(f"  AI: {PROVIDERS[prov].label} ({cfg.provider_model(prov)}), key "
           f"{'set' if cfg.provider_key(prov) else 'NOT set - add it in the app'}")
     print(f"  Secrets stored in: {cfg.secret_store_name()}")
+    if kept:
+        print("  Restarted after an update; the open browser tab reconnects by itself.")
     print("  Press Ctrl+C to stop.\n")
     scheduler.start()                  # speed tests, only for connections where a schedule is set
-    if not args.no_browser:
+    if not args.no_browser and not kept:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:
         httpd.serve_forever()

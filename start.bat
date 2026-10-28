@@ -12,6 +12,7 @@ REM ===========================================================================
 cd /d "%~dp0"
 title UniFi x flinchbot
 set "FB_DIR=%~dp0"
+set "FB_LAUNCHER=start.bat"
 echo.
 echo  UniFi x flinchbot - checking this computer ...
 
@@ -66,7 +67,10 @@ REM --- environment report (computer, Python, packages, passwords, internet) --
 if errorlevel 1 goto :envfail
 
 REM --- run the app (opens your browser automatically) -----------------------
-".venv\Scripts\python.exe" backend\server.py %*
+REM Exit code 75 means an update was installed: run this file again from the top
+REM so the new version starts. Keep this ONE line: cmd reads a batch file from
+REM disk a line at a time, and after an update the rest of the file is different.
+".venv\Scripts\python.exe" backend\server.py %* & if errorlevel 75 if not errorlevel 76 "%~f0" %*
 echo.
 pause
 exit /b
