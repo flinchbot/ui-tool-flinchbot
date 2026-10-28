@@ -1,5 +1,8 @@
 # UniFi × flinchbot
 
+> [!NOTE]
+> **This app is fully vibe coded: it was written entirely by AI.** Every line of code, the tests and the documentation were written by Claude (Anthropic) through Claude Code. A person described what they wanted, tried it on a real network and reported what went wrong; no code was written by hand. Read the code before you trust it with your network. Every change it makes to UniFi still waits for you to click **Approve**.
+
 <img src="frontend/static/flinchbot-icon.png" alt="flinchbot" width="96" align="right">
 
 A local web app for chatting with **flinchbot**, an AI network assistant, about a Ubiquiti UniFi network. flinchbot is powered by your choice of **Claude** (Anthropic) or **ChatGPT** (OpenAI). It reads live data from the console (devices, clients, Wi-Fi, alerts, logs, firewall, port forwards) and can make changes. Every change waits for you to click **Approve**.
