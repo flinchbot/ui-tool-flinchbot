@@ -179,6 +179,8 @@ The folder is self-contained, so you can move it or copy it to another PC later.
   
   The model list is live from the provider. If your chosen model is ever deprecated, a banner tells you its retirement date.
 - **📋 Action report:** the AI reviews the whole network and lists what to fix, most urgent first. It's read-only, takes about 1–3 minutes, and costs roughly as much as a few questions.
+  - The latest report of each connection is saved, so opening it again is instant and free, even after a restart. **↻ Refresh report** at the top runs a new review.
+  - **💬 Ask** on an item closes the report and asks flinchbot about that item in the chat: it checks whether it's still the case and walks you through the fix.
   - **⤓ Checklist web page:** open it in any browser and tick items off as you fix them. Ticks are remembered in that browser, and **Print / PDF** works.
   - **⤓ Markdown:** for notes apps. Obsidian, VS Code and GitHub show the `[ ]` boxes as clickable checkboxes.
   - **↻ Regenerate** gives a fresh snapshot with an empty checklist, which is handy to confirm your fixes took.
@@ -288,6 +290,7 @@ Then start the app again.
 | Change log, speed tests this app ran | `data\audit.jsonl`, `data\speedtests.jsonl` |
 | AI token use and estimated cost, prices and budget | `data\usage.jsonl`, `data\prices.json` |
 | Factory-reset kit snapshots (passwords in them encrypted) | `data\resetkit\` |
+| The latest action report of each connection | `data\reports\` |
 | Update check result, and the files the last updates replaced (for Roll back) | `data\updates\` |
 | UniFi passwords / API keys, SSH passwords, previous Wi-Fi passwords kept for Undo, the key to each reset-kit snapshot, a GitHub token for updates (if you saved one) | **Windows:** Credential Manager (Control Panel → Credential Manager → Windows Credentials). **Mac:** the Keychain (open *Keychain Access* and search). Entries are named `unifi-claude`, the app's original name, kept so saved passwords keep working. |
 

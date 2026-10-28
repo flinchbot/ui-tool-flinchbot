@@ -1816,6 +1816,30 @@ class ToolEndpointTests(unittest.TestCase):
         s, lst, _ = self.req("POST", "/api/resetkit/delete", {"id": sid})
         self.assertEqual(lst["snapshots"], [])
 
+    def test_3_action_report_is_kept_until_refreshed(self):
+        s, r, _ = self.req("GET", "/api/report")
+        self.assertEqual((s, r["report"]), (200, None))           # none yet: the page runs one
+        runs = []
+
+        def fake_report(progress=None):
+            runs.append(1)
+            return {"summary": f"run {len(runs)}", "items": [], "healthy": []}
+        saved = srv.agent.generate_report
+        srv.agent.generate_report = fake_report
+        self.addCleanup(setattr, srv.agent, "generate_report", saved)
+        s, made, _ = self.req("POST", "/api/report", {})
+        self.assertEqual((s, made["summary"], made["network"]), (200, "run 1", "Home"), made)
+        for _ in range(3):                                          # opening it again costs no AI call
+            s, r, _ = self.req("GET", "/api/report")
+            self.assertEqual(r["report"], made)
+        s, again, _ = self.req("POST", "/api/report", {})            # ↻ Refresh report
+        self.assertEqual(self.req("GET", "/api/report")[1]["report"]["summary"], "run 2")
+        self.assertEqual(len(runs), 2)
+        srv._remove_report(self.req("GET", "/api/status")[1]["active"]["id"])   # as when the connection is deleted
+        self.assertIsNone(self.req("GET", "/api/report")[1]["report"])
+        self.assertEqual(os.path.dirname(srv._report_path("../../evil")), os.path.join(cfg.DATA_DIR, "reports"))
+        self.assertIsNone(srv._report_path("../"))
+
 
 
 # ── updates from GitHub ───────────────────────────────────────────────────────

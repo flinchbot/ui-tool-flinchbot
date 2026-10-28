@@ -57,7 +57,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.8.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 
@@ -704,6 +704,7 @@ def r_connection_trust(b):
 
 def r_connection_delete(b):
     cfg.delete_profile(b.get("id", ""))
+    _remove_report(b.get("id", ""))
     switch_connection()
     return r_connections(None)
 
@@ -866,6 +867,31 @@ def r_reset(_):
 _report_lock = threading.Lock()
 
 
+def _report_path(profile_id):
+    """The latest action report of a connection is kept until it is refreshed:
+    a report costs minutes of AI time, opening it again costs nothing."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(profile_id or ""))
+    return os.path.join(cfg.DATA_DIR, "reports", f"{safe}.json") if safe else None
+
+
+def _remove_report(profile_id):
+    path = _report_path(profile_id)
+    if path and os.path.exists(path):
+        os.remove(path)
+
+
+def r_report_get(_):
+    p = cfg.active_profile()
+    path = _report_path(p["id"]) if p else None
+    if not path or not os.path.exists(path):
+        return {"report": None}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {"report": json.load(f)}
+    except (OSError, ValueError):
+        return {"report": None}
+
+
 def r_report(_):
     """Read-only, whole-network action report (separate from the chat)."""
     if not _report_lock.acquire(blocking=False):
@@ -878,6 +904,8 @@ def r_report(_):
                       network=p["name"], host=p["host"], site=p.get("site", "default"),
                       model=f"{PROVIDERS[cfg.active_provider()].label} · {cfg.provider_model(cfg.active_provider())}",
                       report_id=f"{p['id']}-{int(time.time())}")
+        os.makedirs(os.path.dirname(_report_path(p["id"])), exist_ok=True)
+        cfg._atomic_write(_report_path(p["id"]), json.dumps(report, indent=2))
         return report
     finally:
         _report_lock.release()
@@ -1192,6 +1220,7 @@ ROUTES = {
     ("POST", "/api/chat"):                    r_chat,
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/reset"):                   r_reset,
+    ("GET",  "/api/report"):                  r_report_get,
     ("POST", "/api/report"):                  r_report,
     ("GET",  "/api/resetkit"):                r_kit_list,
     ("POST", "/api/resetkit/snapshot"):       r_kit_snapshot,
