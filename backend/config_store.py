@@ -19,6 +19,7 @@ Real environment variables override .env values (standard dotenv behaviour).
 import json
 import os
 import re
+import ssl
 import sys
 import tempfile
 import threading
@@ -26,6 +27,19 @@ import uuid
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
+
+
+def ssl_context():
+    """TLS context for downloads from the internet (GitHub, LiteLLM's price list).
+    python.org Python on a Mac ships no CA list until "Install Certificates.command"
+    is run, so plain urlopen fails with CERTIFICATE_VERIFY_FAILED there; certifi
+    (installed with the AI SDKs) carries its own list. The UniFi client is separate:
+    it pins the console's self-signed certificate instead."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def platform_name():

@@ -27,7 +27,6 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import threading
@@ -178,20 +177,12 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
-def _ssl_context():
-    try:
-        import certifi                      # python.org Python on a Mac has no CA list without it
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl.create_default_context()
-
-
 def _request(path, tok, accept="application/vnd.github+json", timeout=20, limit=5_000_000):
     url = path if path.startswith("http") else API.rstrip("/") + path
     headers = {"User-Agent": "unifi-flinchbot-updater", "Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
-    opener = urllib.request.build_opener(_DropAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context()))
+    opener = urllib.request.build_opener(_DropAuthOnRedirect(), urllib.request.HTTPSHandler(context=cfg.ssl_context()))
     try:
         with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
             data = r.read(limit + 1)

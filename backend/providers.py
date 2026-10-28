@@ -94,14 +94,16 @@ class AnthropicProvider:
         return [{"role": "assistant", "content": blocks}]
 
     @staticmethod
-    def append_user(history, results=(), text=None):
-        """Tool results first, then text; merged into a trailing user turn so roles alternate."""
+    def append_user(history, results=(), text=None, images=()):
+        """Tool results first, then images, then text; merged into a trailing user turn so roles alternate."""
         blocks = []
         for r in results:
             b = {"type": "tool_result", "tool_use_id": r["id"], "content": r["content"]}
             if r.get("is_error"):
                 b["is_error"] = True
             blocks.append(b)
+        for im in images or ():
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": im["media_type"], "data": im["data"]}})
         if text:
             blocks.append({"type": "text", "text": text})
         if history and history[-1]["role"] == "user":
@@ -218,13 +220,17 @@ class OpenAIProvider:
         return kept or [{"role": "assistant", "content": "(cut off)"}]
 
     @staticmethod
-    def append_user(history, results=(), text=None):
+    def append_user(history, results=(), text=None, images=()):
         for r in results:
             out = r["content"]
             if r.get("is_error") and not str(out).startswith("ERROR"):
                 out = "ERROR: " + str(out)
             history.append({"type": "function_call_output", "call_id": r["id"], "output": out})
-        if text:
+        if images:
+            parts = [{"type": "input_image", "detail": "auto",
+                      "image_url": f"data:{im['media_type']};base64,{im['data']}"} for im in images]
+            history.append({"role": "user", "content": parts + [{"type": "input_text", "text": text or ""}]})
+        elif text:
             history.append({"role": "user", "content": text})
 
     @staticmethod

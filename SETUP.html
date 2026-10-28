@@ -256,7 +256,7 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <h2 id="s-7-everyday-use">7. Everyday use</h2>
 <ul>
 <li><strong>Ask questions</strong> in the chat, or click a quick prompt such as <em>Health check</em>.</li>
-<li><strong>📎 Attach text files:</strong> click 📎 (or drag files onto the message box) to give the AI a log, config export, CSV and so on alongside your question. Up to 5 files and 150,000 characters per message; pictures, PDFs and other non-text files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until <strong>Clear chat</strong> or closing the app. It goes to the AI exactly as is, so remove passwords first. Big files make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.</li>
+<li><strong>📎 Attach text files and images:</strong> click 📎, drag files onto the chat, or paste a screenshot (Ctrl+V / Cmd+V) in the message box to give the AI a log, config export, CSV, or a screenshot or photo alongside your question. Up to 5 files per message: text up to 150,000 characters, images up to 5 MB each (PNG, JPEG, GIF, WebP; BMP, HEIC and TIFF are converted by your browser if it can open them; large images are scaled down to 1568 px, which is all the AI looks at anyway). PDFs and other files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until <strong>Clear chat</strong> or closing the app. It goes to the AI exactly as is, so remove passwords first and crop them out of screenshots. Big files and images make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.</li>
 <li><strong>Changes:</strong> when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click <strong>Approve</strong>. <strong>Deny</strong> cancels it. With SSH on (step 4), a command that could change the console shows the same card with the exact command.</li>
 <li><strong>Another network:</strong> click the connection name at the top → <strong>Add a connection…</strong>. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.</li>
 <li>
@@ -587,6 +587,10 @@ The login you normally use (your UI.com / Ubiquiti cloud account) will <strong>n
 <tr>
 <td>The cost meter shows <strong>—</strong> for a model</td>
 <td>The app has no price for it. Click the meter → <strong>↻ Update prices</strong>, or ✎ to type the price from your provider's pricing page.</td>
+</tr>
+<tr>
+<td><em>Couldn't download the price list: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate</em></td>
+<td>Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the <code>certifi</code> package), so restart the app once so the launcher installs it. On an older version, open <strong>Applications → Python 3.x</strong> in Finder and double-click <strong>Install Certificates.command</strong>.</td>
 </tr>
 </tbody>
 </table>

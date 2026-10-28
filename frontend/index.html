@@ -174,8 +174,12 @@
   .att-chip button { background:none; border:0; color:var(--muted); cursor:pointer; font-size:0.875rem; padding:0 4px; }
   .att-chip button:hover { color:var(--danger); }
   .att-note { font-size:0.6875rem; color:var(--muted); width:100%; }
+  .att-chip.img { padding-left:4px; }
+  .att-chip img { width:28px; height:28px; object-fit:cover; border-radius:4px; background:var(--bg); }
   .msg-files { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; white-space:normal; }
   .msg-files .att-chip { padding-right:10px; }
+  .msg-img { display:inline-block; line-height:0; }
+  .msg-img img { max-height:180px; max-width:100%; border-radius:8px; border:1px solid var(--border); background:var(--bg); }
   .chat-input-area.drag { outline:2px dashed var(--accent); outline-offset:-6px; }
   .chat-input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; color:var(--text);
                 font-family:var(--font-ui); font-size:0.875rem; outline:none; resize:none; line-height:1.5; }
@@ -393,9 +397,9 @@
         <div class="quick-prompts" id="quickPrompts"></div>
         <div class="attachments" id="attachments"></div>
         <div class="input-row">
-          <button class="attach-btn" id="attachBtn" title="Attach text files (logs, configs, exports). Read by the AI, never saved." aria-label="Attach text files">📎</button>
+          <button class="attach-btn" id="attachBtn" title="Attach text files or images (logs, configs, screenshots). You can also drop or paste them. Read by the AI, never saved." aria-label="Attach text files or images">📎</button>
           <input type="file" id="fileInput" multiple hidden
-                 accept=".txt,.log,.csv,.tsv,.json,.md,.conf,.cfg,.ini,.yaml,.yml,.xml,.toml,.sh,.ps1,.bat,.py,.js,.html,.rsc,.cap,text/*">
+                 accept=".txt,.log,.csv,.tsv,.json,.md,.conf,.cfg,.ini,.yaml,.yml,.xml,.toml,.sh,.ps1,.bat,.py,.js,.html,.rsc,.cap,text/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.heic,.heif,.tif,.tiff,image/*">
           <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about your network…"></textarea>
           <button class="send-btn" id="sendBtn" title="Send">➤</button>
         </div>
@@ -617,11 +621,14 @@ function addMessage(role, text, opts = {}) {
   clearEmpty();
   const files = opts.files || [];
   const recorded = files.length ? `${text}\n\n📎 Attached: ${files.map(f => `${f.name} (${fmtSize(f.size)})`).join(', ')}` : text;
-  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text: recorded, at: new Date(), ai: aiName() });
+  if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text: recorded, at: new Date(), ai: aiName(),
+    images: files.filter(f => f.image).map(f => ({ name: f.name, src: `data:${f.media_type};base64,${f.image}` })) });
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
-  if (files.length) bubble.append(h('div', { class: 'msg-files' },
-    ...files.map(f => h('span', { class: 'att-chip', title: f.name }, '📎 ', h('span', { class: 'n' }, f.name), h('span', { class: 'sz' }, fmtSize(f.size))))));
+  if (files.length) bubble.append(h('div', { class: 'msg-files' }, ...files.map(f => f.image
+    ? h('a', { class: 'msg-img', href: f.preview, target: '_blank', rel: 'noopener', title: `${f.name} · ${f.w}×${f.h} · click to open full size` },
+        h('img', { src: f.preview, alt: f.name }))
+    : chip(f))));
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
     h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : botAvatar())),
     h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, role === 'user' ? 'You' : (opts.error ? 'Error' : BOT_NAME)), bubble));
@@ -703,40 +710,81 @@ async function sendMessage(override) {
   const files = override ? [] : attached;
   if (!override) {
     attached = []; renderAttachments();
-    if (!text) text = files.length > 1 ? 'Please review the attached files.' : 'Please review the attached file.';
+    if (!text) {
+      const imgs = files.filter(f => f.image).length;
+      text = `Please review the attached ${imgs === files.length ? 'image' : imgs ? 'attachment' : 'file'}${files.length > 1 ? 's' : ''}.`;
+    }
     input.value = ''; autoResize(input);
   }
   document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
   transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
   addMessage('user', override ? override.display : text, { files });
-  const ok = await runChat('/api/chat', { message: text, files: files.map(f => ({ name: f.name, text: f.text })) });
+  const ok = await runChat('/api/chat', { message: text, files: files.map(f => f.image
+    ? { name: f.name, image: f.image, media_type: f.media_type } : { name: f.name, text: f.text }) });
   if (!ok && files.length && !attached.length) { attached = files; renderAttachments('The message failed, so the files are still attached. Send again when ready.'); }
 }
 
-// ── Text attachments ─────────────────────────────────────────────────────────
+// ── Attachments: text files and images ──────────────────────────────────────
 // Read in the browser and sent with the message. Nothing is uploaded to a folder or written to disk.
-const MAX_FILES = 5, MAX_FILE_CHARS = 150000;
+// Text goes to the AI inside the message; images go as pictures (PNG, JPEG, GIF, WebP are what both
+// providers accept; BMP, HEIC, TIFF and other formats the browser can decode are converted to PNG/JPEG
+// here). Anything with a long edge over 1568 px is scaled down to that, which is what the AI would see anyway.
+const MAX_FILES = 5, MAX_FILE_CHARS = 150000, MAX_IMAGE_BYTES = 5000000, IMAGE_EDGE = 1568;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|avif|ico)$/i;
 var attached = [];   // var: clearChatView may run before this line during start-up
 function fmtSize(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
+function looksLikeImage(file) { return (file.type || '').startsWith('image/') || IMAGE_EXT.test(file.name || ''); }
 function attachNote(msg) { const a = $('attachments'); a.querySelector('.att-note')?.remove(); if (msg) a.append(h('div', { class: 'att-note' }, msg)); }
+function chip(f, ...extra) {
+  return h('span', { class: 'att-chip' + (f.image ? ' img' : ''),
+                     title: f.image ? `${f.name} · ${f.w}×${f.h}` : `${f.name} · ${f.text.length.toLocaleString()} characters` },
+    f.image ? h('img', { src: f.preview, alt: '' }) : '📎 ', h('span', { class: 'n' }, f.name), h('span', { class: 'sz' }, fmtSize(f.size)), ...extra);
+}
 function renderAttachments(note) {
   const box = $('attachments');
-  box.replaceChildren(...attached.map((f, i) => h('span', { class: 'att-chip', title: `${f.name} · ${f.text.length.toLocaleString()} characters` },
-    '📎 ', h('span', { class: 'n' }, f.name), h('span', { class: 'sz' }, fmtSize(f.size)),
+  box.replaceChildren(...attached.map((f, i) => chip(f,
     h('button', { title: 'Remove', 'aria-label': `Remove ${f.name}`, onclick: () => { attached.splice(i, 1); renderAttachments(); } }, '✕'))));
-  if (attached.length) attachNote(note || 'Sent to the AI exactly as is, so remove any passwords first. Kept only in this chat (never saved); Clear chat discards it.');
+  if (attached.length) attachNote(note || 'Sent to the AI exactly as is, so remove any passwords first (crop them out of screenshots). Kept only in this chat (never saved); Clear chat discards it.');
   else if (note) attachNote(note);
+}
+async function readImage(file) {
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { throw new Error(`${file.name} isn't an image this browser can read`); }
+  const native = IMAGE_TYPES.includes(file.type), long = Math.max(bmp.width, bmp.height);
+  let blob = file, type = file.type, w = bmp.width, hgt = bmp.height, name = file.name || 'image.png';
+  if (!native || file.size > MAX_IMAGE_BYTES || long > IMAGE_EDGE) {
+    const s = Math.min(1, IMAGE_EDGE / long);
+    const c = document.createElement('canvas');
+    c.width = w = Math.max(1, Math.round(bmp.width * s)); c.height = hgt = Math.max(1, Math.round(bmp.height * s));
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    type = /jpe?g|heic|heif/i.test(file.type + ' ' + file.name) ? 'image/jpeg' : 'image/png';   // photos → JPEG, screenshots → PNG
+    blob = await new Promise(r => c.toBlob(r, type, 0.9));
+    if (blob && blob.size > MAX_IMAGE_BYTES && type === 'image/png') { type = 'image/jpeg'; blob = await new Promise(r => c.toBlob(r, type, 0.85)); }
+    if (!blob) throw new Error(`couldn't convert ${file.name}`);
+    name = name.replace(/\.[^.]+$/, '') + (type === 'image/png' ? '.png' : '.jpg');
+  }
+  bmp.close();
+  if (blob.size > MAX_IMAGE_BYTES) throw new Error(`${file.name} is too big (${MAX_IMAGE_BYTES / 1000000} MB at most)`);
+  const dataUrl = await new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error(`couldn't read ${file.name}`)); r.readAsDataURL(blob);
+  });
+  return { name, size: blob.size, image: dataUrl.slice(dataUrl.indexOf(',') + 1), media_type: type, preview: URL.createObjectURL(blob), w, h: hgt };
 }
 async function addFiles(list) {
   const problems = [];
   for (const file of Array.from(list || [])) {
     if (attached.length >= MAX_FILES) { problems.push(`only ${MAX_FILES} files per message`); break; }
+    if (looksLikeImage(file)) {
+      try { attached.push(await readImage(file)); } catch (e) { problems.push(e.message); }
+      continue;
+    }
     if (file.size > MAX_FILE_CHARS * 4) { problems.push(`${file.name} is too big`); continue; }
     let text;
     try { text = await file.text(); } catch { problems.push(`couldn't read ${file.name}`); continue; }
     const bad = (text.match(/\uFFFD/g) || []).length;
-    if (text.includes('\0') || bad > Math.max(8, text.length / 200)) { problems.push(`${file.name} isn't a text file`); continue; }
-    const used = attached.reduce((n, f) => n + f.text.length, 0);
+    if (text.includes('\0') || bad > Math.max(8, text.length / 200)) { problems.push(`${file.name} isn't a text file or an image`); continue; }
+    const used = attached.reduce((n, f) => n + (f.text ? f.text.length : 0), 0);
     if (used + text.length > MAX_FILE_CHARS) { problems.push(`${file.name} would go over ${MAX_FILE_CHARS.toLocaleString()} characters for one message`); continue; }
     attached.push({ name: file.name, size: file.size, text });
   }
@@ -1208,6 +1256,7 @@ function toHtml() {
       body = formatMarkdown(t.text);               // escapes first, then adds formatting
     } else {
       body = esc(t.text).replace(/\n/g, '<br>');
+      if (t.images && t.images.length) body += `<div class="imgs">${t.images.map(i => `<img src="${i.src}" alt="${esc(i.name)}" title="${esc(i.name)}">`).join('')}</div>`;
     }
     return `<section class="m ${t.kind}"><header>${esc(labelFor(t))}<time>${esc(fmtTime(t.at))}</time></header><div>${body}</div></section>`;
   }).join('\n');
@@ -1227,6 +1276,7 @@ function toHtml() {
   code{font:12px ui-monospace,Consolas,monospace;background:rgba(127,127,127,.12);padding:1px 5px;border-radius:4px}
   pre{font:12px ui-monospace,Consolas,monospace;background:rgba(127,127,127,.1);padding:10px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere}
   .act{margin:4px 0} .dec{font-weight:600;margin:8px 0 0} .dec.ok{color:var(--ok)} .dec.no{color:var(--no)}
+  .imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px} .imgs img{max-width:100%;max-height:360px;border-radius:8px;border:1px solid var(--line)}
   @media print{section.user{margin-left:0} body{font-size:12px}}
 </style></head>
 <body><main>
@@ -2168,12 +2218,19 @@ $('sendBtn').addEventListener('click', () => sendMessage());
 $('attachBtn').addEventListener('click', () => { if (!busy) $('fileInput').click(); });
 $('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 (() => {
-  const area = document.querySelector('.chat-input-area'); let depth = 0;
+  // Drop files (text or images) anywhere on the chat column; the message box lights up as the target.
+  const zone = document.querySelector('.chat-area'), area = document.querySelector('.chat-input-area'); let depth = 0;
   const hasFiles = e => Array.from(e.dataTransfer?.types || []).includes('Files');
-  area.addEventListener('dragenter', e => { if (hasFiles(e)) { depth++; area.classList.add('drag'); } });
-  area.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; area.classList.remove('drag'); } });
-  area.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
-  area.addEventListener('drop', e => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; area.classList.remove('drag'); if (!busy) addFiles(e.dataTransfer.files); });
+  zone.addEventListener('dragenter', e => { if (hasFiles(e)) { depth++; area.classList.add('drag'); } });
+  zone.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; area.classList.remove('drag'); } });
+  zone.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  zone.addEventListener('drop', e => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; area.classList.remove('drag'); if (!busy) addFiles(e.dataTransfer.files); });
+  // A screenshot on the clipboard (Cmd/Ctrl+V) becomes an image attachment.
+  $('chatInput').addEventListener('paste', e => {
+    const files = Array.from(e.clipboardData?.files || []).filter(looksLikeImage);
+    if (!files.length || busy) return;
+    e.preventDefault(); addFiles(files);
+  });
 })();
 $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 $('chatInput').addEventListener('input', e => autoResize(e.target));

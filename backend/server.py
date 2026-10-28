@@ -57,9 +57,10 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.10.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
+MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
 
 
 # ── application state ─────────────────────────────────────────────────────────
@@ -303,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; script-src 'self' 'unsafe-inline'; "
                          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-                         "font-src https://fonts.gstatic.com; img-src 'self' data:; "
+                         "font-src https://fonts.gstatic.com; img-src 'self' data: blob:; "
                          "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
         self.end_headers()
         self.wfile.write(body)
@@ -329,7 +330,8 @@ class Handler(BaseHTTPRequestHandler):
             if ctype != "application/json":
                 raise HttpError(415, "Content-Type must be application/json")
         length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
+        limit = MAX_CHAT_BODY if (self.command, self.path.split("?", 1)[0]) == ("POST", "/api/chat") else MAX_BODY
+        if length > limit:
             raise HttpError(413, "Request too large")
         if not length:
             return {}

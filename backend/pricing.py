@@ -115,7 +115,7 @@ def cost(model, u):
 def update_from_litellm(timeout=30):
     """Fetch LiteLLM's public price list and keep the Claude and GPT entries. -> count."""
     req = urllib.request.Request(LITELLM_URL, headers={"User-Agent": "unifi-flinchbot"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=cfg.ssl_context()) as r:
         raw = json.loads(r.read(20_000_000))
     keep = {}
     for k, v in raw.items():

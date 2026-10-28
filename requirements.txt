@@ -8,3 +8,5 @@ openai>=3.0,<4
 paramiko>=3.4,<4
 # Encrypts the passwords kept in factory-reset kit snapshots (also needed by paramiko) - tested with 50.0.2.
 cryptography>=42
+# Root certificates for downloads (price list, updates): python.org Python on a Mac has none of its own.
+certifi>=2024.2

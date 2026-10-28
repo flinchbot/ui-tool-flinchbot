@@ -498,6 +498,48 @@ class AgentTests(unittest.TestCase):
             self.assertIn(msg, str(e.exception))
         self.assertEqual(len(FakeAnthropic.received), 1)      # rejected attachments never reach the AI
 
+    def test_image_attachments_go_to_both_providers_as_pictures(self):
+        import base64
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+        jpg = base64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 64).decode()
+        FakeAnthropic.script = [[text("That's the Devices page.")]]
+        r = self.agent.chat("", [{"name": "shot.png", "image": png, "media_type": "image/png"},
+                                 {"name": "gw.log", "text": "10:00 WAN down"}])
+        self.assertEqual(r["reply"], "That's the Devices page.")
+        content = FakeAnthropic.received[0]["messages"][0]["content"]
+        self.assertEqual([b["type"] for b in content], ["image", "text"])     # image first, then the text
+        self.assertEqual(content[0]["source"], {"type": "base64", "media_type": "image/png", "data": png})
+        self.assertIn("[Attached image: shot.png]", content[1]["text"])
+        self.assertIn("Please review the attached attachments.", content[1]["text"])
+        self.assertIn('<attached_file name="gw.log">', content[1]["text"])
+        self.assertIn("images", FakeAnthropic.received[0]["system"])
+        # OpenAI's Responses API takes the same picture as a data URL
+        self.use_openai()
+        FakeOpenAI.script = [[o_text("A JPEG.")]]
+        self.agent.chat("what is this", [{"name": "cam.jpg", "image": jpg, "media_type": "image/jpeg"}])
+        parts = FakeOpenAI.received[0]["input"][0]["content"]
+        self.assertEqual(parts[0]["type"], "input_image")
+        self.assertTrue(parts[0]["image_url"].startswith("data:image/jpeg;base64,/9j/"))
+        self.assertEqual(parts[1], {"type": "input_text", "text": "[Attached image: cam.jpg]\n\nwhat is this"})
+        # Trimming counts an image as a fixed small size, not its bytes, so one screenshot
+        # doesn't evict the rest of the conversation.
+        self.assertLess(agent_mod.IMAGE_CHARS * 2, agent_mod.MAX_HISTORY_CHARS)
+        big = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 300_000).decode()
+        FakeOpenAI.script = [[o_text("ok")]]
+        self.agent.chat("and this", [{"name": "big.png", "image": big, "media_type": "image/png"}])
+        self.assertEqual(len(FakeOpenAI.received[1]["input"]), 3)             # nothing was trimmed away
+        n = len(FakeOpenAI.received)
+        for bad, msg in (([{"name": "x.bmp", "image": png, "media_type": "image/bmp"}], "only PNG, JPEG, GIF and WebP"),
+                         ([{"name": "x.png", "image": "not base64!!", "media_type": "image/png"}], "damaged"),
+                         ([{"name": "x.png", "image": jpg, "media_type": "image/png"}], "isn't a PNG"),
+                         ([{"name": "x.png", "image": "A" * (agent_mod.MAX_IMAGE_BYTES * 4 // 3 + 400),
+                            "media_type": "image/png"}], "too big"),
+                         ([{"name": "x.png", "image": png, "media_type": "image/png"}] * 6, "at most 5")):
+            with self.assertRaises(agent_mod.AgentError) as e:
+                self.agent.chat("hi", bad)
+            self.assertIn(msg, str(e.exception))
+        self.assertEqual(len(FakeOpenAI.received), n)         # rejected images never reach the AI
+
     def test_openai_report(self):
         self.use_openai()
         FakeOpenAI.script = [[o_call("r1", "get_health", {})],
@@ -1631,11 +1673,20 @@ class PricingTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *a): return False
             def read(self, n=None): return payload
-        ur.urlopen = lambda *a, **k: R()
+        seen = {}
+        def fake_urlopen(*a, **k):
+            seen.update(k)
+            return R()
+        ur.urlopen = fake_urlopen
         try:
             self.assertEqual(pricing.update_from_litellm(), 1)
         finally:
             ur.urlopen = orig
+        # Downloads carry their own root certificates (certifi), because python.org Python on
+        # a Mac has none and fails with CERTIFICATE_VERIFY_FAILED otherwise.
+        import ssl
+        self.assertIsInstance(seen.get("context"), ssl.SSLContext)
+        self.assertIsInstance(cfg.ssl_context(), ssl.SSLContext)
         p, src = pricing.price("gpt-6.1-sol")
         self.assertEqual((p["input"], p["output"], p["cache_read"]), (2.0, 10.0, 0.1))
         self.assertIn("LiteLLM", src)
