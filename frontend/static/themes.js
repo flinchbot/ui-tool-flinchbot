@@ -19,6 +19,14 @@
       fonts: 'Rajdhani:wght@400;500;600&family=Oxanium:wght@500;600&family=Share+Tech+Mono' },
     { id: 'candle',      name: 'Candle Maker',   desc: 'Warm wax, amber flame glow, cosy serif.',
       fonts: 'Lora:ital,wght@0,400;0,600;1,400&family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600&family=Courier+Prime' },
+    { id: 'notredame',   name: 'Notre Dame Football', desc: 'Navy and gold, yard lines, scoreboard stats. Fan-inspired.',
+      fonts: 'Oswald:wght@500;600;700&family=Source+Sans+3:wght@400;600&family=Roboto+Mono:wght@400;500' },
+    { id: 'bayern',      name: 'FC Bayern München', desc: 'Red and white stripes, the arena glowing at night. Fan-inspired.',
+      fonts: 'Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500' },
+    { id: 'arcade',      name: '80s Arcade',     desc: '8-bit pixel type, CRT scanlines, neon on black. Insert coin.',
+      fonts: 'Press+Start+2P&family=VT323' },
+    { id: 'oktoberfest', name: 'Oktoberfest',    desc: 'Blue-and-white diamonds, beer gold, pretzel brown. Prost!',
+      fonts: 'UnifrakturMaguntia&family=Alegreya+Sans:wght@400;500;700&family=Alegreya+Sans+SC:wght@500;700&family=Courier+Prime' },
   ];
   var KEY_T = 'flinchbot.theme', KEY_M = 'flinchbot.mode';
   var html = document.documentElement;
