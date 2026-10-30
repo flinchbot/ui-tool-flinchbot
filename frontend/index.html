@@ -189,6 +189,18 @@
   .send-btn:disabled { opacity:.4; cursor:not-allowed; }
   .send-btn.stop { background:var(--danger); color:#fff; font-size:0.9375rem; }
   .msg.user.stopped .msg-bubble { opacity:.5; text-decoration:line-through; text-decoration-color:color-mix(in srgb,var(--text) 35%,transparent); }
+  .fb-list { display:flex; flex-direction:column; gap:6px; }
+  .fb-row { display:flex; align-items:center; gap:10px; padding:6px 8px; border:1px solid var(--border); border-radius:8px; font-size:0.8125rem; }
+  .fb-row.off { opacity:.6; }
+  .fb-n { width:18px; text-align:center; font-weight:700; color:var(--accent); }
+  .fb-on { flex:1; display:flex; align-items:center; gap:6px; }
+  .fb-ask { display:flex; align-items:center; gap:4px; font-size:0.75rem; color:var(--muted); }
+  .fb-mv { padding:2px 8px; }
+  .field .fb-row label { display:flex; align-items:center; margin:0; font-size:0.8125rem; font-weight:400; text-transform:none; letter-spacing:normal; color:var(--text); }
+  .field .fb-row .fb-ask { font-size:0.75rem; color:var(--muted); }
+  .field .fb-row input[type=checkbox] { width:auto; padding:0; margin:0; }
+  .fb-n { font-family:var(--font-ui); }
+  .fb-note { color:var(--medium); }
   .so-row { position:relative; display:flex; align-items:center; gap:10px; margin-top:6px; font-size:0.6875rem; color:var(--muted); }
   .so-row .by { font-family:var(--font-mono); opacity:.8; }
   .so-btn { background:none; border:1px solid var(--border); border-radius:var(--pill); color:var(--muted); padding:2px 10px; font-size:0.6875rem; cursor:pointer; }
@@ -822,6 +834,33 @@ async function stopChat() {
   stopTimer = setTimeout(() => chatAbort?.abort(), 3000);
   try { await api('POST', '/api/chat/stop', {}); } catch {}
 }
+function addFellBack(fell, by) {
+  const text = fell.map(f => `${f.label} couldn’t answer: ${f.reason}`).join(' ') + (by ? ` ${by.label} answered instead.` : '');
+  transcript.push({ kind: 'note', text, at: new Date() });
+  $('messages').append(h('div', { class: 'msg-stopped fb-note' }, '↪ ', text)); scrollDown();
+}
+function addFallbackOffer(o) {
+  const off = isOffline() && isCloudAI(o.to);
+  const yes = h('button', { class: 'btn primary', disabled: off || null }, off ? `Ask ${o.label} (${OFFLINE_NOTE})` : `Ask ${o.label}`);
+  const no = h('button', { class: 'btn' }, 'No');
+  const row = h('div', { class: 'row' }, yes, no);
+  const card = h('div', { class: 'msg-bubble approval fb-offer' },
+    h('h4', {}, `Ask ${o.label} instead?`),
+    h('div', { class: 'muted', style: 'font-size:0.8125rem' }, `${o.label} (${o.model}) would get the whole conversation, including the network data gathered so far.`),
+    row);
+  const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, botAvatar()),
+    h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, `${BOT_NAME} · needs your OK`), card));
+  const decide = async ok => {
+    row.remove();
+    if (!ok) { card.append(h('div', { class: 'decided' }, 'Not sent.')); try { await api('POST', '/api/chat/fallback', { accept: false }); } catch {} return; }
+    card.append(h('div', { class: 'decided' }, `Asked ${o.label}.`));
+    await runChat('/api/chat/fallback', { accept: true });
+  };
+  yes.addEventListener('click', () => decide(true));
+  no.addEventListener('click', () => decide(false));
+  $('messages').append(wrap); scrollDown();
+}
+
 function addStopped(path, d) {
   const decide = path.endsWith('decide'), second = path.endsWith('second-opinion');
   const text = second ? 'Stopped. The second opinion was dropped.'
@@ -841,6 +880,8 @@ async function runChat(path, body) {
     const d = await api('POST', path, body, { signal: chatAbort.signal });
     $('typing')?.remove();
     if (d.stopped) addStopped(path, d);
+    if (d.fell_back && d.fell_back.length) addFellBack(d.fell_back, d.fallback_offer ? null : d.by);
+    if (d.fallback_offer) addFallbackOffer(d.fallback_offer);
     let el = null;
     if (d.reply && d.reply.trim()) el = addMessage('assistant', d.reply, { by: d.by, second: !!d.second_opinion });
     if (d.usage) renderUsageChip(d.usage);
@@ -876,7 +917,7 @@ async function sendMessage(override) {
     }
     input.value = ''; autoResize(input);
   }
-  document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
+  document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions (and a waiting "Ask … instead?")
   clearSecondOpinionButtons();
   transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
   addMessage('user', override ? override.display : text, { files });
@@ -1173,10 +1214,35 @@ async function openSettings(wizard) {
 
   const holder = h('div');
   const segBtns = {};
+  // If it can't answer: other AIs that take over, in order ("ask me first" waits for an OK)
+  const fb = [...(s.fallback || []).filter(f => s.providers[f.provider]).map(f => ({ ...f, on: true }))];
+  for (const name of Object.keys(s.providers)) if (!fb.some(f => f.provider === name)) fb.push({ provider: name, ask: isCloudAI(name), on: false });
+  const fbBox = h('div', { class: 'fb-list' });
+  const drawFb = () => {
+    const rows = fb.filter(f => f.provider !== provider), active = rows.filter(f => f.on);
+    fbBox.replaceChildren(...rows.map(f => {
+      const info = s.providers[f.provider], label = (PROVIDER_INFO[f.provider] || {}).short || info.label;
+      const move = d => {
+        const j = rows.indexOf(f) + d;
+        if (j < 0 || j >= rows.length) return;
+        const a = fb.indexOf(f), b = fb.indexOf(rows[j]); [fb[a], fb[b]] = [fb[b], fb[a]]; drawFb();
+      };
+      return h('div', { class: 'fb-row' + (f.on ? '' : ' off') },
+        h('span', { class: 'fb-n' }, f.on ? String(active.indexOf(f) + 1) : '–'),
+        h('label', { class: 'fb-on' }, h('input', { type: 'checkbox', checked: f.on || null, onchange: e => { f.on = e.target.checked; drawFb(); } }),
+          ` ${label}`, info.model ? h('small', { class: 'muted mono' }, ` ${info.model}`) : null,
+          info.ready ? null : h('small', { style: 'color:var(--danger)' }, ' (not set up)')),
+        h('label', { class: 'fb-ask', title: 'Wait for your OK before the conversation goes to this AI' },
+          h('input', { type: 'checkbox', checked: f.ask || null, disabled: !f.on || null, onchange: e => { f.ask = e.target.checked; } }), ' ask me first'),
+        h('button', { type: 'button', class: 'btn fb-mv', title: 'Try earlier', onclick: () => move(-1) }, '↑'),
+        h('button', { type: 'button', class: 'btn fb-mv', title: 'Try later', onclick: () => move(1) }, '↓'));
+    }));
+  };
   const choose = name => {
     provider = name;
     Object.entries(segBtns).forEach(([n, b]) => b.className = n === name ? 'on' : '');
     holder.replaceChildren(sections[name].el);
+    drawFb();
     const i = sections[name].info;
     if ((i.key_set || i.url) && !sections[name].loaded && !(isOffline() && isCloudAI(name))) sections[name].load();   // live list without an extra click
   };
@@ -1201,7 +1267,8 @@ async function openSettings(wizard) {
         if ((x.loaded || name === provider) && x.model.value) models[name] = x.model.value;
       }
       const local = sections.local && sections.local.payload ? sections.local.payload() : undefined;
-      const r = await api('POST', '/api/settings', { provider, keys, models, local,
+      const fallback = wizard ? undefined : fb.filter(f => f.on && f.provider !== provider).map(f => ({ provider: f.provider, ask: !!f.ask }));
+      const r = await api('POST', '/api/settings', { provider, keys, models, local, fallback,
         port: (wizard || Number(port.value) === s.port) ? undefined : port.value });
       const short = PROVIDER_INFO[provider] ? PROVIDER_INFO[provider].short : provider;
       if (r.restart_needed) toast(`Saved. The new port (${r.port}) takes effect after you restart the app.`);
@@ -1220,6 +1287,11 @@ async function openSettings(wizard) {
       'Pick whose AI answers. You can set up all three and switch any time; the conversation carries on. ' +
       'Under each answer, Second opinion asks one of the others to check it.'),
     holder,
+    wizard ? null : field('If it can’t answer', fbBox, h('span', {},
+      'When the AI above fails (its server is off or unreachable, an error, an empty answer, or tool calls the app can’t run), ',
+      'the next one here gets the question, in this order. With “ask me first”, flinchbot asks before sending the conversation to it: ',
+      'leave that on for Claude and ChatGPT if you use Local AI to keep your network data in the office. ',
+      'A wrong but confident answer isn’t detected: use Second opinion for that.')),
     wizard ? null : field('App port', port, `This app's web address is http://127.0.0.1:${s.running_port}/. Change only if another program uses this port.`),
   ];
   if (wizard) {

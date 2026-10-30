@@ -542,6 +542,10 @@ class _Stopped(Exception):
     """The user pressed Stop while an answer was being worked on."""
 
 
+class _CantAnswer(Exception):
+    """The AI worked but produced nothing usable (empty answer, only broken tool calls)."""
+
+
 class AgentError(Exception):
     pass
 
@@ -569,6 +573,7 @@ class Agent:
         self._executed = False               # did the current turn run any tool?
         self._stop   = threading.Event()     # set by stop(); checked between rounds of the tool loop
         self._live   = None                  # provider of the answer being worked on (for stop())
+        self.fallback_offer = None           # {"to", "chain", "fell"}: the next AI waits for the user's OK
         self.lock    = threading.RLock()
 
     # public -------------------------------------------------------------------
@@ -577,6 +582,7 @@ class Agent:
             self.chat_id = uuid.uuid4().hex[:12]
             self.history = []
             self.pending = None
+            self.fallback_offer = None
             self._names = {}
             self._notes = []
 
@@ -677,6 +683,7 @@ class Agent:
         with self.lock:
             settings, provider = self._provider()
             snapshot = (list(self.history), self.pending, list(self._notes))
+            self.fallback_offer = None        # a new message replaces the question that was waiting
             if self._notes:
                 text = "\n".join(f"[App note: {n}]" for n in self._notes) + "\n\n" + text
                 self._notes = []
@@ -690,7 +697,7 @@ class Agent:
             self._append_user(results, text, images)
             self._begin(provider)
             try:
-                return self._run(settings, provider)
+                return self._run_chain(settings, provider)
             except _Stopped:
                 # Nothing was changed (changes wait for Approve), so forget the question entirely.
                 self.history, self.pending, self._notes = snapshot
@@ -730,7 +737,7 @@ class Agent:
             mark = len(self.history)
             self._begin(provider)
             try:
-                out = self._run(settings, provider)
+                out = self._run_chain(settings, provider)
             except _Stopped:
                 # The approved changes did run: keep them and their results, drop what came after.
                 self.history = self.history[:mark]
@@ -786,6 +793,71 @@ class Agent:
             out["second_opinion"] = True
             out["checked"] = dict(first, label=PROVIDERS[first["provider"]].label) if first.get("provider") in PROVIDERS else None
             return out
+
+    def continue_fallback(self, accept):
+        """The user answered "Ask <next AI> instead?" for a question the chosen AI couldn't answer."""
+        with self.lock:
+            offer, self.fallback_offer = self.fallback_offer, None
+            if not offer:
+                raise AgentError("There's no question waiting for another AI.")
+            if not accept:
+                self._notes.append("The user chose not to send the previous question to another AI, so it went "
+                                   "unanswered.")
+                return {"reply": "", "pending": None, "declined": True}
+            settings, provider = self._provider(offer["to"])
+            mark = len(self.history)
+            self._begin(provider)
+            try:
+                return self._run_chain(settings, provider, chain=offer["chain"], fell=offer["fell"])
+            except _Stopped:
+                self.history = self.history[:mark]
+                return {"reply": "", "pending": None, "stopped": True}
+            finally:
+                self._live = None
+
+    def _run_chain(self, settings, provider, chain=None, fell=None):
+        """Run with the chosen AI. If it can't answer (its server fails or can't be reached, an empty
+        answer, only broken tool calls) and fallbacks are set in Settings, the next AI tries the same
+        question afresh. One marked "ask first" waits for the user's OK (it may be a cloud AI and the
+        user may want their data to stay local). -> result; "fell_back" says who couldn't, and why."""
+        chain = list(settings.get("fallback") or []) if chain is None else list(chain)
+        fell, mark = list(fell or []), len(self.history)
+        while True:
+            try:
+                out = self._run(settings, provider, strict=bool(chain))
+                if fell:
+                    out["fell_back"] = fell
+                return out
+            except (_Stopped, AgentError):
+                raise
+            except Exception as e:
+                reason = str(e) if isinstance(e, _CantAnswer) else \
+                    (provider_error_message(e, settings["provider"], settings["model"]) or f"{type(e).__name__}: {e}")
+                fell.append({"provider": settings["provider"], "label": settings["provider_label"],
+                             "model": settings["model"], "reason": reason})
+                if not chain:
+                    if len(fell) > 1 or isinstance(e, _CantAnswer):
+                        raise AgentError(" ".join(f"{f['label']} couldn't answer: {f['reason']}" for f in fell))
+                    raise
+                self.history = self.history[:mark]       # the next AI starts from the question, not the failed attempt
+                self.pending = None
+                while chain:
+                    nxt = chain.pop(0)
+                    try:
+                        nsettings, nprovider = self._provider(nxt["provider"])
+                        break
+                    except AgentError as e2:
+                        fell.append({"provider": nxt["provider"], "label": PROVIDERS[nxt["provider"]].label,
+                                     "model": None, "reason": str(e2)})
+                else:
+                    raise AgentError(" ".join(f"{f['label']} couldn't answer: {f['reason']}" for f in fell))
+                if nxt.get("ask"):
+                    self.fallback_offer = {"to": nxt["provider"], "chain": chain, "fell": fell}
+                    return {"reply": "", "pending": None, "fell_back": fell,
+                            "fallback_offer": {"to": nxt["provider"], "label": nsettings["provider_label"],
+                                               "model": nsettings["model"]}}
+                settings, provider = nsettings, nprovider
+                self._live = provider                    # Stop now cuts off this one
 
     PROBE_WORDS = ("time year people way day man thing woman life child world school state family student group "
                    "country problem hand part place case week company system program question work number night "
@@ -1046,8 +1118,11 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
                 break
             self.history = self.history[cut:]
 
-    def _run(self, settings, provider, kind="chat"):
+    def _run(self, settings, provider, kind="chat", strict=False):
+        """strict: another AI is ready to take over, so an empty answer or a run of tool calls the
+        app can't run raises _CantAnswer instead of being shown."""
         self._executed = False
+        broken = 0
         max_rounds = settings.get("max_rounds", 15)
         max_tokens = settings.get("max_tokens", 16000)
         by = self._by(settings)
@@ -1082,7 +1157,13 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             entry["calls"] = [dict(c) for c in turn.calls]
             self.history.append(entry)
             if not turn.calls:
+                if strict and not "".join(texts).strip():
+                    raise _CantAnswer("it gave an empty answer.")
                 return {"reply": "\n\n".join(texts) or "(No response)", "pending": None, "by": by}
+            bad = sum(1 for c in turn.calls if c["input"] is None or c["name"] not in EXECUTORS_ALL)
+            broken = broken + 1 if bad == len(turn.calls) else 0
+            if strict and broken >= 2:
+                raise _CantAnswer("it kept making tool calls the app can't run (unknown tools or garbled arguments).")
 
             results, writes = [], []
             for c in turn.calls:

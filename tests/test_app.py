@@ -1181,6 +1181,80 @@ class AgentTests(unittest.TestCase):
         with RealOpenAI():
             self.assertEqual([m["id"] for m in self.agent.list_models("local", None, fake.url)], ["llama3.1:8b", "qwen3:30b"])
 
+    def _claude(self):
+        return {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test", "model": "m",
+                "max_rounds": 5, "max_tokens": 16000}
+
+    def test_fallback_when_the_local_ai_is_down(self):
+        fake = FakeLocalAI()
+        fake.stop()                                                        # the office PC is off
+        self.use_local(fake, fallback=[{"provider": "anthropic", "ask": False}])
+        self.alt["anthropic"] = self._claude()
+        FakeAnthropic.script = [[text("The WAN is up.")]]
+        with RealOpenAI():
+            r = self.agent.chat("how is the wan?")
+        self.assertEqual((r["reply"], r["by"]["provider"]), ("The WAN is up.", "anthropic"))
+        self.assertEqual(r["fell_back"][0]["label"], "Local AI")
+        self.assertIn("Can't reach the local AI", r["fell_back"][0]["reason"])
+        self.assertEqual([e["role"] for e in self.agent.history], ["user", "assistant"])   # no trace of the failure
+        self.assertEqual(FakeAnthropic.received[0]["messages"], [{"role": "user", "content": [{"type": "text", "text": "how is the wan?"}]}])
+
+    def test_fallback_asks_first_when_told_to(self):
+        fake = FakeLocalAI()
+        fake.stop()
+        self.use_local(fake, fallback=[{"provider": "anthropic", "ask": True}])
+        self.alt["anthropic"] = self._claude()
+        with RealOpenAI():
+            r = self.agent.chat("how is the wan?")
+        self.assertEqual(r["fallback_offer"], {"to": "anthropic", "label": "Claude", "model": "m"})
+        self.assertEqual(FakeAnthropic.received, [])                      # nothing sent to the cloud yet
+        FakeAnthropic.script = [[text("The WAN is up.")]]
+        r = self.agent.continue_fallback(True)
+        self.assertEqual((r["reply"], r["by"]["provider"], r["fell_back"][0]["label"]), ("The WAN is up.", "anthropic", "Local AI"))
+        with self.assertRaises(agent_mod.AgentError):
+            self.agent.continue_fallback(True)                               # nothing waiting any more
+        with RealOpenAI():                                                   # declining leaves a note for later
+            self.agent.chat("and the clients?")
+            self.assertEqual(self.agent.continue_fallback(False), {"reply": "", "pending": None, "declined": True})
+        self.assertIn("went unanswered", self.agent._notes[0])
+
+    def test_fallback_on_broken_tool_calls_and_empty_answers(self):
+        fake = FakeLocalAI()
+        self.addCleanup(fake.stop)
+        self.use_local(fake, fallback=[{"provider": "anthropic", "ask": False}])
+        self.alt["anthropic"] = self._claude()
+        fake.script = [l_call("x1", "get_everything", {}), l_call("x2", "get_everything", {})]   # a tool that doesn't exist, twice
+        FakeAnthropic.script = [[text("Here's the list.")]]
+        with RealOpenAI():
+            r = self.agent.chat("list devices")
+        self.assertEqual(r["by"]["provider"], "anthropic")
+        self.assertIn("tool calls the app can't run", r["fell_back"][0]["reason"])
+        fake.script = [{"role": "assistant", "content": ""}]                # an empty answer
+        FakeAnthropic.script = [[text("Second try.")]]
+        with RealOpenAI():
+            r = self.agent.chat("anything?")
+        self.assertIn("empty answer", r["fell_back"][0]["reason"])
+        # with no fallback set up, nothing changes: the local AI's own answer is shown as before
+        self.use_local(fake)
+        fake.script = [{"role": "assistant", "content": ""}]
+        with RealOpenAI():
+            self.assertEqual(self.agent.chat("again?")["reply"], "(No response)")
+
+    def test_every_ai_failing_says_who_and_why(self):
+        fake = FakeLocalAI()
+        fake.stop()
+        self.use_local(fake, fallback=[{"provider": "anthropic", "ask": False}])
+        self.alt["anthropic"] = self._claude()
+        orig = FakeAnthropic.create
+        FakeAnthropic.create = lambda self_, **kw: (_ for _ in ()).throw(RuntimeError("cloud down"))
+        try:
+            with RealOpenAI(), self.assertRaises(agent_mod.AgentError) as e:
+                self.agent.chat("hello")
+        finally:
+            FakeAnthropic.create = orig
+        self.assertIn("Local AI couldn't answer: Can't reach the local AI", str(e.exception))
+        self.assertIn("Claude couldn't answer: RuntimeError: cloud down", str(e.exception))
+
     def test_second_opinion_from_another_ai(self):
         FakeAnthropic.script = [[tool("t1", "get_clients", {})], [text("All 3 clients are fine.")]]
         r = self.agent.chat("any bad clients?")
@@ -2126,6 +2200,12 @@ class ServerTests(unittest.TestCase):
                                                      "models": {"openai": "gpt-6.1-sol"}})
         self.assertTrue(d["switched"])
         self.assertFalse(d["chat_reset"])                                        # the conversation carries over
+        self.req("POST", "/api/settings", {"fallback": [{"provider": "anthropic", "ask": True}, {"provider": "local"}]})
+        self.assertEqual(cfg.get_setting("AI_FALLBACK"), "anthropic:ask,local")
+        self.assertEqual(self.req("GET", "/api/settings")[1]["fallback"],
+                         [{"provider": "anthropic", "ask": True}, {"provider": "local", "ask": False}])
+        self.assertEqual(srv.agent_settings()["fallback"], [{"provider": "anthropic", "ask": True}])   # local isn't set up
+        self.req("POST", "/api/settings", {"fallback": []})
         st = self.req("GET", "/api/status")[1]
         self.assertEqual([a["id"] for a in st["ai_ready"]], ["anthropic", "openai"])
         self.assertIn("online", st)                       # None until the background check runs

@@ -96,6 +96,7 @@ DEFAULTS = {
     "LOCAL_AI_MODEL":    "",
     "LOCAL_AI_CONTEXT":  "32768",              # tokens the server reads per request; must match the server's own setting
     "KNOWLEDGE_EMBED_MODEL": "",               # embedding model on the Local AI server for meaning search (optional)
+    "AI_FALLBACK":       "",                   # AIs that take over when the chosen one can't answer, in order: "local,anthropic:ask"
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
@@ -104,7 +105,7 @@ DEFAULTS = {
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.
 EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT",
-                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT", "KNOWLEDGE_EMBED_MODEL"}
+                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT", "KNOWLEDGE_EMBED_MODEL", "AI_FALLBACK"}
 
 # Per-provider .env keys
 PROVIDER_KEYS = {
@@ -132,6 +133,16 @@ def local_context():
         return max(2048, min(int(get_setting("LOCAL_AI_CONTEXT") or 32768), 2_000_000))
     except ValueError:
         return 32768
+
+
+def fallback_list():
+    """AI_FALLBACK -> [{"provider", "ask"}] in order ("ask": wait for the user's OK first)."""
+    out = []
+    for part in (get_setting("AI_FALLBACK") or "").split(","):
+        name, _, flag = part.strip().partition(":")
+        if name in PROVIDER_KEYS and name not in [f["provider"] for f in out]:
+            out.append({"provider": name, "ask": flag.strip() == "ask"})
+    return out
 
 
 def provider_ready(provider):

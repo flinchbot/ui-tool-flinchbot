@@ -59,7 +59,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.14.0"
+APP_VERSION = "2.15.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -152,6 +152,8 @@ def agent_settings(provider=None):
          "max_rounds": max(1, min(rounds, 50)),
          # 21,000 is the SDK's ceiling for a non-streaming request
          "max_tokens": max(2000, min(out_tokens, 21000))}
+    # Who takes over when this AI can't answer (never itself, only AIs that are set up).
+    s["fallback"] = [f for f in cfg.fallback_list() if f["provider"] != prov and cfg.provider_ready(f["provider"])]
     if prov == "local":
         # A local model reads at most `context` tokens per request: about 6,000 go to the
         # instructions and tool list, the rest is shared by the answer and the conversation.
@@ -524,7 +526,7 @@ def r_settings_get(_):
                            "key_hint": mask_key(key), "model": cfg.provider_model(name),
                            "ready": cfg.provider_ready(name)}
     providers["local"].update(url=cfg.get_setting("LOCAL_AI_URL"), context=cfg.local_context())
-    return {"provider": cfg.active_provider(), "providers": providers,
+    return {"provider": cfg.active_provider(), "providers": providers, "fallback": cfg.fallback_list(),
             "port": int(cfg.get_setting("SERVER_PORT")),
             "running_port": HTTP_PORT,
             "env_overrides": cfg.env_overrides(),
@@ -554,6 +556,14 @@ def r_settings_save(b):
     for name, m in (b.get("models") or {}).items():
         if name in PROVIDERS and m:
             updates[cfg.PROVIDER_KEYS[name]["model"]] = str(m).strip()
+    if isinstance(b.get("fallback"), list):
+        parts = []
+        for f in b["fallback"]:
+            name = str((f or {}).get("provider") or "")
+            if name not in PROVIDERS:
+                raise ValueError("Unknown AI in the fallback list.")
+            parts.append(name + (":ask" if f.get("ask") else ""))
+        updates["AI_FALLBACK"] = ",".join(parts)
     local = b.get("local") or {}
     if "url" in local:
         updates["LOCAL_AI_URL"] = normalize_base_url(local["url"])     # raises ValueError for a non-address
@@ -1014,6 +1024,10 @@ def r_knowledge_open(_):
     return {"ok": True}
 
 
+def r_fallback(b):
+    return _with_usage(agent.continue_fallback(bool(b.get("accept"))))
+
+
 def r_second_opinion(b):
     return _with_usage(agent.second_opinion(str(b.get("provider") or "")))
 
@@ -1416,6 +1430,7 @@ ROUTES = {
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/chat/stop"):               r_stop,
     ("POST", "/api/chat/second-opinion"):     r_second_opinion,
+    ("POST", "/api/chat/fallback"):           r_fallback,
     ("GET",  "/api/knowledge"):               r_knowledge,
     ("POST", "/api/knowledge/upload"):        r_knowledge_upload,
     ("POST", "/api/knowledge/fetch"):         r_knowledge_fetch,
