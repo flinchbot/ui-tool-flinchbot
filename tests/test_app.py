@@ -108,8 +108,20 @@ class FakeAnthropic:
         self.messages = self
         self.models = types.SimpleNamespace(list=lambda limit=100: iter(FakeAnthropic.catalogue))
 
+    gate = None          # threading.Event: when set, create() waits on it, like a slow AI
+    closed = False
+
+    def close(self):     # the Stop button closes the client to cut off a waiting request
+        FakeAnthropic.closed = True
+        if FakeAnthropic.gate is not None:
+            FakeAnthropic.gate.set()
+
     def create(self, **kw):
         FakeAnthropic.received.append(kw)
+        if FakeAnthropic.gate is not None:
+            FakeAnthropic.gate.wait(10)
+            if FakeAnthropic.closed:
+                raise RuntimeError("Cannot send a request, as the client has been closed.")
         blocks = FakeAnthropic.script.pop(0)
         stop = "tool_use" if any(b.type == "tool_use" for b in blocks) else "end_turn"
         return types.SimpleNamespace(content=blocks, stop_reason=stop, usage=getattr(FakeAnthropic, "usage", None))
@@ -410,6 +422,7 @@ class AgentTests(unittest.TestCase):
         self.settings = {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test",
                          "model": "m", "max_rounds": 5, "max_tokens": 16000}
         FakeAnthropic.script, FakeAnthropic.received = [], []
+        FakeAnthropic.gate, FakeAnthropic.closed = None, False
         FakeOpenAI.script, FakeOpenAI.received = [], []
 
     def tearDown(self):
@@ -600,6 +613,97 @@ class AgentTests(unittest.TestCase):
                if b.get("type") == "tool_result"}
         self.assertTrue(res["t1"]["is_error"] and "not a valid UniFi object id" in res["t1"]["content"])
         self.assertTrue(res["t2"]["is_error"] and "not a MAC address" in res["t2"]["content"])
+
+    def _stop_while_waiting(self, call, calls_before):
+        """Run call() in a thread, wait until it is waiting on the AI, press Stop. -> its result."""
+        out = {}
+        th = threading.Thread(target=lambda: out.update(call()))
+        th.start()
+        for _ in range(250):
+            if len(FakeAnthropic.received) > calls_before:
+                break
+            time.sleep(0.02)
+        t = time.time()
+        self.assertTrue(self.agent.stop())
+        th.join(5)
+        self.assertFalse(th.is_alive())
+        self.assertLess(time.time() - t, 2)
+        FakeAnthropic.gate, FakeAnthropic.closed = None, False
+        return out
+
+    def test_abort_cuts_off_a_real_sdk_request(self):
+        """The real Anthropic and OpenAI clients give up on a request when closed from another thread."""
+        import anthropic
+        import openai
+        from http.server import BaseHTTPRequestHandler
+
+        class Silent(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                time.sleep(15)                   # an AI that is still thinking
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Silent)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_port}"
+        try:
+            a = providers.AnthropicProvider.__new__(providers.AnthropicProvider)
+            a.client = anthropic.Anthropic(api_key="x", base_url=base)
+            o = providers.OpenAIProvider.__new__(providers.OpenAIProvider)
+            o.client = openai.OpenAI(api_key="x", base_url=base + "/v1")
+            for p in (a, o):
+                err = {}
+
+                def run():
+                    try:
+                        p.complete([{"role": "user", "content": "hi"}], "sys", [], "m", 100)
+                    except Exception as e:
+                        err["e"] = e
+                th = threading.Thread(target=run)
+                th.start()
+                time.sleep(0.5)
+                t = time.time()
+                p.abort()
+                th.join(10)
+                self.assertFalse(th.is_alive(), p)
+                self.assertLess(time.time() - t, 4, p)
+                self.assertIn("e", err)
+        finally:
+            srv.shutdown()
+
+    def test_stop_drops_the_question(self):
+        FakeAnthropic.script = [[text("First answer.")]]
+        self.agent.chat("hello")
+        before = json.dumps(self.agent.history, default=str)
+        self.assertFalse(self.agent.stop())                    # nothing running: nothing to stop
+        FakeAnthropic.gate = threading.Event()
+        FakeAnthropic.script = [[text("never shown")]]
+        out = self._stop_while_waiting(lambda: self.agent.chat("a long question"), 1)
+        self.assertEqual(out, {"reply": "", "pending": None, "stopped": True})
+        self.assertEqual(json.dumps(self.agent.history, default=str), before)   # as if never asked
+        self.assertIsNone(self.agent._live)
+        FakeAnthropic.script = [[text("Next answer.")]]
+        self.assertEqual(self.agent.chat("next")["reply"], "Next answer.")
+        self.assertNotIn("a long question", json.dumps(FakeAnthropic.received[-1]["messages"]))
+
+    def test_stop_after_an_approved_change_keeps_the_change(self):
+        self.ctx["ssh_enabled"] = True
+        FakeAnthropic.script = [[text("Rebooting."), tool("s1", "ssh_command", {"command": "reboot"})]]
+        self.assertTrue(self.agent.chat("reboot it")["pending"])
+        FakeAnthropic.gate = threading.Event()
+        FakeAnthropic.script = [[text("never shown")]]
+        out = self._stop_while_waiting(lambda: self.agent.decide(True), 1)
+        self.assertEqual((out["stopped"], out["reply"]), (True, ""))
+        self.assertEqual(out["changes"][0]["label"], agent_mod._LABELS["ssh_command"])
+        self.assertEqual(self.ssh.calls[-1], "reboot")         # the approved change did run
+        last = self.agent.history[-1]["content"]                # ...and its result stays in the conversation
+        self.assertEqual([b["type"] for b in last], ["tool_result"])
+        FakeAnthropic.script = [[text("Done.")]]
+        self.assertEqual(self.agent.chat("ok?")["reply"], "Done.")
+        sent = FakeAnthropic.received[-1]["messages"][-1]["content"]
+        self.assertEqual(sent[0]["type"], "tool_result")
+        self.assertIn("pressed Stop", sent[-1]["text"])
 
     def test_ssh_read_runs_now_and_write_needs_approval(self):
         self.ctx["ssh_enabled"] = True

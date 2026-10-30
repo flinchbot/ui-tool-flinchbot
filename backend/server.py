@@ -57,7 +57,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.10.2"
+APP_VERSION = "2.11.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -862,6 +862,10 @@ def r_decide(b):
     return _with_usage(agent.decide(bool(b.get("approve"))))
 
 
+def r_stop(b):
+    return {"stopped": agent.stop()}
+
+
 def r_reset(_):
     agent.reset()
 
@@ -1221,6 +1225,7 @@ ROUTES = {
     ("POST", "/api/backup"):                  r_backup,
     ("POST", "/api/chat"):                    r_chat,
     ("POST", "/api/chat/decide"):             r_decide,
+    ("POST", "/api/chat/stop"):               r_stop,
     ("POST", "/api/reset"):                   r_reset,
     ("GET",  "/api/report"):                  r_report_get,
     ("POST", "/api/report"):                  r_report,

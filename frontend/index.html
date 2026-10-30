@@ -187,6 +187,10 @@
   .send-btn { width:44px; height:44px; border-radius:var(--radius); border:none; background:var(--grad);
               color:var(--on-accent); cursor:pointer; font-size:1.125rem; align-self:flex-end; }
   .send-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .send-btn.stop { background:var(--danger); color:#fff; font-size:0.9375rem; }
+  .msg.user.stopped .msg-bubble { opacity:.5; text-decoration:line-through; text-decoration-color:color-mix(in srgb,var(--text) 35%,transparent); }
+  .msg-stopped { align-self:center; margin:2px auto 10px; font-size:0.75rem; color:var(--muted); text-align:center; }
+  .typing .stopping, .msg-bubble .stopping { font-size:0.75rem; color:var(--muted); }
   .empty-state { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--muted); gap:12px; padding:40px; text-align:center; }
   .empty-state .icon { font-size:2.875rem; opacity:.4; }
   .empty-state p { font-size:0.875rem; max-width:360px; line-height:1.6; }
@@ -443,12 +447,13 @@ const fileStoreWarning = () => `Passwords are being saved in data/secrets.json b
 } is not available. Keep that folder private.`;
 
 // ── API ───────────────────────────────────────────────────────────────────
-async function api(method, path, body) {
+async function api(method, path, body, opts = {}) {
   let r;
   try {
     r = await fetch(path, { method, headers: { 'X-App-Token': TOKEN, 'Content-Type': 'application/json' },
-                            body: body === undefined ? undefined : JSON.stringify(body) });
+                            body: body === undefined ? undefined : JSON.stringify(body), signal: opts.signal });
   } catch (e) {
+    if (e.name === 'AbortError') throw Object.assign(new Error('Stopped.'), { kind: 'stopped' });
     throw Object.assign(new Error(`The app is not running. Start it again with ${launcherName()}.`), { kind: 'down' });
   }
   let data = {};
@@ -680,12 +685,45 @@ function showTyping() {
   scrollDown();
 }
 
+// While the AI works, Send turns into Stop (■, or Esc). Stop asks the app to drop the answer:
+// it cuts off the request to the AI and the reply comes back within a second or two. If a tool
+// is still running (an Nmap scan, an SSH command), the page stops waiting after 3 s anyway.
+let chatAbort = null, stopTimer = null;
+function setBusy(on) {
+  busy = on;
+  const b = $('sendBtn');
+  b.disabled = false; b.classList.toggle('stop', on);
+  b.textContent = on ? '■' : '➤';
+  b.title = on ? 'Stop this answer (Esc)' : 'Send';
+  b.setAttribute('aria-label', on ? 'Stop this answer' : 'Send');
+  $('attachBtn').disabled = on;
+}
+async function stopChat() {
+  if (!chatAbort || stopTimer) return;
+  $('sendBtn').disabled = true;
+  const t = $('typing')?.querySelector('.msg-bubble');
+  if (t) t.replaceChildren(h('span', { class: 'stopping' }, 'Stopping…'));
+  stopTimer = setTimeout(() => chatAbort?.abort(), 3000);
+  try { await api('POST', '/api/chat/stop', {}); } catch {}
+}
+function addStopped(path, d) {
+  const decide = path.endsWith('decide');
+  const text = !decide ? 'Stopped. This question was dropped, so it isn\'t part of the conversation.'
+    : d ? 'Stopped. The approved change ran; only the answer after it was dropped.'
+        : 'Stopped. The approved change ran; only the answer after it was dropped. Undo is in 🧾 Changes.';
+  if (!decide) [...document.querySelectorAll('.msg.user')].pop()?.classList.add('stopped');
+  transcript.push({ kind: 'note', text, at: new Date() });
+  $('messages').append(h('div', { class: 'msg-stopped' }, '■ ', text)); scrollDown();
+}
+
 async function runChat(path, body) {
-  busy = true; $('sendBtn').disabled = $('attachBtn').disabled = true; showTyping();
+  setBusy(true); showTyping();
+  chatAbort = new AbortController();
   let ok = false;
   try {
-    const d = await api('POST', path, body);
+    const d = await api('POST', path, body, { signal: chatAbort.signal });
     $('typing')?.remove();
+    if (d.stopped) addStopped(path, d);
     if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
     if (d.usage) renderUsageChip(d.usage);
     if (d.pending && d.pending.length) addApproval(d.pending);
@@ -693,9 +731,11 @@ async function runChat(path, body) {
     ok = d;
   } catch (e) {
     $('typing')?.remove();
-    addMessage('assistant', e.message, { error: true, plain: true });
+    if (e.kind === 'stopped') { addStopped(path, null); ok = { stopped: true }; }
+    else addMessage('assistant', e.message, { error: true, plain: true });
   } finally {
-    busy = false; $('sendBtn').disabled = $('attachBtn').disabled = false; $('chatInput').focus();
+    clearTimeout(stopTimer); stopTimer = null; chatAbort = null;
+    setBusy(false); $('chatInput').focus();
   }
   return ok;     // the response data, or false if the request failed (the error is shown in the chat)
 }
@@ -1216,7 +1256,7 @@ function download(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
   toast(`Saved ${name} to your Downloads folder.`);
 }
-const LABEL = { user: '👤 You', assistant: '🤖 flinchbot', error: '⚠️ Error', approval: '🛡️ Change request' };
+const LABEL = { user: '👤 You', assistant: '🤖 flinchbot', error: '⚠️ Error', approval: '🛡️ Change request', note: '■ Stopped' };
 const labelFor = t => t.kind === 'assistant' ? `🤖 ${BOT_NAME}` : LABEL[t.kind];
 
 function toMarkdown() {
@@ -2214,7 +2254,7 @@ const QUICK = [
   ['🚨 Active alerts', 'Show me all active alerts and how to fix them'],
 ];
 $('quickPrompts').append(...QUICK.map(([l, m]) => h('button', { class: 'quick-btn', onclick: () => sendQuick(m) }, l)));
-$('sendBtn').addEventListener('click', () => sendMessage());
+$('sendBtn').addEventListener('click', () => (busy && chatAbort ? stopChat() : sendMessage()));
 $('attachBtn').addEventListener('click', () => { if (!busy) $('fileInput').click(); });
 $('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 (() => {
@@ -2236,7 +2276,11 @@ $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.sh
 $('chatInput').addEventListener('input', e => autoResize(e.target));
 $('connBtn').addEventListener('click', e => { e.stopPropagation(); toggleConnMenu(); });
 document.addEventListener('click', e => { if (!$('connMenu').hidden && !e.target.closest('.conn-switch')) toggleConnMenu(false); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { toggleConnMenu(false); if (!$('modal').querySelector('.steps')) closeModal(); } });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (busy && chatAbort && $('overlay').hidden && $('connMenu').hidden) { stopChat(); return; }   // Esc stops a running answer
+  toggleConnMenu(false); if (!$('modal').querySelector('.steps')) closeModal();
+});
 $('refreshBtn').addEventListener('click', async () => { await refreshStatus(); await refreshNetwork(); });
 $('clearBtn').addEventListener('click', resetChat);
 $('settingsBtn').addEventListener('click', () => openSettings());

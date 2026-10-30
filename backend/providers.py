@@ -61,6 +61,13 @@ class AnthropicProvider:
     def __init__(self, api_key):
         self.client = Anthropic(api_key=api_key)
 
+    def abort(self):
+        """Close the client, which makes a request waiting on another thread give up (Stop button)."""
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
     def complete(self, history, system, tools, model, max_tokens):
         # cache_control (top-level): the tool schemas, system prompt and earlier turns are
         # identical from one round of the tool loop to the next, so they are served from
@@ -179,6 +186,13 @@ class OpenAIProvider:
             raise RuntimeError("The 'openai' package isn't installed. Close the app and start it again "
                                "(start.bat on Windows, start.command on a Mac) to install it.")
         self.client = OpenAI(api_key=api_key)
+
+    def abort(self):
+        """Close the client, which makes a request waiting on another thread give up (Stop button)."""
+        try:
+            self.client.close()
+        except Exception:
+            pass
 
     def complete(self, history, system, tools, model, max_tokens):
         resp = self.client.responses.create(

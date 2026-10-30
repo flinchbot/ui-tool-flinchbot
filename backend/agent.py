@@ -517,6 +517,10 @@ def _mask_for_display(obj):
 
 
 # ── the agent ─────────────────────────────────────────────────────────────────
+class _Stopped(Exception):
+    """The user pressed Stop while an answer was being worked on."""
+
+
 class AgentError(Exception):
     pass
 
@@ -542,6 +546,8 @@ class Agent:
         self.pending = None                  # {"results": [...], "writes": [...]}
         self._names  = {}                    # mac -> friendly name, for approval cards
         self._executed = False               # did the current turn run any tool?
+        self._stop   = threading.Event()     # set by stop(); checked between rounds of the tool loop
+        self._live   = None                  # provider of the answer being worked on (for stop())
         self.lock    = threading.RLock()
 
     # public -------------------------------------------------------------------
@@ -553,6 +559,24 @@ class Agent:
             self.pending = None
             self._names = {}
             self._notes = []
+
+    def stop(self):
+        """Stop button: abandon the answer being worked on. Called from another request,
+        so it doesn't take self.lock (the running answer holds it). Closing the provider's
+        client cuts off a request that is still waiting for the AI; the tool loop sees the
+        flag and unwinds (chat() / decide() put the conversation back in order).
+        A tool that is already running (an Nmap scan, an SSH command) finishes first.
+        -> True if there was an answer to stop."""
+        live = self._live
+        if live is None:
+            return False
+        self._stop.set()
+        live.abort()
+        return True
+
+    def _begin(self, provider):
+        self._stop.clear()
+        self._live = provider
 
     def add_note(self, text):
         """Something the user did outside the chat (e.g. pressed Undo) that the model should know."""
@@ -644,12 +668,19 @@ class Agent:
                     for w in self.pending["writes"]]
                 self.pending = None
             provider.append_user(self.history, results, text, images)
+            self._begin(provider)
             try:
                 return self._run(settings, provider)
+            except _Stopped:
+                # Nothing was changed (changes wait for Approve), so forget the question entirely.
+                self.history, self.pending, self._notes = snapshot
+                return {"reply": "", "pending": None, "stopped": True}
             except Exception:
                 if not self._executed:
                     self.history, self.pending, self._notes = snapshot   # let the user simply resend
                 raise
+            finally:
+                self._live = None
 
     def decide(self, approve):
         with self.lock:
@@ -676,7 +707,18 @@ class Agent:
                     if self._changes:
                         self._changes.record(w["name"], w["input"], d["label"], "denied", target=d["target"])
             provider.append_user(self.history, results)
-            out = self._run(settings, provider)
+            mark = len(self.history)
+            self._begin(provider)
+            try:
+                out = self._run(settings, provider)
+            except _Stopped:
+                # The approved changes did run: keep them and their results, drop what came after.
+                self.history = self.history[:mark]
+                self.pending = None
+                self._notes.append("The user pressed Stop before you finished answering after the change above.")
+                out = {"reply": "", "pending": None, "stopped": True}
+            finally:
+                self._live = None
             out["changes"] = changes
             return out
 
@@ -858,9 +900,18 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
         max_tokens = settings.get("max_tokens", 16000)
         texts = []
         for _ in range(max_rounds):
+            if self._stop.is_set():
+                raise _Stopped()
             self._trim(provider)
-            turn = provider.complete(self.history, self._system_prompt(), self._tools(), settings["model"], max_tokens)
+            try:
+                turn = provider.complete(self.history, self._system_prompt(), self._tools(), settings["model"], max_tokens)
+            except Exception:
+                if self._stop.is_set():          # stop() closed the client under the request
+                    raise _Stopped()
+                raise
             self._usage(settings, turn, "chat")
+            if self._stop.is_set():              # the AI answered just as Stop was pressed: drop it
+                raise _Stopped()
             texts += turn.texts
 
             if turn.truncated:
