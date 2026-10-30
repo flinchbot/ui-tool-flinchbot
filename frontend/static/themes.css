@@ -610,6 +610,49 @@ html[data-theme="oktoberfest"][data-mode="dark"] #fx { background:
   html[data-theme] .chat-toolbar .muted { display:none; }
 }
 
+/* ======================================================================
+   12. JABRA — the official Jabra palette: Jabra Yellow (#FFD100) with
+   Slate, Beige, Champagne, Mint, Forest Green, Steel Blue, Navy and Lilac.
+   Jabra Yellow is too light to read as text on a light background, so in
+   light mode it is a fill (buttons, rules) with black on it; Navy carries
+   text accents. The palette has no red or orange, so error and warning
+   keep functional colours. No logo or wordmark is used.
+   ====================================================================== */
+[data-theme="jabra"] {
+  --font-ui:'Figtree',system-ui,sans-serif; --font-head:'Figtree',system-ui,sans-serif; --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  --radius:6px; --radius-lg:10px; --bubble-radius:12px; --pill:99px;
+}
+[data-theme="jabra"][data-mode="light"] {               /* Beige, White, Black; Navy accents */
+  --bg:#F3EFE9; --surface:#FFFFFF; --surface2:#FFFFFF; --border:#E0D9CE;
+  --accent:#2A3F59; --accent2:#6C859F; --warn:#9A5A12; --ok:#4E6463; --danger:#B3261E; --medium:#7A5F00;
+  --text:#000000; --muted:#4F5050; --bot:#2A3F59; --on-accent:#000000;
+  --grad:linear-gradient(135deg,#FFD100,#FFD100); --overlay:rgba(42,63,89,.42); --shadow:0 18px 50px rgba(42,63,89,.16);
+}
+[data-theme="jabra"][data-mode="dark"] {                /* Navy, with Jabra Yellow and Mint */
+  --bg:#1C2B3E; --surface:#2A3F59; --surface2:#314968; --border:#435C7C;
+  --accent:#FFD100; --accent2:#BFD1C9; --warn:#E3B98F; --ok:#BFD1C9; --danger:#FF8A80; --medium:#FFD100;
+  --text:#F3EFE9; --muted:#AEBCCB; --bot:#D2C1D8; --on-accent:#000000;
+  --grad:linear-gradient(135deg,#FFD100,#FFD100); --overlay:rgba(10,16,24,.72);
+}
+html[data-theme="jabra"] { --fs:15px; --chat-bg:transparent; }
+/* a Jabra Yellow rule under the header */
+html[data-theme="jabra"] .app > header { border-bottom:4px solid #FFD100; }
+/* headings set like the brand's colour labels: small, bold, widely tracked capitals */
+html[data-theme="jabra"] .sidebar-section h3 { font-family:var(--font-head); font-size:.72rem; font-weight:700;
+  text-transform:uppercase; letter-spacing:.16em; color:var(--text); }
+html[data-theme="jabra"] .logo h1 { font-weight:700; letter-spacing:-.01em; }
+html[data-theme="jabra"] .chat-toolbar h2, html[data-theme="jabra"] .modal h2 { font-weight:700; letter-spacing:-.01em; }
+html[data-theme="jabra"] .msg-name { font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.14em; }
+html[data-theme="jabra"] .stat-card { border-top:4px solid #FFD100; }
+html[data-theme="jabra"] .stat-val { font-family:var(--font-head); font-weight:700; }
+html[data-theme="jabra"] .btn.primary, html[data-theme="jabra"] .send-btn { font-weight:700; }
+html[data-theme="jabra"] .btn.primary:hover:not(:disabled) { opacity:1; filter:brightness(.94); }
+/* the palette's colour blocks, very faint, along the bottom edge */
+html[data-theme="jabra"] #fx { background:
+    linear-gradient(90deg,#FFD100 0 20%,#4F5050 20% 32%,#AF967C 32% 44%,#BFD1C9 44% 56%,#627776 56% 68%,#6C859F 68% 80%,#2A3F59 80% 90%,#D2C1D8 90% 100%)
+      bottom / 100% 5px no-repeat,
+    var(--bg); }
+
 /* Respect Windows' "show animations" / reduced-motion setting */
 @media (prefers-reduced-motion:reduce) {
   #fx, #fx::after, .logo-img, .logo h1::after, .empty-state p::after { animation:none !important; }

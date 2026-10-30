@@ -27,6 +27,8 @@
       fonts: 'Press+Start+2P&family=VT323' },
     { id: 'oktoberfest', name: 'Oktoberfest',    desc: 'Blue-and-white diamonds, beer gold, pretzel brown. Prost!',
       fonts: 'UnifrakturMaguntia&family=Alegreya+Sans:wght@400;500;700&family=Alegreya+Sans+SC:wght@500;700&family=Courier+Prime' },
+    { id: 'jabra',       name: 'Jabra',          desc: 'Jabra Yellow on Beige and Navy, from the official Jabra palette.',
+      fonts: 'Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500' },
   ];
   var KEY_T = 'flinchbot.theme', KEY_M = 'flinchbot.mode';
   var html = document.documentElement;
