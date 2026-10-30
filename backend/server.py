@@ -57,7 +57,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.12.0"
+APP_VERSION = "2.13.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -156,6 +156,23 @@ def agent_settings(provider=None):
         s["max_tokens"] = min(s["max_tokens"], max(1024, ctx // 8))
         s["history_chars"] = max(16_000, (ctx - s["max_tokens"] - 7000) * 3)
     return s
+
+
+# Is the internet reachable? Re-checked in the background (every minute, every 20 s while
+# offline) so the page can grey out what needs it. None until the first check, or behind a proxy.
+NET = {"online": None, "checked_at": None}
+
+
+def watch_internet():
+    def loop():
+        while True:
+            try:
+                NET["online"] = envcheck.probe_internet(3.0)
+            except Exception:
+                NET["online"] = None
+            NET["checked_at"] = time.time()
+            time.sleep(60 if NET["online"] is not False else 20)
+    threading.Thread(target=loop, name="internet-watch", daemon=True).start()
 
 
 def ai_ready():
@@ -456,6 +473,7 @@ def r_status(_):
         "version": APP_VERSION,
         "configured": cfg.provider_ready(cfg.active_provider()),
         "ai_ready": ai_ready(),
+        "online": NET["online"],
         "provider": cfg.active_provider(),
         "provider_label": PROVIDERS[cfg.active_provider()].label,
         "has_connections": bool(cfg.list_profiles()["profiles"]),
@@ -1381,6 +1399,7 @@ def main():
         print("  Restarted after an update; the open browser tab reconnects by itself.")
     print("  Press Ctrl+C to stop.\n")
     scheduler.start()                  # speed tests, only for connections where a schedule is set
+    watch_internet()
     if not args.no_browser and not kept:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:

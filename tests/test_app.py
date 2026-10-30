@@ -1270,7 +1270,7 @@ class EnvCheckTests(unittest.TestCase):
         import envcheck
         results = envcheck.run()
         self.assertEqual([r[0] for r in results],
-                         ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet", "Certs", "Nmap"])
+                         ["Computer", "Python", "Packages", "Passwords", "Folder", "Internet", "Local AI", "Certs", "Nmap"])
         certs = dict((r[0], r) for r in results)["Certs"]
         self.assertEqual(certs[1], envcheck.OK, certs)
         self.assertIn("root certificates", certs[2])
@@ -1294,6 +1294,62 @@ class EnvCheckTests(unittest.TestCase):
             self.assertIn("Delete the .venv folder", problem)
         finally:
             envcheck.PACKAGES = saved
+
+    def _env(self, **kw):
+        saved = {k: os.environ.get(k) for k in kw}
+        os.environ.update({k: v for k, v in kw.items() if v is not None})
+        for k, v in kw.items():
+            if v is None:
+                os.environ.pop(k, None)
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+
+    def test_offline_is_fine_with_local_ai(self):
+        import envcheck
+        saved = envcheck.probe_internet
+        self.addCleanup(setattr, envcheck, "probe_internet", saved)
+        envcheck.probe_internet = lambda timeout=3.0: False
+        self._env(AI_PROVIDER="local")
+        status, detail, problem, _ = envcheck.check_internet()
+        self.assertEqual(status, envcheck.OK)
+        self.assertIn("Fine with Local AI", detail)
+        self._env(AI_PROVIDER="anthropic")
+        status, detail, problem, anchor = envcheck.check_internet()
+        self.assertEqual((status, detail, anchor), (envcheck.WARN, "offline", "local-ai"))
+        self.assertIn("use Local AI", problem)
+        envcheck.probe_internet = lambda timeout=3.0: None
+        self.assertEqual(envcheck.check_internet()[1], "through a proxy (not checked)")
+
+    def test_local_ai_line(self):
+        import envcheck
+        self._env(AI_PROVIDER="anthropic", LOCAL_AI_URL=None, LOCAL_AI_MODEL=None)
+        self.assertEqual(envcheck.check_local_ai()[:2], (envcheck.OK, "not set up (optional)"))
+        self._env(AI_PROVIDER="local")
+        status, detail, _, anchor = envcheck.check_local_ai()
+        self.assertEqual((status, detail, anchor), (envcheck.WARN, "chosen, but no address set", "local-ai"))
+        fake = FakeLocalAI()
+        self.addCleanup(fake.stop)
+        self._env(LOCAL_AI_URL=f"127.0.0.1:{fake.port}", LOCAL_AI_MODEL="qwen3:30b")
+        status, detail, _, _ = envcheck.check_local_ai()
+        self.assertEqual(status, envcheck.OK)
+        self.assertEqual(detail, f"{fake.url}/v1, qwen3:30b")
+        self._env(LOCAL_AI_MODEL="gone:7b")
+        status, detail, problem, _ = envcheck.check_local_ai()
+        self.assertEqual(status, envcheck.WARN)
+        self.assertIn("ollama pull gone:7b", problem)
+        self._env(AI_PROVIDER="openai")                       # set up but not the chosen AI: not a warning
+        self.assertEqual(envcheck.check_local_ai()[0], envcheck.OK)
+        fake.stop()
+        self._env(AI_PROVIDER="local", LOCAL_AI_MODEL="qwen3:30b")
+        status, detail, problem, _ = envcheck.check_local_ai()
+        self.assertEqual((status, detail), (envcheck.WARN, f"{fake.url}/v1 not reachable"))
+        self.assertIn("OLLAMA_HOST", problem)
 
     def test_missing_root_certificates_are_explained(self):
         """python.org Python on a Mac with no certifi: the startup check says so and how to fix it."""
@@ -1638,7 +1694,9 @@ class ServerTests(unittest.TestCase):
                                                      "models": {"openai": "gpt-6.1-sol"}})
         self.assertTrue(d["switched"])
         self.assertFalse(d["chat_reset"])                                        # the conversation carries over
-        self.assertEqual([a["id"] for a in self.req("GET", "/api/status")[1]["ai_ready"]], ["anthropic", "openai"])
+        st = self.req("GET", "/api/status")[1]
+        self.assertEqual([a["id"] for a in st["ai_ready"]], ["anthropic", "openai"])
+        self.assertIn("online", st)                       # None until the background check runs
         st = self.req("GET", "/api/status")[1]
         self.assertEqual((st["provider"], st["provider_label"], st["model"]), ("openai", "ChatGPT", "gpt-6.1-sol"))
         self.assertIsNone(st["model_warning"])

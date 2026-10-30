@@ -196,7 +196,11 @@
   .so-btn:disabled { opacity:.45; cursor:not-allowed; }
   .so-menu { position:absolute; left:0; top:100%; margin-top:4px; z-index:20; min-width:220px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.25); }
   .so-menu button { display:flex; justify-content:space-between; gap:12px; width:100%; background:none; border:0; border-radius:6px; padding:7px 10px; color:var(--text); cursor:pointer; font-size:0.75rem; text-align:left; }
-  .so-menu button:hover { background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  .so-menu button:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  .so-menu button:disabled { opacity:.5; cursor:not-allowed; }
+  .net-off { opacity:.5; cursor:not-allowed !important; }
+  .off-note { font-size:0.85em; font-weight:400; }
+  body.ai-offline .quick-btn, body.ai-offline .send-btn:not(.stop) { opacity:.4; pointer-events:none; }
   .so-menu button span { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
   .msg-stopped { align-self:center; margin:2px auto 10px; font-size:0.75rem; color:var(--muted); text-align:center; }
   .typing .stopping, .msg-bubble .stopping { font-size:0.75rem; color:var(--muted); }
@@ -484,6 +488,40 @@ function showBanner(msg, actions) {
 function hideBanner() { $('banner').hidden = true; }
 
 // ── status / header ─────────────────────────────────────────────────────────
+// ── Offline ────────────────────────────────────────────────────────────────
+// The app re-checks the internet every minute (status.online). Offline, anything that needs it
+// is greyed out and says so; it comes back by itself when the connection does. With Local AI
+// the chat keeps working offline.
+const OFFLINE_NOTE = 'Not available: offline';
+const isOffline = () => !!(status && status.online === false);
+const isCloudAI = id => id === 'anthropic' || id === 'openai';
+const aiOffline = () => isOffline() && isCloudAI(status.provider);
+function needsNet(el) { el.dataset.net = '1'; applyNetGate(el); return el; }
+function applyNetGate(el) {
+  el.querySelector(':scope > .off-note')?.remove();
+  if (isOffline()) {
+    if (!el.classList.contains('net-off')) {
+      el.dataset.netWas = el.disabled ? '1' : '0';
+      el.dataset.netTitle = el.title || '';
+    }
+    el.classList.add('net-off'); el.disabled = true;
+    el.title = `${OFFLINE_NOTE}. This needs the internet; it comes back by itself when the connection does.`;
+    el.append(h('span', { class: 'off-note' }, ` (${OFFLINE_NOTE})`));
+  } else if (el.classList.contains('net-off')) {
+    el.classList.remove('net-off');
+    el.disabled = el.dataset.netWas === '1';
+    el.title = el.dataset.netTitle || '';
+  }
+}
+function applyNetGates() {
+  document.querySelectorAll('[data-net]').forEach(applyNetGate);
+  document.body.classList.toggle('ai-offline', aiOffline());
+  const inp = $('chatInput');
+  if (inp) inp.placeholder = aiOffline() ? `${OFFLINE_NOTE}. ${status.provider_label} needs the internet; Local AI works offline (Settings).`
+                                         : 'Ask about your network…';
+}
+function offlineToast() { toast(`${OFFLINE_NOTE}. ${status.provider_label} needs the internet. Switch to Local AI in Settings to work offline.`, true); }
+
 async function refreshStatus() {
   try { status = await api('GET', '/api/status'); }
   catch (e) { renderConn(null, e.message); return null; }
@@ -502,11 +540,15 @@ async function refreshStatus() {
     showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
   } else if (!status.configured) {
     showBanner('Set up an AI (Claude, ChatGPT or a local AI) to start chatting.', [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
+  } else if (aiOffline()) {
+    showBanner(`This computer is offline, so ${status.provider_label} can't answer. It comes back by itself when the connection does; Local AI works offline.`,
+      [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.model_warning) {
     showBanner(status.model_warning, [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.secret_storage === 'file' && status.has_connections) {
     showBanner(fileStoreWarning(), []);
   } else hideBanner();
+  applyNetGates();
   return status;
 }
 
@@ -661,18 +703,25 @@ function addAnswerFooter(el, by) {
   clearSecondOpinionButtons();
   if (!el || !by) return;
   const others = ((status && status.ai_ready) || []).filter(a => !(a.id === by.provider && a.model === by.model));
+  const usable = others.filter(a => !(isOffline() && isCloudAI(a.id)));
   const row = h('div', { class: 'so-row' }, h('span', { class: 'by', title: 'The AI that wrote this answer' }, `${by.label} · ${by.model}`));
   const btn = h('button', { class: 'so-btn', type: 'button',
-    title: others.length ? 'Ask another AI to check this answer. It sees the whole conversation, including your network data.'
-                         : 'Set up another AI in Settings (Claude, ChatGPT or Local AI) to get a second opinion.',
-    disabled: !others.length || null }, '⚖ Second opinion ▾');
+    title: usable.length ? 'Ask another AI to check this answer. It sees the whole conversation, including your network data.'
+         : others.length ? `${OFFLINE_NOTE}. Claude and ChatGPT need the internet.`
+         : 'Set up another AI in Settings (Claude, ChatGPT or Local AI) to get a second opinion.',
+    disabled: !usable.length || null }, usable.length === 1 ? `⚖ Second opinion from ${usable[0].label}`
+      : usable.length ? '⚖ Second opinion ▾' : others.length ? `⚖ Second opinion (${OFFLINE_NOTE})` : '⚖ Second opinion');
   btn.addEventListener('click', e => {
     e.stopPropagation();
+    if (usable.length === 1) { askSecondOpinion(usable[0]); return; }   // only one other AI: no point asking which
     const open = row.querySelector('.so-menu');
     if (open) { open.remove(); return; }
-    row.append(h('div', { class: 'so-menu', role: 'menu' }, ...others.map(a => h('button', { type: 'button', role: 'menuitem',
-      onclick: () => { row.querySelector('.so-menu')?.remove(); askSecondOpinion(a); } },
-      h('b', {}, a.label), h('span', {}, a.model)))));
+    row.append(h('div', { class: 'so-menu', role: 'menu' }, ...others.map(a => {
+      const off = isOffline() && isCloudAI(a.id);
+      return h('button', { type: 'button', role: 'menuitem', disabled: off || null, title: off ? `${OFFLINE_NOTE}. ${a.label} needs the internet.` : null,
+        onclick: () => { row.querySelector('.so-menu')?.remove(); askSecondOpinion(a); } },
+        h('b', {}, a.label), h('span', {}, off ? OFFLINE_NOTE : a.model));
+    })));
   });
   row.append(btn);
   el.querySelector('.msg-body').append(row);
@@ -793,6 +842,7 @@ async function sendMessage(override) {
   if ((!text && !attached.length) || busy) return;
   if (!status || !status.configured) { openSettings(); return; }
   if (!status.active) { openConnections(null, true); return; }
+  if (aiOffline()) { offlineToast(); return; }
   const files = override ? [] : attached;
   if (!override) {
     attached = []; renderAttachments();
@@ -1089,7 +1139,7 @@ async function openSettings(wizard) {
     };
     sec.el = h('div', {},
       field(`${info.vendor} API key`, key.wrap, h('span', {}, `Create one at ${pi.keyHelp}. Saved only in the .env file on this PC.`)),
-      h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, h('button', { class: 'btn', onclick: sec.load }, 'Test key & load models')),
+      h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px' }, needsNet(h('button', { class: 'btn', onclick: sec.load }, 'Test key & load models'))),
       out,
       field(`${pi.short} model`, model, h('span', {}, 'The list comes live from ' + info.vendor + ', so new models appear automatically. ' + pi.modelHelp + ' Prices: ',
         h('a', { href: pi.pricing, target: '_blank', rel: 'noopener', style: 'color:var(--accent)' }, `${info.vendor} pricing`), '.')),
@@ -1104,7 +1154,7 @@ async function openSettings(wizard) {
     Object.entries(segBtns).forEach(([n, b]) => b.className = n === name ? 'on' : '');
     holder.replaceChildren(sections[name].el);
     const i = sections[name].info;
-    if ((i.key_set || i.url) && !sections[name].loaded) sections[name].load();   // live list without an extra click
+    if ((i.key_set || i.url) && !sections[name].loaded && !(isOffline() && isCloudAI(name))) sections[name].load();   // live list without an extra click
   };
   for (const [name, info] of Object.entries(s.providers)) {
     const pi = PROVIDER_INFO[name] || { short: info.label, by: '' };
@@ -1504,6 +1554,7 @@ async function openReport() {
 async function runReport() {
   if (!status || !status.configured) { openSettings(); return; }
   if (!status.active) { openConnections(null, true); return; }
+  if (aiOffline()) { offlineToast(); return; }
   const started = Date.now();
   const timer = h('span', {}, '0s');
   const tick = setInterval(() => timer.textContent = Math.round((Date.now() - started) / 1000) + 's', 1000);
@@ -1838,7 +1889,7 @@ async function openWan(days = 7) {
   const schedSel = h('select', { title: 'Run a speed test automatically while this connection is the active one. Each test uses the full line for about a minute.',
     onchange: async e => { try { await api('POST', '/api/wan/schedule', { hours: Number(e.target.value) }); toast('Speed test schedule saved.'); } catch (err) { toast(err.message, true); } } },
     ...r.schedule_choices.map(hrs => h('option', { value: hrs, selected: hrs === r.schedule_hours }, schedLabel(hrs))));
-  const runBtn = h('button', { class: 'btn', disabled: r.running || null }, r.running ? 'Speed test running…' : '▶ Run a speed test now');
+  const runBtn = needsNet(h('button', { class: 'btn', disabled: r.running || null }, r.running ? 'Speed test running…' : '▶ Run a speed test now'));
   runBtn.addEventListener('click', async () => {
     if (!confirm('Run a speed test on the gateway now? It uses the full internet connection for about a minute, so others on the network may notice.')) return;
     runBtn.disabled = true; runBtn.textContent = 'Testing… (up to 2 min)';
@@ -2115,7 +2166,7 @@ async function openUsage() {
     h('div', { class: 'l' }, `${label} · ${fmtTok(s.tokens)} tokens · ${s.calls} calls${s.unpriced ? ` · ${s.unpriced} unpriced` : ''}`));
   const p = x => x ? `$${x.input} in · $${x.output} out · $${x.cache_read} cached · $${x.cache_write} cache write` : 'no price known';
   const budget = h('input', { type: 'number', min: '0', step: '1', value: r.budget || '', placeholder: 'none', class: 'inline-input' });
-  const upd = h('button', { class: 'btn' }, '↻ Update prices (LiteLLM)');
+  const upd = needsNet(h('button', { class: 'btn' }, '↻ Update prices (LiteLLM)'));
   upd.addEventListener('click', async () => { upd.disabled = true; try { const x = await api('POST', '/api/usage/update-prices', {}); toast(`Prices updated: ${x.updated} Claude and GPT models.`); openUsage(); } catch (e) { toast(e.message, true); upd.disabled = false; } });
   const edit = model => {
     const cur = (r.by_model.find(m => m.model === model) || {}).price || r.current_price || {};
@@ -2188,7 +2239,7 @@ async function openUpdates(force = false) {
 
   const auto = h('input', { type: 'checkbox', checked: u.auto || null });
   auto.addEventListener('change', () => api('POST', '/api/update/settings', { auto: auto.checked }).then(() => toast(auto.checked ? 'Daily check on.' : 'Daily check off.'), e => toast(e.message, true)));
-  const install = u.newer && !u.git_checkout ? h('button', { class: 'btn primary' }, `Install v${u.latest} and restart`) : null;
+  const install = u.newer && !u.git_checkout ? needsNet(h('button', { class: 'btn primary' }, `Install v${u.latest} and restart`)) : null;
   if (install) install.addEventListener('click', () => installUpdate(u));
   const backups = u.backups.length && !u.git_checkout ? h('div', { style: 'margin:10px 0' },
     h('h3', { style: 'margin:0 0 6px;font-size:0.875rem' }, 'Previous versions kept'),
@@ -2201,7 +2252,7 @@ async function openUpdates(force = false) {
     u.token_source && !u.token_saved ? h('div', { class: 'muted', style: 'font-size:0.75rem;margin-bottom:8px' }, `GitHub sign-in: ${u.token_source}.`) : null,
     h('label', { class: 'kit-opt' }, auto, ' Check for a new version once a day'),
     backups,
-    h('div', { class: 'actions' }, h('span', { class: 'left' }, h('button', { class: 'btn', onclick: () => openUpdates(true) }, '↻ Check now')),
+    h('div', { class: 'actions' }, h('span', { class: 'left' }, needsNet(h('button', { class: 'btn', onclick: () => openUpdates(true) }, '↻ Check now'))),
       h('button', { class: 'btn', onclick: closeModal }, 'Close'), install));
 }
 

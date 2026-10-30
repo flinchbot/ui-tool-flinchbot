@@ -7,7 +7,8 @@ private .venv is ready, before the app itself).
     ... envcheck.py --open python-mac                 (just open that guide section)
 
 It prints a short report: computer and OS, Python, packages, where passwords
-are kept, folder access, whether the AI providers can be reached, and whether
+are kept, folder access, whether the internet is reachable (fine to be offline with
+Local AI), whether the Local AI server answers, and whether
 Python has root certificates for the app's own downloads. Problems
 come with a fix and a link to the right section of SETUP.html.
 Exit code 1 means the app can't run (the launcher stops); warnings exit 0.
@@ -157,30 +158,116 @@ def check_folder():
             "get-the-app"
 
 
-def _try_resolve(host, out):
+INTERNET_HOSTS = AI_HOSTS + ("api.github.com",)
+
+
+def _try_connect(host, out, timeout):
     try:
-        out[host] = bool(socket.getaddrinfo(host, 443))
+        with socket.create_connection((host, 443), timeout=timeout):
+            out[host] = True
     except OSError:
         out[host] = False
 
 
-def check_internet(timeout=3.0):
-    """Name lookup only (nothing is sent): can this computer find the AI providers?
-    All lookups run at once, so a dead connection costs at most `timeout` seconds."""
+def probe_internet(timeout=3.0):
+    """Can this computer reach the internet services the app uses (Anthropic, OpenAI, GitHub)?
+    Opens a connection to each at once and closes it; nothing is sent.
+    -> True, False, or None when a proxy is configured (a direct connection proves nothing then)."""
+    import urllib.request
+    proxies = urllib.request.getproxies()
+    if proxies.get("https") or proxies.get("http"):
+        return None
     out = {}
-    threads = [threading.Thread(target=_try_resolve, args=(h, out), daemon=True) for h in AI_HOSTS]
+    threads = [threading.Thread(target=_try_connect, args=(h, out, timeout), daemon=True) for h in INTERNET_HOSTS]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout)
-    ok = [h for h in AI_HOSTS if out.get(h)]
-    if len(ok) == len(AI_HOSTS):
-        return OK, "AI providers reachable", None, None
-    if ok:
-        return OK, f"{', '.join(ok)} reachable", None, None
-    return WARN, "AI providers not reachable", ("This computer can't look up api.anthropic.com or api.openai.com. "
-                                                "The app will start, but the AI won't answer until the "
-                                                "internet connection works."), None
+        t.join(timeout + 0.5)
+    return any(out.values())
+
+
+def _active_provider():
+    sys.path.insert(0, str(BASE_DIR / "backend"))
+    try:
+        import config_store as cfg
+        return cfg.active_provider()
+    except Exception:
+        return None
+
+
+def check_internet(timeout=3.0):
+    online = probe_internet(timeout)
+    if online is None:
+        return OK, "through a proxy (not checked)", None, None
+    if online:
+        return OK, "online", None, None
+    if _active_provider() == "local":
+        return OK, ("offline. Fine with Local AI; updates, price updates and second opinions from Claude "
+                    "or ChatGPT need the internet"), None, None
+    return WARN, "offline", ("This computer can't reach api.anthropic.com, api.openai.com or GitHub. The app will "
+                             "start, but the AI won't answer until the internet connection works. Without "
+                             "internet, use Local AI."), "local-ai"
+
+
+def _local_ai_url(raw):
+    """Same rule as providers.normalize_base_url (that module needs the AI SDKs; this one mustn't)."""
+    u = (raw or "").strip().rstrip("/")
+    if u and not u.lower().startswith(("http://", "https://")):
+        u = "http://" + u
+    rest = u.split("://", 1)[-1]
+    return u if "/" in rest else u + "/v1"
+
+
+def _is_private_host(host):
+    import ipaddress
+    host = (host or "").lower()
+    if host == "localhost" or host.endswith((".local", ".lan", ".home", ".internal")) or "." not in host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
+def check_local_ai(timeout=3.0):
+    """Local AI set up: is its server reachable, and does it have the model picked in Settings?
+    Asks only that server for its model list; nothing else is sent."""
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    sys.path.insert(0, str(BASE_DIR / "backend"))
+    import config_store as cfg
+    raw = cfg.get_setting("LOCAL_AI_URL")
+    chosen = cfg.active_provider() == "local"
+    if not raw:
+        if chosen:
+            return WARN, "chosen, but no address set", "Open Settings in the app and choose Local AI.", "local-ai"
+        return OK, "not set up (optional)", None, None
+    url, model, key = _local_ai_url(raw), cfg.provider_model("local"), cfg.provider_key("local")
+    bad = WARN if chosen else OK          # only a problem if it's the AI that answers
+    host = urllib.parse.urlparse(url).hostname
+    # A server on your own network is reached directly, never through a proxy.
+    handlers = [urllib.request.ProxyHandler({})] if _is_private_host(host) else []
+    req = urllib.request.Request(url + "/models", headers={"Authorization": f"Bearer {key}"} if key else {})
+    try:
+        with urllib.request.build_opener(*handlers).open(req, timeout=timeout) as r:
+            data = json.loads(r.read(2_000_000))
+        ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
+    except urllib.error.HTTPError as e:
+        return bad, f"{url} answered with error {e.code}", "Check the address and key in Settings (Local AI).", \
+            "local-ai" if chosen else None
+    except Exception:
+        return bad, f"{url} not reachable", (
+            "The AI won't answer until that server is running and accepts connections from this computer "
+            "(Ollama: OLLAMA_HOST=0.0.0.0 on that computer; LM Studio: Serve on local network)."), \
+            "local-ai" if chosen else None
+    if model and model not in ids:
+        return bad, f"{url} has no model {model}", (
+            f"Pick another model in Settings (Local AI), or download it on that computer (Ollama: ollama pull {model})."), \
+            "local-ai" if chosen else None
+    return OK, f"{url}, {model or 'no model picked yet'}" + ("" if chosen else " (not the chosen AI)"), None, None
 
 
 def check_certificates():
@@ -220,6 +307,7 @@ def check_nmap():
 
 CHECKS = [("Computer", check_os), ("Python", check_python), ("Packages", check_packages),
           ("Passwords", check_password_store), ("Folder", check_folder), ("Internet", check_internet),
+          ("Local AI", check_local_ai),
           ("Certs", check_certificates), ("Nmap", check_nmap)]
 
 
