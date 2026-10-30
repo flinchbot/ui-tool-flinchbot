@@ -91,6 +91,10 @@ DEFAULTS = {
     "CLAUDE_MODEL":      "claude-sonnet-5-5",
     "OPENAI_API_KEY":    "",
     "OPENAI_MODEL":      "gpt-6.1-sol",
+    "LOCAL_AI_URL":      "",                   # e.g. http://office-pc:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio)
+    "LOCAL_AI_KEY":      "",                   # most local servers need none
+    "LOCAL_AI_MODEL":    "",
+    "LOCAL_AI_CONTEXT":  "32768",              # tokens the server reads per request; must match the server's own setting
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
@@ -98,12 +102,14 @@ DEFAULTS = {
 }
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.
-EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT"}
+EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT",
+                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT"}
 
 # Per-provider .env keys
 PROVIDER_KEYS = {
     "anthropic": {"key": "ANTHROPIC_API_KEY", "model": "CLAUDE_MODEL"},
     "openai":    {"key": "OPENAI_API_KEY",    "model": "OPENAI_MODEL"},
+    "local":     {"key": "LOCAL_AI_KEY",      "model": "LOCAL_AI_MODEL"},
 }
 
 
@@ -118,6 +124,20 @@ def provider_key(provider):
 
 def provider_model(provider):
     return get_setting(PROVIDER_KEYS[provider]["model"])
+
+
+def local_context():
+    try:
+        return max(2048, min(int(get_setting("LOCAL_AI_CONTEXT") or 32768), 2_000_000))
+    except ValueError:
+        return 32768
+
+
+def provider_ready(provider):
+    """Can this AI answer? Cloud AIs need a key; Local AI needs an address and a model (a key is optional)."""
+    if provider == "local":
+        return bool(get_setting("LOCAL_AI_URL") and get_setting("LOCAL_AI_MODEL"))
+    return bool(provider_key(provider))
 
 _lock = threading.RLock()
 

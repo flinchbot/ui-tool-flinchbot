@@ -19,10 +19,11 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 
-from providers import get_provider
+from providers import PROVIDERS, get_provider, provider_error_message
 
 import detective
 import nmap_scan
@@ -541,8 +542,7 @@ class Agent:
         self.chat_id       = uuid.uuid4().hex[:12]   # changes on Clear chat; groups usage per conversation
         self._notes        = []              # app notes for the model, sent with the next user message
         self._last_result  = None            # raw result of the last tool run (for undo of creates)
-        self.history = []                    # native items for self._history_provider
-        self._history_provider = None
+        self.history = []                    # the conversation record (see providers.py), any AI can read it
         self.pending = None                  # {"results": [...], "writes": [...]}
         self._names  = {}                    # mac -> friendly name, for approval cards
         self._executed = False               # did the current turn run any tool?
@@ -555,7 +555,6 @@ class Agent:
         with self.lock:
             self.chat_id = uuid.uuid4().hex[:12]
             self.history = []
-            self._history_provider = None
             self.pending = None
             self._names = {}
             self._notes = []
@@ -667,7 +666,7 @@ class Agent:
                                                "message instead). Do not run it unless they ask again.", True)
                     for w in self.pending["writes"]]
                 self.pending = None
-            provider.append_user(self.history, results, text, images)
+            self._append_user(results, text, images)
             self._begin(provider)
             try:
                 return self._run(settings, provider)
@@ -686,7 +685,7 @@ class Agent:
         with self.lock:
             if not self.pending:
                 raise AgentError("There is no action waiting for approval.")
-            settings, provider = self._provider()
+            settings, provider = self._provider(self.pending.get("via"))   # the AI that asked carries on
             pending, self.pending = self.pending, None
             results, changes = list(pending["results"]), []
             for w in pending["writes"]:
@@ -706,7 +705,7 @@ class Agent:
                         w["id"], "The user declined this action. Do not retry it unless they ask.", True))
                     if self._changes:
                         self._changes.record(w["name"], w["input"], d["label"], "denied", target=d["target"])
-            provider.append_user(self.history, results)
+            self._append_user(results)
             mark = len(self.history)
             self._begin(provider)
             try:
@@ -722,17 +721,135 @@ class Agent:
             out["changes"] = changes
             return out
 
+    def second_opinion(self, target):
+        """Ask another AI (target: "anthropic", "openai" or "local") to check the latest answer.
+        It sees the whole conversation, including the data the first AI gathered, and may call
+        tools itself. Its answer joins the conversation; the next question goes back to the AI
+        chosen in Settings. Changes it proposes wait for Approve like any other."""
+        with self.lock:
+            if target not in PROVIDERS:
+                raise AgentError("Unknown AI for a second opinion.")
+            if self.pending:
+                raise AgentError("Approve or deny the change that's waiting first.")
+            if not self.history or self.history[-1]["role"] != "assistant":
+                raise AgentError("There's no answer to check yet.")
+            first = self.history[-1].get("by") or {}
+            settings, provider = self._provider(target)
+            if first.get("provider") == target and first.get("model") == settings["model"]:
+                raise AgentError(f"That answer already came from {settings['provider_label']} "
+                                 f"({settings['model']}). Pick another AI for a second opinion.")
+            who = f"{PROVIDERS.get(first.get('provider'), provider).label} ({first.get('model') or 'unknown model'})"
+            snapshot = (list(self.history), self.pending, list(self._notes))
+            notes = "".join(f"[App note: {n}]\n" for n in self._notes)
+            self._notes = []
+            self._append_user(text=notes + (
+                f"[App note: The user wants a second opinion on the last answer. It was written by another AI, "
+                f"{who}, not by you. Check it against the data gathered in this conversation, and call tools if "
+                f"you need more or fresher data. Say plainly what it got right and what it got wrong or missed, "
+                f"then give your own answer. Keep it short.]"))
+            self._begin(provider)
+            try:
+                out = self._run(settings, provider, kind="second_opinion")
+            except _Stopped:
+                self.history, self.pending, self._notes = snapshot
+                return {"reply": "", "pending": None, "stopped": True, "second_opinion": True}
+            except AgentError:
+                self.history, self.pending, self._notes = snapshot
+                raise
+            except Exception as e:
+                if not self._executed:
+                    self.history, self.pending, self._notes = snapshot
+                raise AgentError(provider_error_message(e, target, settings["model"]) or f"{type(e).__name__}: {e}")
+            finally:
+                self._live = None
+            out["second_opinion"] = True
+            out["checked"] = dict(first, label=PROVIDERS[first["provider"]].label) if first.get("provider") in PROVIDERS else None
+            return out
+
+    PROBE_WORDS = ("time year people way day man thing woman life child world school state family student group "
+                   "country problem hand part place case week company system program question work number night "
+                   "point home water room mother area money story fact month book eye job word business side kind "
+                   "head house friend father power hour game line end member law car city name team minute idea "
+                   "body back face level office door health person art history party result change morning reason").split()
+
+    def probe_local(self, base_url, api_key, model, context=None):
+        """Settings → Local AI → Check. Two things decide whether a local model works here:
+        1. it calls tools when asked (the app is useless without that);
+        2. the server reads a prompt as long as the context size in Settings. Ollama's default
+           context is small and it silently drops the start of a longer prompt, which is the
+           instructions and tool list, so measure it: send a long filler prompt and compare the
+           tokens the server says it read with the number sent.
+        -> {"tools": {...}, "context": {...}}"""
+        p = get_provider("local", api_key, base_url)
+        out = {}
+        system, tools = self._system_prompt(), self._tools()
+        t0 = time.time()
+        try:
+            turn = p.complete(p.render([{"role": "user", "text": "Call the get_health tool now. Don't write an answer.",
+                                         "results": [], "images": []}]), system, tools, model, 400)
+            names = [c["name"] for c in turn.calls]
+            out["tools"] = {"ok": any(n in EXECUTORS_ALL for n in names), "called": names,
+                            "reply": " ".join(turn.texts)[:300], "seconds": round(time.time() - t0, 1),
+                            "prompt_tokens": turn.usage.get("input", 0)}
+        except Exception as e:
+            out["tools"] = {"ok": False, "error": provider_error_message(e, "local", model) or str(e),
+                            "seconds": round(time.time() - t0, 1)}
+            return out
+        try:
+            want = int(int(context or 32768) * 0.75)
+        except (TypeError, ValueError):
+            want = 24576
+        words = self.PROBE_WORDS
+        filler = " ".join(words[i % len(words)] for i in range(want))
+        t0 = time.time()
+        try:
+            # A fresh first line so a server's prompt cache can't make it count fewer tokens.
+            turn = p.complete([{"role": "user", "content": filler + "\n\nReply with the single word OK."}],
+                              f"Test {uuid.uuid4().hex}. Reply with OK.", [], model, 5)
+            seen = turn.usage.get("input", 0)
+            out["context"] = {"sent": want, "seen": seen, "ok": (seen >= want * 0.8) if seen else None,
+                              "seconds": round(time.time() - t0, 1)}
+        except Exception as e:
+            msg = provider_error_message(e, "local", model) or str(e)
+            out["context"] = {"sent": want, "seen": 0, "ok": False, "error": msg, "seconds": round(time.time() - t0, 1)}
+        return out
+
     # internals ----------------------------------------------------------------
-    def _provider(self):
-        settings = self._get_settings()
-        if not settings.get("api_key"):
+    def _settings(self, name=None):
+        """Settings for the AI chosen in Settings, or for another one (second opinion, approvals)."""
+        s = self._get_settings()
+        if name and name != s.get("provider"):
+            s = self._get_settings(name)
+        return s
+
+    def _provider(self, name=None):
+        settings = self._settings(name)
+        if settings["provider"] == "local":
+            if not settings.get("base_url") or not settings.get("model"):
+                raise AgentError("Local AI isn't set up yet. Open Settings (gear icon), choose Local AI, "
+                                 "and enter its address and model.")
+        elif not settings.get("api_key"):
             raise AgentError(f"No {settings.get('provider_label', 'AI')} API key yet. "
                              f"Open Settings (gear icon) to add one.")
-        if self._history_provider not in (None, settings["provider"]):
-            # Histories aren't portable between providers; start fresh rather than fail.
-            self.history, self.pending = [], None
-        self._history_provider = settings["provider"]
-        return settings, get_provider(settings["provider"], settings["api_key"])
+        return settings, get_provider(settings["provider"], settings.get("api_key"), settings.get("base_url"))
+
+    def _append_user(self, results=(), text=None, images=()):
+        """Add to the conversation record; merged into a trailing user entry so turns alternate.
+        A new dict each time: snapshots taken for Stop/errors keep the old one."""
+        entry = {"role": "user", "results": list(results), "text": text or None, "images": list(images or ())}
+        if self.history and self.history[-1]["role"] == "user":
+            prev = self.history[-1]
+            texts = [t for t in (prev.get("text"), entry["text"]) if t]
+            entry = {"role": "user", "results": list(prev.get("results") or []) + entry["results"],
+                     "text": "\n\n".join(texts) or None, "images": list(prev.get("images") or []) + entry["images"]}
+            self.history[-1] = entry
+        else:
+            self.history.append(entry)
+
+    @staticmethod
+    def _by(settings):
+        return {"provider": settings["provider"], "label": PROVIDERS[settings["provider"]].label,
+                "model": settings["model"]}
 
     @staticmethod
     def _tool_result(tool_id, content, is_error=False):
@@ -873,58 +990,65 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
   approval, like other changes. One command per call, no interactive programs, pipes are
   fine but no ; && > or $( )."""
 
-    def _trim(self, provider):
-        """Drop oldest turns, only at a plain user message so tool call/result pairs stay intact."""
+    def _trim(self, settings):
+        """Drop oldest turns, only at a plain user message so tool call/result pairs stay intact.
+        Local models get a smaller budget (settings["history_chars"], from their context size)."""
+        limit = settings.get("history_chars") or MAX_HISTORY_CHARS
+
         def size():
             n = 0
-            for item in self.history:          # an image is ~1,500 tokens whatever its byte size
-                content = item.get("content") if isinstance(item, dict) else None
-                if not isinstance(content, list):
-                    n += len(json.dumps(item, default=str))
-                    continue
-                for b in content:
-                    if isinstance(b, dict) and b.get("type") in ("image", "input_image"):
-                        n += IMAGE_CHARS
-                    else:
-                        n += len(json.dumps(b, default=str))
+            for e in self.history:             # an image is ~1,500 tokens whatever its byte size
+                if e["role"] == "user":
+                    n += len(json.dumps([e.get("results"), e.get("text")], default=str))
+                    n += IMAGE_CHARS * len(e.get("images") or ())
+                else:
+                    n += len(json.dumps(e["native"] if e.get("native") is not None
+                                        else [e.get("texts"), e.get("calls")], default=str))
             return n
-        while len(self.history) > MAX_MESSAGES or size() > MAX_HISTORY_CHARS:
-            cut = next((i for i in range(1, len(self.history)) if provider.is_boundary(self.history[i])), None)
+        while len(self.history) > MAX_MESSAGES or size() > limit:
+            cut = next((i for i in range(1, len(self.history))
+                        if self.history[i]["role"] == "user" and not self.history[i].get("results")), None)
             if cut is None:
                 break
             self.history = self.history[cut:]
 
-    def _run(self, settings, provider):
+    def _run(self, settings, provider, kind="chat"):
         self._executed = False
         max_rounds = settings.get("max_rounds", 15)
         max_tokens = settings.get("max_tokens", 16000)
+        by = self._by(settings)
         texts = []
         for _ in range(max_rounds):
             if self._stop.is_set():
                 raise _Stopped()
-            self._trim(provider)
+            self._trim(settings)
             try:
-                turn = provider.complete(self.history, self._system_prompt(), self._tools(), settings["model"], max_tokens)
+                turn = provider.complete(provider.render(self.history), self._system_prompt(), self._tools(),
+                                         settings["model"], max_tokens)
             except Exception:
                 if self._stop.is_set():          # stop() closed the client under the request
                     raise _Stopped()
                 raise
-            self._usage(settings, turn, "chat")
+            self._usage(settings, turn, kind)
             if self._stop.is_set():              # the AI answered just as Stop was pressed: drop it
                 raise _Stopped()
             texts += turn.texts
+            entry = {"role": "assistant", "texts": list(turn.texts), "calls": [], "by": by, "native": turn.items}
 
             if turn.truncated:
                 # Out of output budget (built-in reasoning counts toward it too).
                 # A tool call cut off mid-way may be incomplete, so never run it.
-                self.history += provider.drop_calls(turn.items) if turn.calls else turn.items
+                if turn.calls:
+                    entry["native"] = provider.drop_calls(turn.items)
+                self.history.append(entry)
                 texts.append(f"_(Reply hit the {max_tokens:,}-token output limit before finishing. Say "
                              f"\"continue\", ask a narrower question, or raise MAX_OUTPUT_TOKENS in .env.)_")
-                return {"reply": "\n\n".join(texts), "pending": None}
+                return {"reply": "\n\n".join(texts), "pending": None, "by": by}
 
-            self.history += turn.items
+            entry["calls"] = [dict(c) for c in turn.calls]
+            self.history.append(entry)
             if not turn.calls:
-                return {"reply": "\n\n".join(texts) or "(No response)", "pending": None}
+                return {"reply": "\n\n".join(texts) or "(No response)", "pending": None, "by": by}
 
             results, writes = [], []
             for c in turn.calls:
@@ -939,13 +1063,13 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
                     results.append(self._tool_result(c["id"], json.dumps({"error": f"Unknown tool {c['name']}"}), True))
 
             if writes:
-                self.pending = {"results": results, "writes": writes}
-                return {"reply": "\n\n".join(texts), "pending": self.pending_view()}
-            provider.append_user(self.history, results)
+                self.pending = {"results": results, "writes": writes, "via": settings["provider"]}
+                return {"reply": "\n\n".join(texts), "pending": self.pending_view(), "by": by}
+            self._append_user(results)
 
         return {"reply": "\n\n".join(texts + [
             f"_(Stopped after {max_rounds} rounds of tool calls to limit cost. Ask me to continue "
-            f"if you want me to keep going.)_"]), "pending": None}
+            f"if you want me to keep going.)_"]), "pending": None, "by": by}
 
     # ── action report ─────────────────────────────────────────────────────────
     def generate_report(self, progress=None):
@@ -955,10 +1079,7 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
         are offered, so nothing can be changed. The model must finish by calling
         submit_report, whose input is the report.
         """
-        settings = self._get_settings()
-        if not settings.get("api_key"):
-            raise AgentError(f"No {settings.get('provider_label', 'AI')} API key yet. Open Settings to add one.")
-        provider = get_provider(settings["provider"], settings["api_key"])
+        settings, provider = self._provider()
         tools = [t for t in self._tools() if t["name"] not in WRITE_NAMES] + [REPORT_TOOL]
         history = []
         request = REPORT_REQUEST + (REPORT_SSH_SUFFIX if self._get_context().get("ssh_enabled") else "")
@@ -992,10 +1113,15 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             provider.append_user(history, results)
         raise AgentError("The review took too many steps. Try again, or raise MAX_TOOL_ROUNDS in .env.")
 
-    def list_models(self, provider_name=None, api_key=None):
-        """Models this key can use, newest first (lifecycle info where the provider gives it)."""
+    def list_models(self, provider_name=None, api_key=None, base_url=None):
+        """Models this key (or local server) offers, newest first (lifecycle info where the provider gives it)."""
         settings = self._get_settings()
         provider_name = provider_name or settings["provider"]
+        if provider_name == "local":
+            url = base_url or settings.get("local_url")
+            if not url:
+                raise AgentError("Enter the local AI's address first.")
+            return get_provider("local", api_key or settings.get("keys", {}).get("local"), url).list_models()
         key = api_key or settings.get("keys", {}).get(provider_name)
         if not key:
             raise AgentError("Enter an API key first.")

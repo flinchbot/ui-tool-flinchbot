@@ -189,6 +189,15 @@
   .send-btn:disabled { opacity:.4; cursor:not-allowed; }
   .send-btn.stop { background:var(--danger); color:#fff; font-size:0.9375rem; }
   .msg.user.stopped .msg-bubble { opacity:.5; text-decoration:line-through; text-decoration-color:color-mix(in srgb,var(--text) 35%,transparent); }
+  .so-row { position:relative; display:flex; align-items:center; gap:10px; margin-top:6px; font-size:0.6875rem; color:var(--muted); }
+  .so-row .by { font-family:var(--font-mono); opacity:.8; }
+  .so-btn { background:none; border:1px solid var(--border); border-radius:var(--pill); color:var(--muted); padding:2px 10px; font-size:0.6875rem; cursor:pointer; }
+  .so-btn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .so-btn:disabled { opacity:.45; cursor:not-allowed; }
+  .so-menu { position:absolute; left:0; top:100%; margin-top:4px; z-index:20; min-width:220px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.25); }
+  .so-menu button { display:flex; justify-content:space-between; gap:12px; width:100%; background:none; border:0; border-radius:6px; padding:7px 10px; color:var(--text); cursor:pointer; font-size:0.75rem; text-align:left; }
+  .so-menu button:hover { background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  .so-menu button span { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
   .msg-stopped { align-self:center; margin:2px auto 10px; font-size:0.75rem; color:var(--muted); text-align:center; }
   .typing .stopping, .msg-bubble .stopping { font-size:0.75rem; color:var(--muted); }
   .empty-state { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--muted); gap:12px; padding:40px; text-align:center; }
@@ -492,7 +501,7 @@ async function refreshStatus() {
   } else if (status.error_kind === 'cert') {
     showBanner(status.error, [h('button', { class: 'btn', onclick: () => openConnections(status.active && status.active.id) }, 'Review connection')]);
   } else if (!status.configured) {
-    showBanner('Add an AI API key (Claude or ChatGPT) to start chatting.', [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
+    showBanner('Set up an AI (Claude, ChatGPT or a local AI) to start chatting.', [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.model_warning) {
     showBanner(status.model_warning, [h('button', { class: 'btn', onclick: () => openSettings() }, 'Open Settings')]);
   } else if (status.secret_storage === 'file' && status.has_connections) {
@@ -627,6 +636,7 @@ function addMessage(role, text, opts = {}) {
   const files = opts.files || [];
   const recorded = files.length ? `${text}\n\n📎 Attached: ${files.map(f => `${f.name} (${fmtSize(f.size)})`).join(', ')}` : text;
   if (!opts.noRecord) transcript.push({ kind: opts.error ? 'error' : role, text: recorded, at: new Date(), ai: aiName(),
+    by: opts.by || null, second: !!opts.second,
     images: files.filter(f => f.image).map(f => ({ name: f.name, src: `data:${f.media_type};base64,${f.image}` })) });
   const bubble = h('div', { class: 'msg-bubble' });
   if (role === 'assistant' && !opts.plain) bubble.innerHTML = formatMarkdown(text); else bubble.textContent = text;
@@ -636,8 +646,41 @@ function addMessage(role, text, opts = {}) {
     : chip(f))));
   const div = h('div', { class: `msg ${role}` + (opts.error ? ' error' : '') },
     h('div', { class: 'msg-avatar' }, role === 'user' ? '👤' : (opts.error ? '⚠️' : botAvatar())),
-    h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, role === 'user' ? 'You' : (opts.error ? 'Error' : BOT_NAME)), bubble));
+    h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, role === 'user' ? 'You' : (opts.error ? 'Error'
+      : opts.second && opts.by ? `${BOT_NAME} · second opinion from ${opts.by.label}` : BOT_NAME)), bubble));
   $('messages').append(div); scrollDown(); return div;
+}
+
+// ── Second opinion ─────────────────────────────────────────────────────────
+// Under the latest answer: which AI wrote it, and a menu of the other AIs that are set up.
+// The chosen one sees the whole conversation (and the data the first AI gathered), checks the
+// answer, may call tools itself, and replies below. The next question goes back to the AI
+// chosen in Settings.
+function clearSecondOpinionButtons() { document.querySelectorAll('.so-btn, .so-menu').forEach(b => b.remove()); }
+function addAnswerFooter(el, by) {
+  clearSecondOpinionButtons();
+  if (!el || !by) return;
+  const others = ((status && status.ai_ready) || []).filter(a => !(a.id === by.provider && a.model === by.model));
+  const row = h('div', { class: 'so-row' }, h('span', { class: 'by', title: 'The AI that wrote this answer' }, `${by.label} · ${by.model}`));
+  const btn = h('button', { class: 'so-btn', type: 'button',
+    title: others.length ? 'Ask another AI to check this answer. It sees the whole conversation, including your network data.'
+                         : 'Set up another AI in Settings (Claude, ChatGPT or Local AI) to get a second opinion.',
+    disabled: !others.length || null }, '⚖ Second opinion ▾');
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = row.querySelector('.so-menu');
+    if (open) { open.remove(); return; }
+    row.append(h('div', { class: 'so-menu', role: 'menu' }, ...others.map(a => h('button', { type: 'button', role: 'menuitem',
+      onclick: () => { row.querySelector('.so-menu')?.remove(); askSecondOpinion(a); } },
+      h('b', {}, a.label), h('span', {}, a.model)))));
+  });
+  row.append(btn);
+  el.querySelector('.msg-body').append(row);
+}
+async function askSecondOpinion(a) {
+  if (busy) return;
+  clearSecondOpinionButtons();
+  await runChat('/api/chat/second-opinion', { provider: a.id });
 }
 
 function addApproval(pending) {
@@ -707,11 +750,12 @@ async function stopChat() {
   try { await api('POST', '/api/chat/stop', {}); } catch {}
 }
 function addStopped(path, d) {
-  const decide = path.endsWith('decide');
-  const text = !decide ? 'Stopped. This question was dropped, so it isn\'t part of the conversation.'
+  const decide = path.endsWith('decide'), second = path.endsWith('second-opinion');
+  const text = second ? 'Stopped. The second opinion was dropped.'
+    : !decide ? 'Stopped. This question was dropped, so it isn\'t part of the conversation.'
     : d ? 'Stopped. The approved change ran; only the answer after it was dropped.'
         : 'Stopped. The approved change ran; only the answer after it was dropped. Undo is in 🧾 Changes.';
-  if (!decide) [...document.querySelectorAll('.msg.user')].pop()?.classList.add('stopped');
+  if (!decide && !second) [...document.querySelectorAll('.msg.user')].pop()?.classList.add('stopped');
   transcript.push({ kind: 'note', text, at: new Date() });
   $('messages').append(h('div', { class: 'msg-stopped' }, '■ ', text)); scrollDown();
 }
@@ -724,9 +768,11 @@ async function runChat(path, body) {
     const d = await api('POST', path, body, { signal: chatAbort.signal });
     $('typing')?.remove();
     if (d.stopped) addStopped(path, d);
-    if (d.reply && d.reply.trim()) addMessage('assistant', d.reply);
+    let el = null;
+    if (d.reply && d.reply.trim()) el = addMessage('assistant', d.reply, { by: d.by, second: !!d.second_opinion });
     if (d.usage) renderUsageChip(d.usage);
     if (d.pending && d.pending.length) addApproval(d.pending);
+    else if (el && !d.stopped) addAnswerFooter(el, d.by);
     if (path.endsWith('decide')) refreshNetwork();
     ok = d;
   } catch (e) {
@@ -757,6 +803,7 @@ async function sendMessage(override) {
     input.value = ''; autoResize(input);
   }
   document.querySelectorAll('.approval .row').forEach(r => { r.remove(); });  // a new message declines pending actions
+  clearSecondOpinionButtons();
   transcript.forEach(t => { if (t.kind === 'approval' && t.decision === 'Waiting for approval') t.decision = 'Not approved (a new message was sent instead)'; });
   addMessage('user', override ? override.display : text, { files });
   const ok = await runChat('/api/chat', { message: text, files: files.map(f => f.image
@@ -900,7 +947,108 @@ const PROVIDER_INFO = {
     keyHelp: 'platform.openai.com → API keys. A ChatGPT Plus/Pro subscription does not include API use; add API credit under Billing',
     modelHelp: 'GPT-6.1 Sol is a good default. GPT-6 Astra is the most capable and costs more; Terra and Luna are cheaper.',
     pricing: 'https://developers.openai.com/api/docs/pricing' },
+  local: { short: 'Local AI', by: 'Ollama, LM Studio, …' },
 };
+// Usual address of each local AI server. Any OpenAI-compatible server works ("Other").
+const LOCAL_PRESETS = [
+  { id: 'ollama', label: 'Ollama', port: 11434 }, { id: 'lmstudio', label: 'LM Studio', port: 1234 },
+  { id: 'llamacpp', label: 'llama.cpp (llama-server)', port: 8080 }, { id: 'vllm', label: 'vLLM', port: 8000 },
+  { id: 'jan', label: 'Jan', port: 1337 }, { id: 'other', label: 'Other / hosted (OpenRouter, LiteLLM…)', port: null },
+];
+
+function localSection(info, wizard) {
+  const url = h('input', { type: 'text', value: info.url || '', placeholder: 'http://office-pc:11434', spellcheck: 'false' });
+  const preset = h('select', {}, ...LOCAL_PRESETS.map(p => h('option', { value: p.id }, p.label + (p.port ? ` (port ${p.port})` : ''))));
+  const guess = LOCAL_PRESETS.find(p => p.port && new RegExp(`:${p.port}(/|$)`).test(info.url || ''));
+  preset.value = guess ? guess.id : (info.url ? 'other' : 'ollama');
+  preset.addEventListener('change', () => {
+    const p = LOCAL_PRESETS.find(x => x.id === preset.value);
+    if (!p || !p.port) return;
+    let host = 'localhost';
+    try { host = new URL(/^https?:/i.test(url.value) ? url.value : 'http://' + url.value).hostname || host; } catch {}
+    url.value = `http://${host}:${p.port}`;
+  });
+  const key = secretInput({ placeholder: info.key_set ? `Saved (${info.key_hint}) — paste a new one, or - to remove it` : 'Optional: most local servers need no key' });
+  const model = h('select', {}, info.model ? h('option', { value: info.model }, info.model) : h('option', { value: '' }, '— Test & load models first —'));
+  const context = h('input', { type: 'number', min: 2048, max: 2000000, step: 1024, value: info.context || 32768 });
+  const out = h('div'), found = h('div'), checkOut = h('div');
+  const sec = { info, key, model, out, loaded: false };
+  const fill = (models, cur) => {
+    model.replaceChildren(...models.map(m => h('option', { value: m.id, selected: m.id === cur }, m.id)));
+    if (!models.length) model.append(h('option', { value: '' }, '— the server has no models —'));
+    else if (cur && !models.some(m => m.id === cur)) model.prepend(h('option', { value: cur, selected: true }, `${cur} — not on this server`));
+    else if (!cur) model.value = models[0].id;
+  };
+  sec.load = async () => {
+    if (!url.value.trim()) { out.replaceChildren(result('bad', 'Enter the address of the computer running the AI first.')); return false; }
+    out.replaceChildren(result('warn', `Asking ${url.value.trim()} for its models…`));
+    const r = await api('POST', '/api/settings/test-key', { provider: 'local', base_url: url.value.trim(), api_key: key.input.value.trim() || undefined })
+      .catch(e => ({ ok: false, error: e.message }));
+    if (!r.ok) { out.replaceChildren(result('bad', r.error)); return false; }
+    fill(r.models, model.value);
+    sec.loaded = true;
+    out.replaceChildren(result('ok', `Connected. ${r.models.length} model${r.models.length === 1 ? '' : 's'} on this server.`));
+    return true;
+  };
+  const find = async () => {
+    found.replaceChildren(result('warn', 'Looking for a local AI on this computer…'));
+    const r = await api('POST', '/api/settings/local-find', {}).catch(e => ({ found: [], error: e.message }));
+    if (!r.found.length) { found.replaceChildren(result('warn', 'Nothing found on this computer. If the AI runs on another computer, type its address (for example http://office-pc:11434).')); return; }
+    found.replaceChildren(...r.found.map(f => h('div', { class: 'result ok', style: 'display:flex;align-items:center;gap:10px' },
+      h('span', { style: 'flex:1' }, `${f.server} at ${f.url} — ${f.models.length} model${f.models.length === 1 ? '' : 's'}`),
+      h('button', { class: 'btn', onclick: () => {
+        url.value = f.url; const p = LOCAL_PRESETS.find(x => x.port === f.port); if (p) preset.value = p.id;
+        found.replaceChildren(); sec.load();
+      } }, 'Use'))));
+  };
+  const check = async () => {
+    if (!model.value) { checkOut.replaceChildren(result('bad', 'Test & load models, then pick one.')); return; }
+    btnCheck.disabled = true;
+    checkOut.replaceChildren(result('warn', `Checking ${model.value}… This sends a long test prompt; on a slow computer, or while the model loads, it can take a minute or two.`));
+    try {
+      const r = await api('POST', '/api/settings/local-probe', { base_url: url.value.trim(), api_key: key.input.value.trim() || undefined,
+        model: model.value, context: Number(context.value) || 32768 });
+      const t = r.tools, c = r.context || {};
+      const lines = [];
+      if (t.error) lines.push(result('bad', t.error));
+      else if (t.ok) lines.push(result('ok', `Tools: works. Asked for a health check, the model called ${t.called.join(', ')} (${t.seconds} s).`));
+      else lines.push(result('bad', `Tools: the model didn't call a tool${t.reply ? ` (it wrote: “${t.reply.slice(0, 120)}”)` : ''}. ` +
+        'The app needs a model with tool support, ideally 20B parameters or larger (for example qwen3, gpt-oss, mistral-small or llama3.3).'));
+      if (c.error) lines.push(result('bad', `Context: ${c.error}`));
+      else if (c.ok === true) lines.push(result('ok', `Context: the server read the whole ${c.sent.toLocaleString()}-token test (${c.seconds} s).`));
+      else if (c.ok === false) lines.push(result('bad', `Context: the server read only ${c.seen.toLocaleString()} of ${c.sent.toLocaleString()} tokens, so it would silently drop the start of longer conversations, which is the instructions and tool list. ` +
+        `Raise its context size to ${Number(context.value).toLocaleString()} (Ollama: set OLLAMA_CONTEXT_LENGTH=${Number(context.value)} on that computer and restart Ollama; LM Studio: Context Length when loading the model), or lower the context size here to match.`));
+      else if (c.sent) lines.push(result('warn', 'Context: the server doesn’t report token counts, so this couldn’t be checked.'));
+      checkOut.replaceChildren(...lines);
+    } catch (e) { checkOut.replaceChildren(result('bad', e.message)); }
+    finally { btnCheck.disabled = false; }
+  };
+  const btnCheck = h('button', { class: 'btn', onclick: check }, 'Check this model');
+  sec.validate = async () => {
+    if (!url.value.trim()) { out.replaceChildren(result('bad', 'Enter the address of the computer running the AI first.')); return false; }
+    if (!sec.loaded && !(await sec.load())) return false;
+    if (!model.value) { out.replaceChildren(result('bad', 'Pick a model first.')); return false; }
+    return true;
+  };
+  sec.payload = () => (url.value.trim() || info.url) ? { url: url.value.trim(), context: Number(context.value) || 32768 } : undefined;
+  sec.el = h('div', {},
+    h('div', { class: 'note' }, 'Use an AI running on your own computer or one in your office. Your network data goes only to that server. ',
+      'Nothing goes to Anthropic or OpenAI unless you ask for a second opinion.'),
+    field('Server', preset, 'Picks the usual port. Any server that speaks the OpenAI Chat Completions API works.'),
+    field('Address', url, h('span', {}, 'The computer running the AI, and its port. On this computer use localhost. ',
+      'On another computer, the AI must accept network connections: Ollama needs OLLAMA_HOST=0.0.0.0 on that computer, LM Studio has a “Serve on local network” switch. ',
+      'They have no password, so allow only your own computers in the firewall.')),
+    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 12px;gap:8px' },
+      h('button', { class: 'btn', onclick: sec.load }, 'Test & load models'),
+      h('button', { class: 'btn', onclick: find }, '🔍 Find on this computer')),
+    found, out,
+    field('Key (optional)', key.wrap, 'Only if your server asks for one (hosted services, a LiteLLM proxy). Saved in the .env file on this PC.'),
+    field('Model', model, 'Pick one with tool support. Small models (7–8B) often call the wrong tool; 20B or larger works much better. Changes still wait for Approve.'),
+    field('Context size (tokens)', context, 'How much the server reads per request. 32,768 or more is recommended: the instructions and tools alone are about 6,000. Set the same on the server.'),
+    h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 8px' }, btnCheck),
+    checkOut);
+  return sec;
+}
 // The assistant is always "flinchbot" in the chat; which AI powers it is shown in About/exports/reports.
 const BOT_NAME = 'flinchbot';
 const aiName = () => BOT_NAME;
@@ -912,9 +1060,10 @@ async function openSettings(wizard) {
   try { s = await api('GET', '/api/settings'); } catch (e) { toast(e.message, true); return; }
   let provider = s.provider;
 
-  // One section per provider: key, test, live model list
+  // One section per provider: key, test, live model list (Local AI: address, model, context, check)
   const sections = {};
   for (const [name, info] of Object.entries(s.providers)) {
+    if (name === 'local') { sections.local = localSection(info, wizard); continue; }
     const pi = PROVIDER_INFO[name] || { short: info.label, by: '', keyHelp: '', modelHelp: '', pricing: '#' };
     const key = secretInput({ placeholder: info.key_set ? `Saved (${info.key_hint}) — paste a new key to replace` : `Paste your key (starts with ${pi.keyExample || info.key_prefix + '…'})` });
     const model = h('select', {}, h('option', { value: info.model }, info.model));
@@ -954,7 +1103,8 @@ async function openSettings(wizard) {
     provider = name;
     Object.entries(segBtns).forEach(([n, b]) => b.className = n === name ? 'on' : '');
     holder.replaceChildren(sections[name].el);
-    if (sections[name].info.key_set && !sections[name].loaded) sections[name].load();   // live list without an extra click
+    const i = sections[name].info;
+    if ((i.key_set || i.url) && !sections[name].loaded) sections[name].load();   // live list without an extra click
   };
   for (const [name, info] of Object.entries(s.providers)) {
     const pi = PROVIDER_INFO[name] || { short: info.label, by: '' };
@@ -966,20 +1116,22 @@ async function openSettings(wizard) {
   const save = async (next) => {
     const sec = sections[provider];
     try {
-      if (!sec.key.input.value.trim() && !sec.info.key_set) { sec.out.replaceChildren(result('bad', `Paste your ${sec.info.vendor} API key first.`)); return; }
-      if (sec.key.input.value.trim() && !(await sec.load())) return;
+      if (sec.validate) { if (!(await sec.validate())) return; }
+      else {
+        if (!sec.key.input.value.trim() && !sec.info.key_set) { sec.out.replaceChildren(result('bad', `Paste your ${sec.info.vendor} API key first.`)); return; }
+        if (sec.key.input.value.trim() && !(await sec.load())) return;
+      }
       const keys = {}, models = {};
       for (const [name, x] of Object.entries(sections)) {
         if (x.key.input.value.trim()) keys[name] = x.key.input.value.trim();
-        if (x.loaded || name === provider) models[name] = x.model.value;
+        if ((x.loaded || name === provider) && x.model.value) models[name] = x.model.value;
       }
-      if (provider !== s.provider && (status && status.pending) &&
-          !confirm('Switching AI discards the change waiting for approval. Continue?')) return;
-      const r = await api('POST', '/api/settings', { provider, keys, models,
+      const local = sections.local && sections.local.payload ? sections.local.payload() : undefined;
+      const r = await api('POST', '/api/settings', { provider, keys, models, local,
         port: (wizard || Number(port.value) === s.port) ? undefined : port.value });
-      if (r.chat_reset) clearChatView(`Switched to ${PROVIDER_INFO[provider] ? PROVIDER_INFO[provider].short : provider}. The conversation was cleared (it can't carry over between AI providers).`);
+      const short = PROVIDER_INFO[provider] ? PROVIDER_INFO[provider].short : provider;
       if (r.restart_needed) toast(`Saved. The new port (${r.port}) takes effect after you restart the app.`);
-      else toast('Settings saved.');
+      else toast(r.switched ? `Switched to ${short}. The conversation carries on.` : 'Settings saved.');
       await refreshStatus();
       if (next) next(); else closeModal();
     } catch (e) { sec.out.replaceChildren(result('bad', e.message)); }
@@ -991,12 +1143,13 @@ async function openSettings(wizard) {
   const body = [
     overrides,
     field('AI provider', h('div', { class: 'seg' }, ...Object.values(segBtns)),
-      'Pick whose AI answers. You can save keys for both and switch any time; switching starts a new conversation.'),
+      'Pick whose AI answers. You can set up all three and switch any time; the conversation carries on. ' +
+      'Under each answer, Second opinion asks one of the others to check it.'),
     holder,
     wizard ? null : field('App port', port, `This app's web address is http://127.0.0.1:${s.running_port}/. Change only if another program uses this port.`),
   ];
   if (wizard) {
-    openModal(...modalHead('Welcome! Let’s get you set up', 'Two quick steps: connect an AI (Claude or ChatGPT), then connect your UniFi console. Everything stays on this PC.', false),
+    openModal(...modalHead('Welcome! Let’s get you set up', 'Two quick steps: connect an AI (Claude, ChatGPT or your own local AI), then connect your UniFi console. Your settings stay on this PC.', false),
       h('div', { class: 'steps' }, h('span', { class: 'on' }), h('span')),
       h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 1 · Choose your AI'),
       ...body, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => save(() => openConnections(null, true, true)) }, 'Save & continue →')));
@@ -1257,7 +1410,9 @@ function download(name, content, type) {
   toast(`Saved ${name} to your Downloads folder.`);
 }
 const LABEL = { user: '👤 You', assistant: '🤖 flinchbot', error: '⚠️ Error', approval: '🛡️ Change request', note: '■ Stopped' };
-const labelFor = t => t.kind === 'assistant' ? `🤖 ${BOT_NAME}` : LABEL[t.kind];
+const labelFor = t => t.kind !== 'assistant' ? LABEL[t.kind]
+  : t.second && t.by ? `🤖 ${BOT_NAME} · second opinion from ${t.by.label} (${t.by.model})`
+  : t.by ? `🤖 ${BOT_NAME} · ${t.by.label} (${t.by.model})` : `🤖 ${BOT_NAME}`;
 
 function toMarkdown() {
   const m = exportMeta();
@@ -2276,6 +2431,7 @@ $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.sh
 $('chatInput').addEventListener('input', e => autoResize(e.target));
 $('connBtn').addEventListener('click', e => { e.stopPropagation(); toggleConnMenu(); });
 document.addEventListener('click', e => { if (!$('connMenu').hidden && !e.target.closest('.conn-switch')) toggleConnMenu(false); });
+document.addEventListener('click', e => { if (!e.target.closest('.so-row')) document.querySelectorAll('.so-menu').forEach(m => m.remove()); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (busy && chatAbort && $('overlay').hidden && $('connMenu').hidden) { stopChat(); return; }   // Esc stops a running answer

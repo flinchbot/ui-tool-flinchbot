@@ -18,7 +18,7 @@ import threading
 import time
 import types
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "backend"))
@@ -407,6 +407,77 @@ class UniFiClientTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_OPENSSL, "openssl needed for the mock console")
+
+# ── fake local AI server (OpenAI-compatible Chat Completions, like Ollama) ────
+class FakeLocalAI:
+    """Speaks just enough of /v1/models and /v1/chat/completions for the real openai SDK.
+    ctx_limit imitates Ollama's small default context: it reports at most that many prompt
+    tokens (one 'token' per word here), as Ollama does after silently cutting the prompt."""
+
+    def __init__(self, ctx_limit=None, models=("qwen3:30b", "llama3.1:8b")):
+        self.script, self.requests, self.ctx_limit, self.models = [], [], ctx_limit, list(models)
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def _send(self, code, obj):
+                body = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/v1/models":
+                    self._send(200, {"object": "list", "data": [{"id": m, "object": "model", "created": 1700000000,
+                                                                 "owned_by": "library"} for m in outer.models]})
+                else:
+                    self._send(404, {"error": {"message": "not found"}})
+
+            def do_POST(self):
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                outer.requests.append(req)
+                if req.get("model") not in outer.models:
+                    return self._send(404, {"error": {"message": f"model '{req.get('model')}' not found"}})
+                words = len(json.dumps(req["messages"]).split())
+                seen = min(words, outer.ctx_limit) if outer.ctx_limit else words
+                msg = outer.script.pop(0) if outer.script else {"role": "assistant", "content": "OK"}
+                self._send(200, {"id": "chatcmpl-1", "object": "chat.completion", "created": 1700000000,
+                                 "model": req["model"],
+                                 "choices": [{"index": 0, "message": msg,
+                                              "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop"}],
+                                 "usage": {"prompt_tokens": seen, "completion_tokens": 7, "total_tokens": seen + 7}})
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.port = self.srv.server_port
+        self.url = f"http://127.0.0.1:{self.port}"
+
+    def stop(self):
+        if self.srv:
+            self.srv.shutdown()
+            self.srv.server_close()        # close the port too, so a client gets "connection refused"
+            self.srv = None
+
+
+def l_call(id_, name, args):
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": id_, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+class RealOpenAI:
+    """Use the real openai SDK (not FakeOpenAI) for the Local AI provider inside a test."""
+    def __enter__(self):
+        import openai
+        self.saved, providers.OpenAI = providers.OpenAI, openai.OpenAI
+
+    def __exit__(self, *a):
+        providers.OpenAI = self.saved
+
+
 class AgentTests(unittest.TestCase):
     def setUp(self):
         self.m = MockUniFi(n_clients=2000)
@@ -417,7 +488,10 @@ class AgentTests(unittest.TestCase):
         shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
         self.profile = {"id": "p1", "name": "Test", "host": "127.0.0.1", "site": "default"}
         self.changes = history.ChangeLog(lambda: self.client, lambda: self.profile)
-        self.agent = agent_mod.Agent(lambda: self.client, lambda: self.settings, lambda: self.ctx,
+        self.alt = {}         # settings for other AIs (second opinion), by provider name
+        self.agent = agent_mod.Agent(lambda: self.client,
+                                     lambda p=None: self.settings if p in (None, self.settings["provider"]) else self.alt[p],
+                                     lambda: self.ctx,
                                      get_ssh=lambda: self.ssh, changes=self.changes)
         self.settings = {"provider": "anthropic", "provider_label": "Claude", "api_key": "sk-ant-test",
                          "model": "m", "max_rounds": 5, "max_tokens": 16000}
@@ -479,13 +553,30 @@ class AgentTests(unittest.TestCase):
         out = [i for i in FakeOpenAI.received[1]["input"] if i.get("type") == "function_call_output"][0]
         self.assertIn("not valid JSON", out["output"])
 
-    def test_switching_provider_starts_a_fresh_conversation(self):
-        FakeAnthropic.script = [[text("hi from claude")]]
+    def test_switching_provider_keeps_the_conversation(self):
+        FakeAnthropic.script = [[text("Checking."), tool("t1", "get_health", {})], [text("hi from claude")]]
         self.agent.chat("hello")
         self.use_openai()
         FakeOpenAI.script = [[o_text("hi from chatgpt")]]
-        self.assertEqual(self.agent.chat("hello again")["reply"], "hi from chatgpt")
-        self.assertEqual(FakeOpenAI.received[0]["input"], [{"role": "user", "content": "hello again"}])
+        r = self.agent.chat("hello again")
+        self.assertEqual(r["reply"], "hi from chatgpt")
+        self.assertEqual(r["by"], {"provider": "openai", "label": "ChatGPT", "model": "gpt-6.1-sol"})
+        sent = FakeOpenAI.received[0]["input"]
+        # Claude's turns are rebuilt for OpenAI: text, function call, its output, then the new question
+        self.assertEqual(sent[0], {"role": "user", "content": "hello"})
+        self.assertEqual(sent[1], {"role": "assistant", "content": "Checking."})
+        self.assertEqual((sent[2]["type"], sent[2]["call_id"], sent[2]["name"]), ("function_call", "t1", "get_health"))
+        self.assertEqual((sent[3]["type"], sent[3]["call_id"]), ("function_call_output", "t1"))
+        self.assertEqual(sent[4], {"role": "assistant", "content": "hi from claude"})
+        self.assertEqual(sent[5], {"role": "user", "content": "hello again"})
+        # ...and back to Claude: its own turns go back exactly as they came, ChatGPT's as plain text
+        self.settings = dict(self.settings, provider="anthropic", provider_label="Claude", api_key="sk-ant-test", model="m")
+        FakeAnthropic.script = [[text("back")]]
+        self.agent.chat("and claude?")
+        msgs = FakeAnthropic.received[-1]["messages"]
+        self.assertEqual(msgs[1]["content"][1], {"type": "tool_use", "id": "t1", "name": "get_health", "input": {}})
+        self.assertEqual(msgs[5], {"role": "assistant", "content": [{"type": "text", "text": "hi from chatgpt"}]})
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant", "user", "assistant", "user", "assistant", "user"])
 
     def test_text_attachments_are_sent_as_data_and_never_written(self):
         before = {os.path.join(d, f) for d, _, fs in os.walk(cfg.DATA_DIR) for f in fs} if os.path.isdir(cfg.DATA_DIR) else set()
@@ -527,6 +618,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn('<attached_file name="gw.log">', content[1]["text"])
         self.assertIn("images", FakeAnthropic.received[0]["system"])
         # OpenAI's Responses API takes the same picture as a data URL
+        self.agent.reset()
         self.use_openai()
         FakeOpenAI.script = [[o_text("A JPEG.")]]
         self.agent.chat("what is this", [{"name": "cam.jpg", "image": jpg, "media_type": "image/jpeg"}])
@@ -697,8 +789,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual((out["stopped"], out["reply"]), (True, ""))
         self.assertEqual(out["changes"][0]["label"], agent_mod._LABELS["ssh_command"])
         self.assertEqual(self.ssh.calls[-1], "reboot")         # the approved change did run
-        last = self.agent.history[-1]["content"]                # ...and its result stays in the conversation
-        self.assertEqual([b["type"] for b in last], ["tool_result"])
+        last = self.agent.history[-1]                           # ...and its result stays in the conversation
+        self.assertEqual((last["role"], len(last["results"]), last["text"]), ("user", 1, None))
         FakeAnthropic.script = [[text("Done.")]]
         self.assertEqual(self.agent.chat("ok?")["reply"], "Done.")
         sent = FakeAnthropic.received[-1]["messages"][-1]["content"]
@@ -934,7 +1026,9 @@ class AgentTests(unittest.TestCase):
         self.assertIsNone(r["pending"])
         self.assertIn("output limit", r["reply"])
         self.assertEqual(FakeAnthropic.received[0]["max_tokens"], 16000)
-        self.assertFalse(any(b.get("type") == "tool_use" for b in self.agent.history[-1]["content"]))
+        last = self.agent.history[-1]
+        self.assertEqual(last["calls"], [])
+        self.assertFalse(any(b.get("type") == "tool_use" for b in last["native"][0]["content"]))
         FakeAnthropic.script = [[text("Continuing.")]]
         self.assertEqual(self.agent.chat("continue")["reply"], "Continuing.")   # history still valid
 
@@ -976,17 +1070,150 @@ class AgentTests(unittest.TestCase):
             FakeAnthropic.create = orig
         self.assertEqual(self.agent.history, [])                                   # rolled back
 
+    def use_local(self, fake, **kw):
+        self.settings = dict({"provider": "local", "provider_label": "Local AI", "api_key": "", "base_url": fake.url,
+                              "model": "qwen3:30b", "max_rounds": 5, "max_tokens": 4096, "history_chars": 60_000}, **kw)
+
+    def test_local_ai_chat_with_tools(self):
+        """Ollama-style server through the real openai SDK: tools, tool results, inline <think> removed."""
+        fake = FakeLocalAI()
+        self.addCleanup(fake.stop)
+        fake.script = [l_call("call_1", "get_health", {}),
+                       {"role": "assistant", "content": "<think>wan looks ok</think>\nThe WAN is up."}]
+        self.use_local(fake)
+        with RealOpenAI():
+            r = self.agent.chat("how is the wan?")
+        self.assertEqual(r["reply"], "The WAN is up.")
+        self.assertEqual(r["by"], {"provider": "local", "label": "Local AI", "model": "qwen3:30b"})
+        first, second = fake.requests
+        self.assertEqual(first["messages"][0]["role"], "system")
+        self.assertIn("flinchbot", first["messages"][0]["content"])
+        self.assertEqual(first["messages"][1], {"role": "user", "content": "how is the wan?"})
+        self.assertIn("get_health", {t["function"]["name"] for t in first["tools"]})
+        self.assertEqual(first["max_tokens"], 4096)
+        self.assertEqual(second["messages"][2]["tool_calls"][0]["function"]["name"], "get_health")
+        self.assertEqual((second["messages"][3]["role"], second["messages"][3]["tool_call_id"]), ("tool", "call_1"))
+        # a local model costs nothing
+        rec = pricing.record("local", "qwen3:30b", {"input": 1000, "output": 10}, "chat", "c1")
+        self.assertEqual((rec["cost"], rec["price_source"]), (0.0, "local AI (no charge)"))
+
+    def test_local_ai_errors_are_explained(self):
+        fake = FakeLocalAI()
+        fake.stop()                                              # nothing listening any more
+        self.use_local(fake)
+        with RealOpenAI():
+            with self.assertRaises(Exception) as e:
+                self.agent.chat("hi")
+        msg = providers.provider_error_message(e.exception, "local", "qwen3:30b")
+        self.assertIn(f"Can't reach the local AI at {fake.url}", msg)
+        self.assertIn("OLLAMA_HOST", msg)
+        fake2 = FakeLocalAI()
+        self.addCleanup(fake2.stop)
+        self.use_local(fake2, model="missing:7b")
+        with RealOpenAI():
+            with self.assertRaises(Exception) as e:
+                self.agent.chat("hi")
+        self.assertIn("ollama pull missing:7b", providers.provider_error_message(e.exception, "local", "missing:7b"))
+        self.settings = dict(self.settings, base_url="")
+        with self.assertRaises(agent_mod.AgentError) as e:
+            self.agent.chat("hi")
+        self.assertIn("Local AI isn't set up yet", str(e.exception))
+
+    def test_local_probe_finds_tools_and_a_cut_context(self):
+        for limit, ok in ((4096, False), (None, True)):
+            fake = FakeLocalAI(ctx_limit=limit)
+            self.addCleanup(fake.stop)
+            fake.script = [l_call("p1", "get_health", {})]
+            with RealOpenAI():
+                r = self.agent.probe_local(fake.url + "/v1", "", "qwen3:30b", 32768)
+            self.assertTrue(r["tools"]["ok"], r)
+            self.assertEqual(r["tools"]["called"], ["get_health"])
+            self.assertEqual(r["context"]["sent"], 24576)
+            self.assertIs(r["context"]["ok"], ok, r)
+            filler = fake.requests[1]["messages"]
+            self.assertNotIn("tools", fake.requests[1])
+            self.assertTrue(filler[0]["content"].startswith("Test "))      # a fresh start: no prompt cache
+        fake = FakeLocalAI()
+        self.addCleanup(fake.stop)
+        fake.script = [{"role": "assistant", "content": "I would check the health."}]   # a model without tools
+        with RealOpenAI():
+            r = self.agent.probe_local(fake.url, "", "qwen3:30b", 8192)
+        self.assertFalse(r["tools"]["ok"])
+        self.assertIn("check the health", r["tools"]["reply"])
+        with RealOpenAI():
+            self.assertEqual([m["id"] for m in self.agent.list_models("local", None, fake.url)], ["llama3.1:8b", "qwen3:30b"])
+
+    def test_second_opinion_from_another_ai(self):
+        FakeAnthropic.script = [[tool("t1", "get_clients", {})], [text("All 3 clients are fine.")]]
+        r = self.agent.chat("any bad clients?")
+        self.assertEqual(r["by"]["provider"], "anthropic")
+        self.alt["openai"] = dict(self.settings, provider="openai", provider_label="ChatGPT", api_key="sk-test",
+                                  model="gpt-6.1-sol")
+        FakeOpenAI.script = [[o_call("c9", "get_wlans", {})], [o_text("Mostly right, but one client has weak signal.")]]
+        r = self.agent.second_opinion("openai")
+        self.assertEqual(r["reply"], "Mostly right, but one client has weak signal.")
+        self.assertTrue(r["second_opinion"])
+        self.assertEqual((r["by"]["provider"], r["checked"]["label"], r["checked"]["model"]), ("openai", "Claude", "m"))
+        sent = FakeOpenAI.received[0]["input"]
+        self.assertEqual(sent[0], {"role": "user", "content": "any bad clients?"})
+        self.assertEqual(sent[1]["type"], "function_call")                     # Claude's tool call and its data...
+        self.assertEqual(sent[2]["type"], "function_call_output")
+        self.assertEqual(sent[3], {"role": "assistant", "content": "All 3 clients are fine."})   # ...and its answer
+        self.assertIn("written by another AI, Claude (m), not by you", sent[4]["content"])
+        # the next question goes back to the AI chosen in Settings, which sees the second opinion
+        FakeAnthropic.script = [[text("Thanks, I'll look at that client.")]]
+        self.assertEqual(self.agent.chat("so?")["by"]["provider"], "anthropic")
+        msgs = FakeAnthropic.received[-1]["messages"]
+        self.assertIn({"type": "text", "text": "Mostly right, but one client has weak signal."}, msgs[-2]["content"])
+        # the same AI and model can't second-guess itself
+        self.alt["openai"] = dict(self.alt["openai"])
+        with self.assertRaises(agent_mod.AgentError) as e:
+            self.agent.second_opinion("anthropic")
+        self.assertIn("already came from Claude", str(e.exception))
+
+    def test_second_opinion_change_waits_for_approval_and_stop_works(self):
+        self.ctx["ssh_enabled"] = True
+        FakeAnthropic.script = [[text("Load is fine.")]]
+        self.agent.chat("load?")
+        self.alt["openai"] = dict(self.settings, provider="openai", provider_label="ChatGPT", api_key="sk-test",
+                                  model="gpt-6.1-sol")
+        FakeOpenAI.script = [[o_call("c1", "ssh_command", {"command": "reboot"})], [o_text("Rebooted.")]]
+        r = self.agent.second_opinion("openai")
+        self.assertEqual(r["pending"][0]["target"], "reboot")
+        self.assertEqual(self.ssh.calls, [])                                    # nothing ran yet
+        with self.assertRaises(agent_mod.AgentError):
+            self.agent.second_opinion("openai")                                 # approve or deny first
+        self.assertEqual(self.agent.decide(True)["reply"], "Rebooted.")        # ChatGPT carries on after Approve
+        self.assertEqual(self.ssh.calls, ["reboot"])
+        self.assertEqual(len(FakeOpenAI.received), 2)
+        # Stop during a second opinion leaves the conversation as it was
+        before = json.dumps(self.agent.history, default=str)
+        self.alt["openai"] = dict(self.alt["openai"], model="gpt-6-astra")
+        FakeAnthropic.gate = threading.Event()
+        FakeAnthropic.script = [[text("never shown")]]
+        self.settings, self.alt["anthropic"] = self.alt["openai"], self.settings   # ChatGPT is now the main AI
+        out = self._stop_while_waiting(lambda: self.agent.second_opinion("anthropic"), len(FakeAnthropic.received))
+        self.assertTrue(out["stopped"])
+        self.assertEqual(json.dumps(self.agent.history, default=str), before)
+
     def test_history_trim_keeps_tool_pairs(self):
         a = self.agent
+        by = {"provider": "anthropic", "model": "m"}
         for i in range(60):
-            a.history += [{"role": "user", "content": f"q{i}"},
-                          {"role": "assistant", "content": [{"type": "tool_use", "id": f"x{i}", "name": "get_health", "input": {}}]},
-                          {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"x{i}", "content": "y" * 9000}]},
-                          {"role": "assistant", "content": [{"type": "text", "text": "a"}]}]
-        a._trim(providers.AnthropicProvider)
+            a.history += [{"role": "user", "results": [], "text": f"q{i}", "images": []},
+                          {"role": "assistant", "texts": [], "calls": [{"id": f"x{i}", "name": "get_health", "input": {}}],
+                           "by": by, "native": None},
+                          {"role": "user", "results": [{"id": f"x{i}", "content": "y" * 9000, "is_error": False}],
+                           "text": None, "images": []},
+                          {"role": "assistant", "texts": ["a"], "calls": [], "by": by, "native": None}]
+        a._trim(self.settings)
         self.assertLessEqual(len(a.history), agent_mod.MAX_MESSAGES)
         self.assertEqual(a.history[0]["role"], "user")
-        self.assertIsInstance(a.history[0]["content"], str)
+        self.assertEqual(a.history[0]["results"], [])            # cut only at a plain question
+        # a local model's smaller budget trims much harder
+        a._trim(dict(self.settings, history_chars=40_000))
+        self.assertLessEqual(len(a.history), 16)
+        self.assertEqual(a.history[0]["results"], [])
 
 
 class InstallReportTests(unittest.TestCase):
@@ -1409,7 +1636,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(t["models"][0]["line"], "GPT-6.1")
         s, d, _ = self.req("POST", "/api/settings", {"provider": "openai", "keys": {"openai": "sk-proj-abc123456"},
                                                      "models": {"openai": "gpt-6.1-sol"}})
-        self.assertTrue(d["chat_reset"])
+        self.assertTrue(d["switched"])
+        self.assertFalse(d["chat_reset"])                                        # the conversation carries over
+        self.assertEqual([a["id"] for a in self.req("GET", "/api/status")[1]["ai_ready"]], ["anthropic", "openai"])
         st = self.req("GET", "/api/status")[1]
         self.assertEqual((st["provider"], st["provider_label"], st["model"]), ("openai", "ChatGPT", "gpt-6.1-sol"))
         self.assertIsNone(st["model_warning"])

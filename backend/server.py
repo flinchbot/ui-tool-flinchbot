@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config_store as cfg                                     # noqa: E402
 from agent import Agent, AgentError, redact                    # noqa: E402
-from providers import PROVIDERS, provider_error_message      # noqa: E402
+from providers import PROVIDERS, normalize_base_url, provider_error_message      # noqa: E402
 from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 from ssh_client import SSHClient, SSHError, format_hostkey, test_ssh  # noqa: E402
@@ -57,7 +57,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.11.0"
+APP_VERSION = "2.12.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -130,7 +130,8 @@ class State:
 state = State()
 
 
-def agent_settings():
+def agent_settings(provider=None):
+    """Settings for the AI chosen in Settings, or for `provider` (second opinion, approvals)."""
     try:
         rounds = int(cfg.get_setting("MAX_TOOL_ROUNDS"))
     except ValueError:
@@ -139,13 +140,28 @@ def agent_settings():
         out_tokens = int(cfg.get_setting("MAX_OUTPUT_TOKENS"))
     except ValueError:
         out_tokens = 16000
-    prov = cfg.active_provider()
-    return {"provider": prov, "provider_label": PROVIDERS[prov].label,
-            "api_key": cfg.provider_key(prov), "model": cfg.provider_model(prov),
-            "keys": {p: cfg.provider_key(p) for p in PROVIDERS},
-            "max_rounds": max(1, min(rounds, 50)),
-            # 21,000 is the SDK's ceiling for a non-streaming request
-            "max_tokens": max(2000, min(out_tokens, 21000))}
+    prov = provider if provider in PROVIDERS else cfg.active_provider()
+    s = {"provider": prov, "provider_label": PROVIDERS[prov].label,
+         "api_key": cfg.provider_key(prov), "model": cfg.provider_model(prov),
+         "keys": {p: cfg.provider_key(p) for p in PROVIDERS},
+         "local_url": cfg.get_setting("LOCAL_AI_URL"),
+         "max_rounds": max(1, min(rounds, 50)),
+         # 21,000 is the SDK's ceiling for a non-streaming request
+         "max_tokens": max(2000, min(out_tokens, 21000))}
+    if prov == "local":
+        # A local model reads at most `context` tokens per request: about 6,000 go to the
+        # instructions and tool list, the rest is shared by the answer and the conversation.
+        ctx = cfg.local_context()
+        s["base_url"], s["context"] = cfg.get_setting("LOCAL_AI_URL"), ctx
+        s["max_tokens"] = min(s["max_tokens"], max(1024, ctx // 8))
+        s["history_chars"] = max(16_000, (ctx - s["max_tokens"] - 7000) * 3)
+    return s
+
+
+def ai_ready():
+    """The AIs that can answer right now (for Second opinion)."""
+    return [{"id": p, "label": PROVIDERS[p].label, "model": cfg.provider_model(p)}
+            for p in PROVIDERS if cfg.provider_ready(p)]
 
 
 def agent_context():
@@ -438,7 +454,8 @@ def r_status(_):
     p = cfg.active_profile()
     out = {
         "version": APP_VERSION,
-        "configured": bool(cfg.provider_key(cfg.active_provider())),
+        "configured": cfg.provider_ready(cfg.active_provider()),
+        "ai_ready": ai_ready(),
         "provider": cfg.active_provider(),
         "provider_label": PROVIDERS[cfg.active_provider()].label,
         "has_connections": bool(cfg.list_profiles()["profiles"]),
@@ -482,7 +499,9 @@ def r_settings_get(_):
         key = cfg.provider_key(name)
         providers[name] = {"label": cls.label, "vendor": cls.vendor, "key_url": cls.key_url,
                            "key_prefix": cls.key_prefix, "key_set": bool(key),
-                           "key_hint": mask_key(key), "model": cfg.provider_model(name)}
+                           "key_hint": mask_key(key), "model": cfg.provider_model(name),
+                           "ready": cfg.provider_ready(name)}
+    providers["local"].update(url=cfg.get_setting("LOCAL_AI_URL"), context=cfg.local_context())
     return {"provider": cfg.active_provider(), "providers": providers,
             "port": int(cfg.get_setting("SERVER_PORT")),
             "running_port": HTTP_PORT,
@@ -502,6 +521,9 @@ def r_settings_save(b):
             continue
         k = str(k).strip()
         cls = PROVIDERS[name]
+        if name == "local":
+            updates[cfg.PROVIDER_KEYS[name]["key"]] = "" if k == "-" else k      # "-" clears a saved key
+            continue
         if not k.startswith(cls.key_prefix):
             raise ValueError(f"That doesn't look like an {cls.vendor} API key (they start with '{cls.key_prefix}').")
         if name == "openai" and k.startswith("sk-ant-"):
@@ -510,6 +532,14 @@ def r_settings_save(b):
     for name, m in (b.get("models") or {}).items():
         if name in PROVIDERS and m:
             updates[cfg.PROVIDER_KEYS[name]["model"]] = str(m).strip()
+    local = b.get("local") or {}
+    if "url" in local:
+        updates["LOCAL_AI_URL"] = normalize_base_url(local["url"])     # raises ValueError for a non-address
+    if local.get("context") not in (None, ""):
+        ctx = int(local["context"])
+        if not 2048 <= ctx <= 2_000_000:
+            raise ValueError("Context size is in tokens, between 2,048 and 2,000,000.")
+        updates["LOCAL_AI_CONTEXT"] = str(ctx)
     if b.get("port") not in (None, ""):
         port = int(b["port"])
         if not 1024 <= port <= 65535:
@@ -519,9 +549,8 @@ def r_settings_save(b):
         cfg.write_env_file(updates)
     res = r_settings_get(None)
     res["restart_needed"] = "SERVER_PORT" in updates and res["port"] != HTTP_PORT
-    res["chat_reset"] = cfg.active_provider() != before
-    if res["chat_reset"]:
-        agent.reset()            # conversations can't move between providers
+    res["switched"] = cfg.active_provider() != before    # the conversation carries over (see providers.py)
+    res["chat_reset"] = False
     return res
 
 
@@ -530,7 +559,8 @@ def r_test_key(b):
     if prov not in PROVIDERS:
         return {"ok": False, "error": "Unknown AI provider"}
     try:
-        models = agent.list_models(prov, str(b.get("api_key") or "").strip() or None)
+        models = agent.list_models(prov, str(b.get("api_key") or "").strip() or None,
+                                   str(b.get("base_url") or "").strip() or None)
         return {"ok": True, "models": models}
     except AgentError as e:
         return {"ok": False, "error": str(e)}
@@ -547,7 +577,7 @@ MODELS_TTL, MODELS_ERR_TTL = 6 * 3600, 300
 
 def cached_models(force=False):
     prov = cfg.active_provider()
-    key = cfg.provider_key(prov)
+    key = cfg.get_setting("LOCAL_AI_URL") if prov == "local" else cfg.provider_key(prov)
     if not key:
         return None
     with _models_lock:
@@ -555,7 +585,7 @@ def cached_models(force=False):
         ttl = MODELS_ERR_TTL if c["error"] else MODELS_TTL
         if force or c["key"] != (prov, key) or time.time() - c["at"] > ttl:
             try:
-                c.update(models=agent.list_models(prov, key), error=None)
+                c.update(models=agent.list_models(prov, None if prov == "local" else key), error=None)
             except Exception as e:
                 c.update(models=None, error=provider_error_message(e, prov) or str(e))
             c.update(key=(prov, key), at=time.time())
@@ -570,6 +600,8 @@ def model_warning():
     current = cfg.provider_model(cfg.active_provider())
     m = next((x for x in models if x["id"] == current), None)
     if m is None:
+        if cfg.active_provider() == "local":
+            return f"The model '{current}' isn't on your local AI server. Pick another in Settings."
         return f"The model '{current}' isn't available to your API key. Pick another in Settings."
     if m["lifecycle"] != "active":
         when = f" and retires on {m['retires_at']}" if m.get("retires_at") else ""
@@ -864,6 +896,47 @@ def r_decide(b):
 
 def r_stop(b):
     return {"stopped": agent.stop()}
+
+
+def r_second_opinion(b):
+    return _with_usage(agent.second_opinion(str(b.get("provider") or "")))
+
+
+def r_local_probe(b):
+    url = str(b.get("base_url") or "").strip() or cfg.get_setting("LOCAL_AI_URL")
+    model = str(b.get("model") or "").strip() or cfg.provider_model("local")
+    if not url or not model:
+        raise AgentError("Enter the address and pick a model first.")
+    key = str(b.get("api_key") or "").strip() or cfg.provider_key("local")
+    return agent.probe_local(normalize_base_url(url), key, model, b.get("context") or cfg.local_context())
+
+
+LOCAL_PORTS = {11434: "Ollama", 1234: "LM Studio", 8080: "llama.cpp", 8000: "vLLM", 1337: "Jan", 5001: "KoboldCpp"}
+
+
+def r_local_find(_):
+    """Settings → Local AI → Find: which usual local AI ports on this computer answer /v1/models.
+    Asks 127.0.0.1 only and sends nothing but that request."""
+    found, lock = [], threading.Lock()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def probe(port, name):
+        url = f"http://127.0.0.1:{port}/v1"
+        try:
+            with opener.open(url + "/models", timeout=1.5) as r:
+                data = json.loads(r.read(2_000_000))
+            models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+        except Exception:
+            return
+        with lock:
+            found.append({"url": url, "server": name, "port": port, "models": models[:50]})
+    threads = [threading.Thread(target=probe, args=(port, name), daemon=True)
+               for port, name in LOCAL_PORTS.items() if port != HTTP_PORT]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(3)
+    return {"found": sorted(found, key=lambda f: f["port"])}
 
 
 def r_reset(_):
@@ -1226,6 +1299,9 @@ ROUTES = {
     ("POST", "/api/chat"):                    r_chat,
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/chat/stop"):               r_stop,
+    ("POST", "/api/chat/second-opinion"):     r_second_opinion,
+    ("POST", "/api/settings/local-probe"):    r_local_probe,
+    ("POST", "/api/settings/local-find"):     r_local_find,
     ("POST", "/api/reset"):                   r_reset,
     ("GET",  "/api/report"):                  r_report_get,
     ("POST", "/api/report"):                  r_report,
@@ -1294,8 +1370,12 @@ def main():
     p = cfg.active_profile()
     print(f"  Connection: {p['name']} ({p['host']})" if p else "  Connection: none yet - add one in the app")
     prov = cfg.active_provider()
-    print(f"  AI: {PROVIDERS[prov].label} ({cfg.provider_model(prov)}), key "
-          f"{'set' if cfg.provider_key(prov) else 'NOT set - add it in the app'}")
+    if prov == "local":
+        print(f"  AI: Local AI ({cfg.provider_model(prov) or 'no model yet'}) at "
+              f"{cfg.get_setting('LOCAL_AI_URL') or 'NO ADDRESS yet - add it in the app'}")
+    else:
+        print(f"  AI: {PROVIDERS[prov].label} ({cfg.provider_model(prov)}), key "
+              f"{'set' if cfg.provider_key(prov) else 'NOT set - add it in the app'}")
     print(f"  Secrets stored in: {cfg.secret_store_name()}")
     if kept:
         print("  Restarted after an update; the open browser tab reconnects by itself.")

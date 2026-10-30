@@ -1,12 +1,21 @@
 """
-AI providers: Anthropic (Claude, Messages API) and OpenAI (ChatGPT models, Responses API).
+AI providers: Anthropic (Claude, Messages API), OpenAI (ChatGPT models, Responses API)
+and Local AI (any OpenAI-compatible Chat Completions server: Ollama, LM Studio,
+llama.cpp, vLLM, Jan, LocalAI, or a hosted one such as OpenRouter).
 
 The agent works with a provider-neutral shape:
   * a Turn: the model's visible text, its tool calls [{id, name, input}], whether
-    it hit the output limit, and the native items to append to history
+    it hit the output limit, and the native items for this assistant turn
   * tool results: [{id, content, is_error}]
-Each provider owns its own history format, so a conversation never mixes the two
-(the app clears the chat when you switch provider).
+  * the conversation record (the agent's history), a list of entries:
+      {"role": "user", "results": [...], "text": str|None, "images": [...]}
+      {"role": "assistant", "texts": [...], "calls": [...], "by": {"provider", "model"},
+       "native": the provider's own items for that turn}
+    render(record) turns it into the provider's request format. A turn the same
+    provider wrote is sent back exactly as it came (with Claude's thinking blocks or
+    OpenAI's encrypted reasoning); a turn another AI wrote is rebuilt from its text and
+    tool calls. That is what lets a conversation move between AIs (second opinion,
+    switching provider in Settings).
 
 OpenAI notes (Oct 2026): tool calling on the newest GPT models requires the
 Responses API. We call it statelessly (store=False) so OpenAI doesn't keep the
@@ -25,6 +34,20 @@ try:
     from openai import OpenAI
 except ImportError:          # the app still works with Claude only
     OpenAI = None
+
+
+_THINK = re.compile(r"<think>.*?</think>\s*", re.S)      # reasoning some local models print inline
+
+
+def _safe_id(v):
+    """Tool-call ids cross providers (second opinion): keep them to what all of them accept."""
+    s = re.sub(r"[^A-Za-z0-9_-]", "_", str(v or ""))[:64]
+    return s or "call"
+
+
+def _result_text(r):
+    c = r.get("content")
+    return c if isinstance(c, str) else json.dumps(c, default=str)
 
 
 class Turn:
@@ -99,6 +122,36 @@ class AnthropicProvider:
     def drop_calls(items):
         blocks = [b for b in items[0]["content"] if b.get("type") != "tool_use"] or [{"type": "text", "text": "(cut off)"}]
         return [{"role": "assistant", "content": blocks}]
+
+    def render(self, record):
+        out = []
+        for e in record:
+            if e["role"] == "user":
+                out.append({"role": "user", "content": self._user_blocks(e.get("results") or (), e.get("text"),
+                                                                         e.get("images") or ())})
+            elif e.get("native") is not None and (e.get("by") or {}).get("provider") == self.name:
+                out.extend(copy.deepcopy(e["native"]))
+            else:
+                blocks = [{"type": "text", "text": t} for t in e.get("texts") or () if str(t).strip()]
+                blocks += [{"type": "tool_use", "id": _safe_id(c["id"]), "name": c["name"],
+                            "input": c["input"] if isinstance(c.get("input"), dict) else {}}
+                           for c in e.get("calls") or ()]
+                out.append({"role": "assistant", "content": blocks or [{"type": "text", "text": "(no response)"}]})
+        return out
+
+    @staticmethod
+    def _user_blocks(results, text, images):
+        blocks = []
+        for r in results:
+            b = {"type": "tool_result", "tool_use_id": _safe_id(r["id"]), "content": r["content"]}
+            if r.get("is_error"):
+                b["is_error"] = True
+            blocks.append(b)
+        for im in images or ():
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": im["media_type"], "data": im["data"]}})
+        if text:
+            blocks.append({"type": "text", "text": text})
+        return blocks
 
     @staticmethod
     def append_user(history, results=(), text=None, images=()):
@@ -233,6 +286,23 @@ class OpenAIProvider:
         kept = [i for i in items if i.get("type") == "message"]
         return kept or [{"role": "assistant", "content": "(cut off)"}]
 
+    def render(self, record):
+        out = []
+        for e in record:
+            if e["role"] == "user":
+                self.append_user(out, [dict(r, id=_safe_id(r["id"])) for r in e.get("results") or ()],
+                                 e.get("text"), e.get("images") or ())
+            elif e.get("native") is not None and (e.get("by") or {}).get("provider") == self.name:
+                out.extend(copy.deepcopy(e["native"]))
+            else:
+                text = "\n\n".join(t for t in e.get("texts") or () if str(t).strip())
+                if text or not e.get("calls"):
+                    out.append({"role": "assistant", "content": text or "(no response)"})
+                for c in e.get("calls") or ():
+                    out.append({"type": "function_call", "call_id": _safe_id(c["id"]), "name": c["name"],
+                                "arguments": json.dumps(c["input"] if isinstance(c.get("input"), dict) else {})})
+        return out
+
     @staticmethod
     def append_user(history, results=(), text=None, images=()):
         for r in results:
@@ -289,15 +359,158 @@ class OpenAIProvider:
         return None
 
 
-PROVIDERS = {"anthropic": AnthropicProvider, "openai": OpenAIProvider}
-DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-6.1-sol"}
+# ── Local AI (OpenAI-compatible Chat Completions) ─────────────────────────────
+def normalize_base_url(url):
+    """'office-pc:11434' -> 'http://office-pc:11434/v1'. A path other than / is kept as typed."""
+    u = str(url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, re.I):
+        u = "http://" + u
+    m = re.match(r"^(https?://[^/\s]+)(/\S*)?$", u, re.I)
+    if not m:
+        raise ValueError("That isn't a web address. Use something like http://office-pc:11434")
+    return u if m.group(2) else u + "/v1"
 
 
-def get_provider(name, api_key):
+class LocalProvider:
+    """Any server that speaks OpenAI's Chat Completions API, which is what local AI servers
+    offer: Ollama (port 11434), LM Studio (1234), llama.cpp's llama-server (8080), vLLM
+    (8000), Jan (1337), LocalAI; also hosted ones like OpenRouter or a LiteLLM proxy.
+    Nothing provider-specific is kept between turns, so render() rebuilds every turn."""
+    name, label, vendor = "local", "Local AI", "your local AI server"
+    key_prefix, key_url = "", ""
+
+    def __init__(self, api_key, base_url=None):
+        if OpenAI is None:
+            raise RuntimeError("The 'openai' package isn't installed. Close the app and start it again "
+                               "(start.bat on Windows, start.command on a Mac) to install it.")
+        self.base_url = normalize_base_url(base_url)
+        if not self.base_url:
+            raise ValueError("No address for the local AI yet. Open Settings and choose Local AI.")
+        # Most local servers need no key, but the SDK insists on one. Local models can be slow
+        # (loading into memory, long answers on a CPU), hence the generous timeout.
+        self.client = OpenAI(api_key=api_key or "local", base_url=self.base_url, timeout=900, max_retries=1)
+
+    def abort(self):
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
+    def render(self, record):
+        msgs = []
+        for e in record:
+            if e["role"] == "user":
+                self.append_user(msgs, [dict(r, id=_safe_id(r["id"])) for r in e.get("results") or ()],
+                                 e.get("text"), e.get("images") or ())
+            else:
+                m = {"role": "assistant", "content": "\n\n".join(t for t in e.get("texts") or () if str(t).strip())}
+                if e.get("calls"):
+                    m["tool_calls"] = [{"id": _safe_id(c["id"]), "type": "function", "function": {
+                        "name": c["name"], "arguments": json.dumps(c["input"] if isinstance(c.get("input"), dict) else {})}}
+                        for c in e["calls"]]
+                msgs.append(m)
+        return msgs
+
+    def complete(self, history, system, tools, model, max_tokens):
+        kw = {"model": model, "max_tokens": max_tokens,
+              "messages": [{"role": "system", "content": system}] + copy.deepcopy(history)}
+        if tools:
+            kw["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                             "parameters": t["input_schema"]}} for t in tools]
+        resp = self.client.chat.completions.create(**kw)
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        msg = getattr(choice, "message", None)
+        text = _THINK.sub("", getattr(msg, "content", None) or "").strip()
+        calls = []
+        for i, tc in enumerate(getattr(msg, "tool_calls", None) or []):
+            fn = getattr(tc, "function", None)
+            try:
+                args = json.loads(getattr(fn, "arguments", None) or "{}")
+                args = args if isinstance(args, dict) else None
+            except (TypeError, ValueError):
+                args = None
+            calls.append({"id": getattr(tc, "id", None) or f"call_{i}", "name": getattr(fn, "name", "") or "",
+                          "input": args})
+        item = {"role": "assistant", "content": text}
+        if calls:
+            item["tool_calls"] = [{"id": _safe_id(c["id"]), "type": "function", "function": {
+                "name": c["name"], "arguments": json.dumps(c["input"] or {})}} for c in calls]
+        u = getattr(resp, "usage", None)
+        usage = {"input": _n(u, "prompt_tokens"), "cache_write": 0, "cache_read": 0, "output": _n(u, "completion_tokens")}
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        return Turn([text] if text else [], calls, truncated, [item], usage)
+
+    @staticmethod
+    def drop_calls(items):
+        return [{"role": "assistant", "content": (items[0].get("content") if items else "") or "(cut off)"}]
+
+    @staticmethod
+    def append_user(history, results=(), text=None, images=()):
+        for r in results:
+            out = _result_text(r)
+            if r.get("is_error") and not out.startswith("ERROR"):
+                out = "ERROR: " + out
+            history.append({"role": "tool", "tool_call_id": r["id"], "content": out})
+        if images:
+            parts = [{"type": "image_url", "image_url": {"url": f"data:{im['media_type']};base64,{im['data']}"}}
+                     for im in images]
+            history.append({"role": "user", "content": parts + [{"type": "text", "text": text or ""}]})
+        elif text:
+            history.append({"role": "user", "content": text})
+
+    @staticmethod
+    def is_boundary(item):
+        return item.get("role") == "user"
+
+    def list_models(self):
+        out = [{"id": m.id, "name": m.id, "line": None, "lifecycle": "active", "retires_at": None,
+                "created_at": _iso(getattr(m, "created", None))} for m in self.client.models.list()]
+        return sorted(out, key=lambda m: m["id"].lower())
+
+    @staticmethod
+    def error_message(e, model):
+        import openai
+        url = str(getattr(getattr(e, "request", None), "url", "") or "")
+        where = re.sub(r"/v1/.*$", "", url) or "the address in Settings"
+        if isinstance(e, openai.APITimeoutError):
+            return (f"The local AI at {where} took too long to answer. A big model on a slow computer can take "
+                    f"minutes; try a smaller model, or ask a narrower question.")
+        if isinstance(e, openai.APIConnectionError):
+            return (f"Can't reach the local AI at {where}. Check that the server is running and accepts "
+                    f"connections from this computer (Ollama: set OLLAMA_HOST=0.0.0.0 on that computer; "
+                    f"LM Studio: turn on 'Serve on local network'), and that a firewall isn't blocking the port.")
+        if isinstance(e, openai.AuthenticationError):
+            return "The local AI server rejected the key. Check the key in Settings (most local servers need none)."
+        if isinstance(e, openai.NotFoundError):
+            return (f"The local AI server has no model '{model}'. Pick one from the list in Settings "
+                    f"(Ollama: run 'ollama pull {model}' on that computer).")
+        if isinstance(e, openai.APIStatusError):
+            msg = str(getattr(e, "message", "") or e)
+            low = msg.lower()
+            if "context" in low or "too long" in low or "exceed" in low:
+                return ("The conversation no longer fits in the local model's context. Clear the chat, or raise the "
+                        "context size on the server and in Settings.")
+            if "image" in low or "vision" in low or "multimodal" in low:
+                return ("This local model can't read images. Pick a vision model (for example qwen2.5vl or gemma3) "
+                        "or remove the image.")
+            if "tool" in low or "function" in low:
+                return ("This local model doesn't support tools (function calling), which the app needs. "
+                        "Pick a model marked with tool support, ideally 20B parameters or larger.")
+            return f"Local AI error {e.status_code}: {msg}"
+        return None
+
+
+PROVIDERS = {"anthropic": AnthropicProvider, "openai": OpenAIProvider, "local": LocalProvider}
+DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-6.1-sol", "local": ""}
+
+
+def get_provider(name, api_key, base_url=None):
     cls = PROVIDERS.get(name)
     if not cls:
         raise ValueError(f"Unknown AI provider '{name}'")
-    return cls(api_key)
+    return cls(api_key, base_url) if cls is LocalProvider else cls(api_key)
 
 
 def provider_error_message(e, provider_name=None, model=None):

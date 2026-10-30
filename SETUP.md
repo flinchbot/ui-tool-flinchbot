@@ -51,9 +51,9 @@ Python is the language the app is written in. You install it once and never have
 
 > **"python" opens the Microsoft Store instead?** Windows ships a fake `python` shortcut. Open **Settings → Apps → Advanced app settings → App execution aliases** and switch off the two *App Installer python* entries. `start.bat` tries the `py` command first, so you usually won't hit this.
 
-## 2. Get an AI API key (once): Claude or ChatGPT
+## 2. Get an AI API key (once): Claude or ChatGPT, or use a local AI
 
-Pick one. You can add the other later and switch in Settings. Both work the same way in the app: same tools, same approval step, same reports.
+Pick one. You can add the others later and switch in Settings. They work the same way in the app: same tools, same approval step, same reports. To run the AI on your own hardware instead, see Option C below.
 
 **Option A: Claude (Anthropic)**
 
@@ -79,6 +79,29 @@ Treat any API key like a credit card number. Anyone who has it can spend your cr
 | ChatGPT | GPT-6.1 Sol | GPT-6 Astra | GPT-6.1 Terra, GPT-6 Luna |
 
 The two defaults cost about the same, roughly 5–15¢ for a typical health check; prices change, so check each provider's pricing page. The cheapest models are fine for quick lookups like "how many clients?" but tend to miss things in real troubleshooting.
+
+<a id="local-ai"></a>
+
+**Option C: Local AI (your own computer or one in your office)**
+
+Instead of, or as well as, Claude and ChatGPT, the app can use an AI that runs on a computer you own: **Ollama** (Windows, Mac, Linux), **LM Studio** (Windows, Mac), llama.cpp, vLLM, Jan, or anything else that speaks OpenAI's Chat Completions API. Your network data then goes only to that computer. It costs nothing per question, but the answers are only as good as the model, and a model needs a capable computer (a recent graphics card, or an Apple silicon Mac with plenty of memory).
+
+Two things decide whether it works well:
+- **The model must support tools.** The app gives the AI about 40 tools, and small 7–8B models often pick the wrong one. Pick a model with tool support, ideally 20B parameters or larger, for example qwen3, gpt-oss, mistral-small or llama3.3. Approve still stops any bad change.
+- **The server must read a long enough prompt (its context size).** The app's instructions and tool list alone are about 6,000 tokens. Use **32,768** or more. Ollama's default is much smaller, and it silently drops the start of a longer prompt, which is exactly the instructions and tool list.
+
+*Ollama on a PC in your office:*
+1. Install Ollama from **https://ollama.com** and download a model in a terminal, for example `ollama pull qwen3:30b`.
+2. Set two environment variables on that PC (Windows: Settings → System → About → Advanced system settings → Environment Variables), then quit and restart Ollama:
+   - `OLLAMA_CONTEXT_LENGTH` = `32768`
+   - `OLLAMA_HOST` = `0.0.0.0` (only if the app runs on a *different* computer; it makes Ollama accept connections from the network)
+3. Ollama has no password, so in that PC's firewall allow port 11434 only from your own computers.
+
+*LM Studio on a Mac:*
+1. Download a model in LM Studio. When you load it, set **Context Length** to 32768 or more.
+2. Open the **Developer** tab and start the server (port 1234). If the app runs on another computer, turn on **Serve on local network**.
+
+*In the app:* ⚙ Settings → **Local AI**. Pick the server type, type the address (on the same computer `localhost`, otherwise that computer's name or IP, for example `http://office-pc:11434`), or click **🔍 Find on this computer**. Click **Test & load models**, pick a model, then **Check this model**. It checks that the model calls tools, and that the server really reads a prompt as long as the context size you entered. It tells you what to change if not.
 
 ## 3. Create a local-only admin account for the app (required, once per network)
 
@@ -151,8 +174,8 @@ The folder is self-contained, so you can move it or copy it to another PC later.
    - **Mac:** the first time you save a password, macOS may ask whether Python may use your keychain. Click **Always Allow** so passwords are kept in the macOS Keychain.
 2. Your browser opens at `http://127.0.0.1:8080/` and shows a **Welcome** screen:
    - **Step 1, Choose your AI:**
-     1. Pick **Claude** or **ChatGPT**.
-     2. Paste the key and click **Test key & load models**.
+     1. Pick **Claude**, **ChatGPT** or **Local AI** (for Local AI, see [Option C](#local-ai)).
+     2. Paste the key (Local AI: the address) and click **Test key & load models**.
      3. Pick a model, then **Save & continue**.
 
      This writes the `.env` settings file for you; you never need to edit it by hand.
@@ -171,12 +194,13 @@ The folder is self-contained, so you can move it or copy it to another PC later.
 
 - **Ask questions** in the chat, or click a quick prompt such as *Health check*.
 - **📎 Attach text files and images:** click 📎, drag files onto the chat, or paste a screenshot (Ctrl+V / Cmd+V) in the message box to give the AI a log, config export, CSV, or a screenshot or photo alongside your question. Up to 5 files per message: text up to 150,000 characters, images up to 5 MB each (PNG, JPEG, GIF, WebP; BMP, HEIC and TIFF are converted by your browser if it can open them; large images are scaled down to 1568 px, which is all the AI looks at anyway). PDFs and other files are refused. The file is read by your browser and sent with that message. It's never saved to disk, but it stays in the conversation (so you can ask follow-ups) until **Clear chat** or closing the app. It goes to the AI exactly as is, so remove passwords first and crop them out of screenshots. Big files and images make every later question in that chat cost more, because the AI re-reads the whole conversation each time; clear the chat when you're done with them.
+- **⚖ Second opinion:** under each answer you see which AI wrote it. Click **Second opinion** and pick another AI you've set up (Claude, ChatGPT or Local AI). It reads the whole conversation, including the data the first AI gathered, checks the answer, may look up more itself, and replies below: what was right, what was wrong or missing, and its own answer. Your next question goes back to the AI chosen in Settings. If you mainly use a local AI, this sends that conversation to Anthropic or OpenAI, but only when you click it. A change it suggests still waits for **Approve**.
 - **■ Stop:** changed your mind while the AI is working? Click **■** (where Send was) or press **Esc**. The question is dropped, so it isn't part of the conversation, and you can ask something else straight away. If you had just approved a change, the change stays done; only the answer after it is dropped. The AI provider may still charge for what it generated before you stopped it.
 - **Changes:** when the AI wants to restart a device, block a client, change Wi-Fi settings and so on, it shows a card listing exactly what will happen. Nothing changes until you click **Approve**. **Deny** cancels it. With SSH on (step 4), a command that could change the console shows the same card with the exact command.
 - **Another network:** click the connection name at the top → **Add a connection…**. Once you have several, the same menu switches between them. Switching clears the chat so information from one network doesn't get mixed into another.
 - **⚙ Settings:**
-  - switch between **Claude** and **ChatGPT** (switching starts a new conversation)
-  - change API keys or models
+  - switch between **Claude**, **ChatGPT** and **Local AI** (the conversation carries on with the new AI)
+  - change API keys or models, and the Local AI address
   - change the app's port
   
   The model list is live from the provider. If your chosen model is ever deprecated, a banner tells you its retirement date.
@@ -287,7 +311,7 @@ Then start the app again.
 
 | What | Where |
 |---|---|
-| AI choice, API key(s), models, port | `.env` file in the app folder |
+| AI choice, API key(s), models, Local AI address and context size, port | `.env` file in the app folder |
 | Connection details (name, address, port, site, username, SSH on/off, SSH username and port) | `data\connections.json` |
 | Change log, speed tests this app ran | `data\audit.jsonl`, `data\speedtests.jsonl` |
 | AI token use and estimated cost, prices and budget | `data\usage.jsonl`, `data\prices.json` |
@@ -301,7 +325,7 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 `.env` and `data\` are excluded from git, so they're never uploaded to GitHub. Don't email or share them.
 
 **What leaves this computer:**
-- When you ask a question, the network data the AI needs goes to the AI provider you chose (Anthropic or OpenAI): device names, client names, IPs, settings and logs.
+- When you ask a question, the network data the AI needs goes to the AI you chose: Anthropic, OpenAI, or your Local AI server. That data is device names, client names, IPs, settings and logs. With Local AI it stays on that computer, unless you click **Second opinion** and pick Claude or ChatGPT.
 - Wi-Fi passwords and other secret fields are **removed first**. (Files you attach and SSH command output are sent as they are; that removal only applies to data the app reads from the UniFi API.)
 - ChatGPT requests are sent with OpenAI's "don't store" option.
 - **↻ Update prices** (AI usage) downloads LiteLLM's public price list from GitHub. Nothing is sent with that request.
@@ -355,6 +379,10 @@ If that password store isn't available, passwords fall back to `data/secrets.jso
 | Restore script: *NOT FOUND: nothing in … has name = …* | That command needs something that isn't there yet (its comment says what). Run that one first, then this one again. |
 | Restore script: *FAILED: HTTP 400 …* | The console refused that setting; its reason follows. Usually a newer UniFi version names a setting differently: set that one by hand in the UniFi UI and carry on with the rest. |
 | The cost meter shows **—** for a model | The app has no price for it. Click the meter → **↻ Update prices**, or ✎ to type the price from your provider's pricing page. |
+| *Can't reach the local AI at …* | The AI server isn't running, or doesn't accept connections from this computer. On the AI computer: Ollama needs `OLLAMA_HOST=0.0.0.0` (then restart Ollama); LM Studio needs **Serve on local network**. Check its firewall allows the port (11434 for Ollama, 1234 for LM Studio). See [Option C](#local-ai). |
+| **Check this model** says the model *didn't call a tool* | That model can't use tools, or is too small to do it reliably. Pick one with tool support, ideally 20B or larger (qwen3, gpt-oss, mistral-small, llama3.3). |
+| **Check this model** says the server *read only part* of the test | Its context size is smaller than the one in Settings, so it would silently cut long conversations. Ollama: set `OLLAMA_CONTEXT_LENGTH` to the same number and restart Ollama. LM Studio: reload the model with a larger **Context Length**. |
+| Local AI answers are slow | A big model on a computer without a strong graphics card (or Apple silicon) can take minutes. Try a smaller model, or ask narrower questions. **■ Stop** ends a slow answer. |
 | *Couldn't download the price list* or *Couldn't reach GitHub*: … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate | Python from python.org on a Mac ships without root certificates. Since v2.10.0 the app brings its own (the `certifi` package), and the startup check shows **Certs** with how many it found. On an older version the updater can't reach GitHub to fetch that fix: open **Applications → Python 3.x** in Finder, double-click **Install Certificates.command**, then click **Check now** under Updates. |
 
 Still stuck? Run the diagnostic and send its output to whoever is helping you. It contains no passwords.

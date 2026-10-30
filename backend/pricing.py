@@ -181,7 +181,7 @@ def set_budget(dollars):
 
 # ── usage log ─────────────────────────────────────────────────────────────────
 def record(provider, model, u, kind, chat_id, connection=None):
-    d, src = cost(model, u)
+    d, src = (0.0, "local AI (no charge)") if provider == "local" else cost(model, u)
     rec = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), "provider": provider, "model": model,
            "kind": kind, "chat": chat_id, "connection": connection, **{k: int(u.get(k, 0)) for k in
                                                                        ("input", "cache_write", "cache_read", "output")},

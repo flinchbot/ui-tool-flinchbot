@@ -15,8 +15,10 @@ A local web app for chatting with **flinchbot**, an AI network assistant, about 
 - **Setup and settings in the browser.** The first-run wizard and the ⚙ Settings screen write `.env` for you. Nothing needs editing by hand.
 - **Works with:** UniFi OS consoles (UDM/UDR/UCG/Cloud Key Gen2+), UniFi OS Server, and self-hosted Network Applications. The console type is auto-detected.
 - **Login methods:** a **local-only** console account (username/password), or a UniFi API key. UI.com cloud/SSO accounts with two-factor sign-in can't be used by apps; the app detects this and explains what to do.
-- **flinchbot, powered by Claude or ChatGPT.** In the chat the assistant is always *flinchbot*; About, exports and reports show which provider and model answered.
-- **Claude or ChatGPT.** Save an API key for either or both and switch in Settings. Both get the same tools, approval gate, redaction and reports. OpenAI calls are sent with `store=false`, so OpenAI doesn't keep the conversation.
+- **flinchbot, powered by Claude, ChatGPT or a local AI.** In the chat the assistant is always *flinchbot*; a small line under each answer, exports and reports show which AI and model answered.
+- **Claude, ChatGPT or Local AI.** Save an API key for Claude and/or ChatGPT, set up a local AI, and switch in Settings; the conversation carries on with the new AI. All get the same tools, approval gate, redaction and reports. OpenAI calls are sent with `store=false`, so OpenAI doesn't keep the conversation.
+- **Local AI:** any server that speaks OpenAI's Chat Completions API: Ollama, LM Studio (including Apple MLX models), llama.cpp, vLLM, Jan, or a hosted one like OpenRouter. Settings has presets for the usual ports, **Find on this computer**, and **Check this model**, which confirms the model calls tools and measures whether the server really reads a prompt as long as the context size set (Ollama silently cuts longer prompts by default). The app trims older chat to fit that context. Local answers cost $0 in the cost meter.
+- **⚖ Second opinion:** under each answer, ask another AI you've set up to check it. It sees the whole conversation, including the data the first AI gathered, can call tools itself, and says what was right, wrong or missing. Changes it suggests wait for Approve. The conversation is one record any of the AIs can read: each AI's own turns go back to it exactly as they came, and turns from another AI are rebuilt from their text and tool calls.
 - **Write approval enforced in code.** The AI can request a change, but only the Approve button runs it.
 - **Optional SSH per connection (off by default).** Turn it on for a console and flinchbot gets one more tool, `ssh_command`, for what the API can't show: system log, processes, memory, disk, config files, interface errors. Health checks and the action report then include those. Read-only commands run at once; anything else (or anything the app can't classify) goes through the same Approve card with the exact command. The host key is pinned on **Test SSH**, and the SSH password lives in Credential Manager next to the UniFi login.
 - **Secrets kept out of files:**
@@ -64,7 +66,7 @@ start.bat              Windows launcher: creates .venv, installs requirements, s
 start.command          the same for macOS / Linux (double-click on a Mac)
 backend/server.py      local HTTP server + API routes (serves the frontend too)
 backend/agent.py       tool definitions, approval gate, tool-use loop, action report
-backend/providers.py   Claude (Messages API) and ChatGPT (Responses API) adapters
+backend/providers.py   Claude (Messages API), ChatGPT (Responses API) and Local AI (Chat Completions) adapters, and the shared conversation record
 backend/unifi_client.py UniFi API client (UniFi OS + standalone, pinning, re-login)
 backend/ssh_client.py  optional SSH to the console: host-key pinning, read-only command classifier
 backend/topology.py    device tree + problem-client rules, and the SVG renderer
@@ -102,7 +104,7 @@ Not committed (see `.gitignore`):
 - Packages: `anthropic`, `openai`, `keyring`, `paramiko`, `cryptography` (installed by `start.bat` / `start.command`).
 - Optional: [Nmap](https://nmap.org/download) for device scans (Windows/macOS installer, or `brew install nmap`).
 - Run without the launcher: `python backend/server.py [--port N] [--no-browser]`.
-- Tested on 2026-10-28 with anthropic 2.3.0, openai 3.40.0 and Python 3.13/3.14, against a simulated UniFi OS console, a simulated standalone controller, fake Anthropic/OpenAI APIs, and read-only calls to a real UniFi Network 10.6.109 console.
+- Tested on 2026-10-30 with anthropic 2.3.0, openai 3.40.0 and Python 3.13/3.14, against a simulated UniFi OS console, a simulated standalone controller, fake Anthropic/OpenAI APIs, and read-only calls to a real UniFi Network 10.6.109 console.
 
 ## Known limitations
 
@@ -113,6 +115,7 @@ Not committed (see `.gitignore`):
 - **Attachments and SSH output aren't redacted.** Secret-field removal applies to UniFi API data, not to files or images you attach or to what a command prints over SSH. Crop passwords out of screenshots before attaching them.
 - **Reset-kit restore commands depend on the private API.** They were tested against a simulated console, not a real factory reset. A setting that a newer UniFi version renamed makes that one command fail with the console's reason; the others carry on.
 - **A release is a version bump on main.** The updater compares `APP_VERSION` in `backend/server.py` on GitHub's main branch with the running one, so pushing a commit that raises it offers the update to everyone. Files a new version deletes are left in place (the update writes over the top).
+- **Local AI quality depends on the model.** Small models often call the wrong tool or invent arguments. Approve still guards every change. A local server has no password: anyone who can reach its port can use it.
 - **Cost is an estimate.** Token counts are exact; dollars use published prices and leave out taxes, discounts and batch/priority pricing.
 - **SSH read-only detection is an allowlist.** Only known commands with no state-changing options count as read-only; everything else needs approval. That errs on the side of asking, so expect an Approve card now and then for a harmless command.
 
