@@ -118,24 +118,49 @@ def _parse(xml_text):
             ports.append(dict(svc, port=num, protocol=pt.get("protocol"),
                               risk=RISKY_PORTS.get(num)))
         hostnames = [n.get("name") for n in h.findall("hostnames/hostname") if n.get("name")]
-        hosts.append({"ip": addr, "mac": mac, "status": status, "hostnames": hostnames, "open_ports": ports})
+        hosts.append({"ip": addr, "mac": mac, "status": status, "hostnames": hostnames, "open_ports": ports,
+                      "timed_out": h.get("timedout") == "true"})
     return hosts
+
+
+def _is_v6(ip):
+    return ipaddress.ip_address(ip).version == 6
 
 
 def identify(ip):
     """Service/version scan of one device's 200 most common TCP ports (about 30-90 s)."""
     ip = check_target(ip)
-    out = _run(["-sT", "-sV", "--version-light", "-Pn", "-T4", "--top-ports", "200",
-                "--host-timeout", f"{IDENTIFY_TIMEOUT - 10}s", "-oX", "-", ip], IDENTIFY_TIMEOUT)
+    out = _run(["-sT", "-sV", "--version-light", "-Pn", "-T4", "--top-ports", "200"]
+               + (["-6"] if _is_v6(ip) else [])
+               + ["--host-timeout", f"{IDENTIFY_TIMEOUT - 10}s", "-oX", "-", ip], IDENTIFY_TIMEOUT)
     hosts = _parse(out)
     return hosts[0] if hosts else {"ip": ip, "open_ports": [], "status": "unknown"}
 
 
 def sweep(ips):
-    """Check many devices for the risky ports only (fast)."""
-    ips = [check_target(i) for i in ips][:MAX_SWEEP_HOSTS]
-    if not ips:
-        return []
+    """Check many devices for the risky ports only (fast). One Nmap run covers IPv4 only (Nmap
+    needs -6 for IPv6 and can't mix them), at most MAX_SWEEP_HOSTS devices.
+    -> {"hosts": devices with risky ports open, "requested", "submitted" (sent to Nmap),
+        "skipped", "skipped_reason", "timed_out": [ips Nmap gave up on: unknown, not clean]}"""
+    ips = list(dict.fromkeys(check_target(i) for i in ips))
+    v4 = [i for i in ips if not _is_v6(i)]
+    submitted = v4[:MAX_SWEEP_HOSTS]
+    reasons = []
+    if len(v4) > MAX_SWEEP_HOSTS:
+        reasons.append(f"only the first {MAX_SWEEP_HOSTS} are scanned at once")
+    if len(v4) < len(ips):
+        reasons.append("IPv6-only addresses aren't swept")
+    res = {"hosts": [], "requested": len(ips), "submitted": len(submitted), "skipped": len(ips) - len(submitted),
+           "skipped_reason": "; ".join(reasons), "timed_out": []}
+    if not submitted:
+        return res
     ports = ",".join(str(p) for p in sorted(RISKY_PORTS))
-    out = _run(["-sT", "-Pn", "-T4", "--open", "-p", ports, "--host-timeout", "60s", "-oX", "-"] + ips, SWEEP_TIMEOUT)
-    return [h for h in _parse(out) if h["open_ports"]]
+    # No --open: every host comes back, so a device Nmap never reported on (or gave up on) is
+    # known to be unchecked instead of silently looking clean.
+    out = _run(["-sT", "-Pn", "-T4", "-p", ports, "--host-timeout", "60s", "-oX", "-"] + submitted,
+               SWEEP_TIMEOUT)
+    hosts = _parse(out)
+    finished = {h["ip"] for h in hosts if not h.get("timed_out")}
+    res["timed_out"] = [ip for ip in submitted if ip not in finished]
+    res["hosts"] = [h for h in hosts if h["open_ports"]]      # open ports seen before a timeout still count
+    return res

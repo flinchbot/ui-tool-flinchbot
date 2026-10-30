@@ -407,20 +407,42 @@ def _client_fields(f):
     return out
 
 
-def variance(snap, baseline=None):
-    """-> {"items": [...], "summary": {...}, "exact": bool, "unavailable": {...}}.
+def _has_mask(v):
+    if isinstance(v, str):
+        return v in _MASKS
+    if isinstance(v, dict):
+        return any(_has_mask(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_has_mask(x) for x in v)
+    return False
+
+
+def variance(snap, baseline=None, full=None, base_full=None):
+    """-> {"items": [...], "summary": {...}, "exact": bool, "secrets_compared": bool, "unavailable": {...}}.
 
     Each item: id, section, title, label, kind ("added" | "changed" | "current"),
     fields {field: value} (secrets masked), changed_fields, notes.
+
+    Passwords and keys are masked in both `snap` and `baseline`, so masks alone can't say
+    whether they differ. With `full` and `base_full` (the same two with their secrets, never
+    sent to the browser) they are compared for real and only the field name is reported.
+    Without them a secret field counts as changed: unknown is not "the same", and a restore
+    script that left it out could leave the console without a password it needs.
     """
-    base_idx = {}
+    base_idx, base_full_idx = {}, {}
+    compared = bool(baseline and base_full and full)
     if baseline:
         for sec, objs in baseline.get("sections", {}).items():
             for o in objs:
                 base_idx[(sec,) + identity(sec, o)] = o
+    if compared:
+        for sec, objs in base_full.get("sections", {}).items():
+            for o in objs:
+                base_full_idx[(sec,) + identity(sec, o)] = o
     items = []
     for sec, _title, _path in COLLECTIONS:
-        for o in snap.get("sections", {}).get(sec, []):
+        full_objs = (full or {}).get("sections", {}).get(sec, []) if compared else []
+        for n, o in enumerate(snap.get("sections", {}).get(sec, [])):
             if sec == "policies" and o.get("predefined"):
                 continue
             if sec in REF_ONLY and builtin(sec, o):
@@ -443,11 +465,28 @@ def variance(snap, baseline=None):
                         item["changed_fields"] = sorted(fields)
                 else:
                     bf = _item_fields(sec, b)
-                    diff = sorted(k for k, v in fields.items() if v not in _MASKS and _cmp(v) != _cmp(bf.get(k)))
+                    fo = full_objs[n] if n < len(full_objs) else None
+                    bo = base_full_idx.get((sec,) + ident)
+                    ff = _item_fields(sec, fo) if fo is not None else None
+                    bff = _item_fields(sec, bo) if bo is not None else None
+                    diff, unknown = [], False
+                    for k, v in fields.items():
+                        if not (_has_mask(v) or _has_mask(bf.get(k))):
+                            if _cmp(v) != _cmp(bf.get(k)):
+                                diff.append(k)
+                        elif ff is not None and bff is not None:
+                            if _cmp(ff.get(k)) != _cmp(bff.get(k)):
+                                diff.append(k)
+                        else:
+                            diff.append(k)
+                            unknown = True
                     if not diff:
                         continue
+                    diff.sort()
                     item["kind"] = "changed"
                     item["changed_fields"] = diff
+                    if unknown:
+                        item["notes"].append("Passwords and keys couldn't be compared, so they are included.")
             elif per_object:
                 item["kind"] = "changed"
                 item["changed_fields"] = sorted(fields)
@@ -470,7 +509,7 @@ def variance(snap, baseline=None):
         it["summary"] = _summ(it["section"], it["fields"])
     summary = {k: sum(1 for i in items if i["kind"] == k) for k in ("added", "changed", "current")}
     return {"items": items, "summary": summary, "exact": baseline is not None,
-            "unavailable": snap.get("unavailable", {})}
+            "secrets_compared": compared, "unavailable": snap.get("unavailable", {})}
 
 
 # ── 4. the SSH script ─────────────────────────────────────────────────────────
@@ -742,10 +781,11 @@ def _summ(sec, f):
     return ""
 
 
-def script(snap, full=None, selected=None, embed_secrets=False, baseline=None):
+def script(snap, full=None, selected=None, embed_secrets=False, baseline=None, base_full=None):
     """The SSH script as text, plus stats. `snap` has secrets masked; `full` (the
-    decrypted snapshot) is used only when embed_secrets is True."""
-    v = variance(snap, baseline)
+    decrypted snapshot) is written in only when embed_secrets is True. With a baseline,
+    `full` and `base_full` let the comparison see which passwords really differ."""
+    v = variance(snap, baseline, full=full, base_full=base_full)
     items = [it for it in v["items"] if selected is None or it["id"] in selected]
     by_id = {}
     for sec, objs in snap.get("sections", {}).items():

@@ -318,18 +318,31 @@ def _unknown_clients(c):
 
 
 def scorecard_data(c):
-    g = lambda path: _safe(lambda: c._data(c.get(c.api(path))))
-    v2 = lambda path: _safe(lambda: c.get(c.v2(path)))
-    return {"wlans": c.get_wlans(), "networks": _safe(c.get_networks), "devices": c.get_devices(),
-            "clients": c.get_clients(), "settings": g("rest/setting"), "port_forwards": _safe(c.get_port_forwards),
-            "policies": v2("firewall-policies"), "zones": v2("firewall/zone")}
+    """Everything the scorecard and handbook look at. Optional sections that can't be read come
+    back empty, and data["unavailable"] says which and why: "couldn't read the port forwards"
+    must never look like "there are no port forwards"."""
+    unavailable = {}
+
+    def opt(key, fn):
+        try:
+            return fn()
+        except UniFiError as e:
+            unavailable[key] = {"kind": e.kind, "error": str(e)}
+            return []
+    return {"wlans": c.get_wlans(), "networks": opt("networks", c.get_networks), "devices": c.get_devices(),
+            "clients": c.get_clients(), "settings": opt("settings", lambda: c._data(c.get(c.api("rest/setting")))),
+            "port_forwards": opt("port_forwards", c.get_port_forwards),
+            "policies": opt("policies", lambda: c.get(c.v2("firewall-policies"))),
+            "zones": opt("zones", lambda: c.get(c.v2("firewall/zone"))), "unavailable": unavailable}
 
 
 def _scorecard(c):
-    findings, passed = scorecard.check(scorecard_data(c))
+    data = scorecard_data(c)
+    findings, passed = scorecard.check(data)
     findings = scorecard.sort(findings)
-    return dict(scorecard.grade(findings), findings=[{k: v for k, v in f.items() if k != "ask"} for f in findings],
-                passed=passed)
+    unchecked = scorecard.coverage(data)
+    return dict(scorecard.grade(findings, unchecked), findings=[{k: v for k, v in f.items() if k != "ask"} for f in findings],
+                passed=passed, unchecked=unchecked)
 
 
 def _scan_client(c, mac):
@@ -566,9 +579,9 @@ class Agent:
         self._on_usage     = on_usage        # (provider, model, usage, kind, chat_id) after every AI call
         self.chat_id       = uuid.uuid4().hex[:12]   # changes on Clear chat; groups usage per conversation
         self._notes        = []              # app notes for the model, sent with the next user message
-        self._last_result  = None            # raw result of the last tool run (for undo of creates)
+        self._op           = None            # the connection the chat operation in progress belongs to
         self.history = []                    # the conversation record (see providers.py), any AI can read it
-        self.pending = None                  # {"results": [...], "writes": [...]}
+        self.pending = None                  # {"results", "writes", "via", "pid" (proposal id), "op" (connection)}
         self._names  = {}                    # mac -> friendly name, for approval cards
         self._executed = False               # did the current turn run any tool?
         self._stop   = threading.Event()     # set by stop(); checked between rounds of the tool loop
@@ -611,9 +624,46 @@ class Agent:
                 self._notes.append(str(text)[:500])
 
     def pending_view(self):
+        """The approval card. Each item carries the proposal id: Approve/Deny must send it
+        back, so a card from another tab or an older answer can't approve a different action."""
         if not self.pending:
             return None
-        return [self._describe(w) for w in self.pending["writes"]]
+        return [dict(self._describe(w), proposal=self.pending["pid"]) for w in self.pending["writes"]]
+
+    # the connection an operation belongs to --------------------------------------
+    OP_KEYS = ("id", "host", "port", "site")
+
+    def _op_context(self):
+        """The active connection, captured when an operation starts. Everything the operation
+        runs, snapshots for undo and writes to the change log is bound to it."""
+        ctx = self._get_context() or {}
+        return {k: ctx.get(k) for k in self.OP_KEYS + ("name",)}
+
+    def _same_network(self, op, profile, error=UniFiError):
+        """Raise if `profile` (or, without one, the active connection) isn't the one `op`
+        started on: switching or editing the connection mid-answer must never move the work
+        to another network."""
+        if not op or not op.get("id"):
+            return
+        now = profile if isinstance(profile, dict) and profile.get("id") else (self._get_context() or {})
+        if any(now.get(k) != op.get(k) for k in self.OP_KEYS if k in now):
+            raise error(f"The active connection changed while this was being worked on (it started on "
+                        f"“{op.get('name')}”), so nothing more was run. Ask again on the network you want.",
+                        "switched")
+
+    def _client(self, op):
+        self._same_network(op, None)
+        c = self._get_client()
+        self._same_network(op, getattr(c, "profile", None))
+        return c
+
+    def _ssh(self, op):
+        self._same_network(op, None, SSHError)
+        s = self._get_ssh()
+        pid = getattr(s, "profile_id", None)
+        if op and op.get("id") and pid and pid != op["id"]:
+            self._same_network(op, {"id": pid}, SSHError)
+        return s
 
     @staticmethod
     def attach(text, files):
@@ -643,7 +693,8 @@ class Agent:
             if total > MAX_FILE_CHARS:
                 raise AgentError(f"Attachments are too large: {MAX_FILE_CHARS:,} characters per message at most.")
             safe = name.replace('"', "'").replace("<", "(").replace(">", ")")
-            parts.append(f'<attached_file name="{safe}">\n{body.replace("</attached_file>", "<\\/attached_file>")}\n</attached_file>')
+            body = body.replace("</attached_file>", "<\\/attached_file>")    # outside the f-string: Python 3.10/3.11
+            parts.append(f'<attached_file name="{safe}">\n{body}\n</attached_file>')
         text = (text or "").strip()
         if not text and (parts or images):
             what = "file" if parts and not images else "image" if images and not parts else "attachment"
@@ -687,6 +738,7 @@ class Agent:
             if found:
                 text = text + "\n\n" + found["block"]
             snapshot = (list(self.history), self.pending, list(self._notes))
+            self._op = self._op_context()
             self.fallback_offer = None        # a new message replaces the question that was waiting
             if self._notes:
                 text = "\n".join(f"[App note: {n}]" for n in self._notes) + "\n\n" + text
@@ -716,34 +768,61 @@ class Agent:
             finally:
                 self._live = None
 
-    def decide(self, approve):
+    def decide(self, approve, proposal=None):
+        """Approve or deny the action that is waiting. `proposal` is the id shown on the card;
+        when given it must match the action waiting now (the web UI always sends it).
+        Stop works from the moment this starts: an action already running finishes (a write
+        can't be taken back half-way), the rest of a batch is not started, and the AI doesn't
+        carry on. Every action's result goes into the conversation even if the change log
+        can't be written, so the conversation never holds an unanswered tool call."""
         with self.lock:
             if not self.pending:
                 raise AgentError("There is no action waiting for approval.")
+            if proposal is not None and proposal != self.pending.get("pid"):
+                raise AgentError("This approval card is out of date: the action waiting now is a different "
+                                 "one. Use the latest card in the chat (reload the page if you don't see it).")
+            op = self.pending.get("op") or self._op_context()
+            try:
+                self._same_network(op, None)
+            except UniFiError as e:
+                self.pending = None
+                raise AgentError(str(e))
             settings, provider = self._provider(self.pending.get("via"))   # the AI that asked carries on
             pending, self.pending = self.pending, None
-            results, changes = list(pending["results"]), []
-            for w in pending["writes"]:
-                d = self._describe(w)
-                if approve:
-                    prep, note = self._changes.prepare(w["name"], w["input"]) if self._changes else (None, None)
-                    r = self._execute(w["id"], w["name"], w["input"])
-                    results.append(r)
-                    if self._changes:
-                        rec = self._changes.record(w["name"], w["input"], d["label"], "approved", r, prep, note=note,
-                                                   target=d["target"], result_obj=self._last_result)
-                        changes.append({"id": rec["id"], "label": d["label"], "target": d["target"],
-                                        "ok": rec.get("ok"), "can_undo": bool(rec.get("rollback")),
-                                        "undo": (rec.get("rollback") or {}).get("describe")})
-                else:
-                    results.append(self._tool_result(
-                        w["id"], "The user declined this action. Do not retry it unless they ask.", True))
-                    if self._changes:
-                        self._changes.record(w["name"], w["input"], d["label"], "denied", target=d["target"])
-            self._append_user(results)
-            mark = len(self.history)
+            self._op = op
             self._begin(provider)
+            results, changes = list(pending["results"]), []
             try:
+                for w in pending["writes"]:
+                    d = self._describe(w)
+                    if approve and self._stop.is_set():
+                        results.append(self._tool_result(
+                            w["id"], "Not run: the user pressed Stop before this action started.", True))
+                        changes.append(self._log_change(w, d, "not run (stopped)", op=op, ok=False))
+                    elif approve:
+                        prep, note = self._changes.prepare(w["name"], w["input"],
+                                                           get_client=lambda: self._client(op)) \
+                            if self._changes else (None, None)
+                        r, raw = self._execute(w["id"], w["name"], w["input"], op=op)
+                        results.append(r)
+                        changes.append(self._log_change(w, d, "approved", r, prep, note, raw, op))
+                    else:
+                        results.append(self._tool_result(
+                            w["id"], "The user declined this action. Do not retry it unless they ask.", True))
+                        self._log_change(w, d, "denied", op=op)
+            except BaseException:
+                self._live = None
+                raise
+            finally:
+                done = {r["id"] for r in results}
+                results += [self._tool_result(w["id"], "Not run: the batch stopped before this action.", True)
+                            for w in pending["writes"] if w["id"] not in done]
+                self._append_user(results)
+                changes = [c for c in changes if c]
+            mark = len(self.history)
+            try:
+                if self._stop.is_set():
+                    raise _Stopped()
                 out = self._run_chain(settings, provider)
             except _Stopped:
                 # The approved changes did run: keep them and their results, drop what came after.
@@ -755,6 +834,26 @@ class Agent:
                 self._live = None
             out["changes"] = changes
             return out
+
+    def _log_change(self, w, d, decision, result=None, prep=None, note=None, raw=None, op=None, ok=None):
+        """Write one decision to the change log. -> what the approval card shows, or None.
+        A change log that can't be written (disk full, permissions) must not hide that the
+        change ran: the card says so and Undo is not offered."""
+        if not self._changes:
+            return None
+        ran_ok = (not result.get("is_error")) if result is not None else ok
+        try:
+            rec = self._changes.record(w["name"], w["input"], d["label"], decision, result, prep, note=note,
+                                       target=d["target"], result_obj=raw, profile=op)
+        except Exception as e:
+            print(f"  change log failed: {type(e).__name__}: {e}")
+            what = "ran" if ran_ok else "was attempted" if result is not None else "was decided"
+            return {"id": None, "label": d["label"], "target": d["target"], "ok": ran_ok, "can_undo": False,
+                    "undo": None, "log_error": f"The change {what}, but it couldn't be written to the change log "
+                                               f"({type(e).__name__}: {e}), so Undo isn't available for it."}
+        return {"id": rec["id"], "label": d["label"], "target": d["target"], "ok": rec.get("ok", ran_ok),
+                "can_undo": bool(rec.get("rollback")), "undo": (rec.get("rollback") or {}).get("describe"),
+                "skipped": decision.startswith("not run")}
 
     def second_opinion(self, target):
         """Ask another AI (target: "anthropic", "openai" or "local") to check the latest answer.
@@ -775,6 +874,7 @@ class Agent:
                                  f"({settings['model']}). Pick another AI for a second opinion.")
             who = f"{PROVIDERS.get(first.get('provider'), provider).label} ({first.get('model') or 'unknown model'})"
             snapshot = (list(self.history), self.pending, list(self._notes))
+            self._op = self._op_context()
             notes = "".join(f"[App note: {n}]\n" for n in self._notes)
             self._notes = []
             self._append_user(text=notes + (
@@ -812,6 +912,7 @@ class Agent:
                                    "unanswered.")
                 return {"reply": "", "pending": None, "declined": True}
             settings, provider = self._provider(offer["to"])
+            self._op = self._op_context()
             mark = len(self.history)
             self._begin(provider)
             try:
@@ -991,19 +1092,23 @@ class Agent:
             if isinstance(it, dict) and it.get("mac"):
                 self._names[it["mac"].lower()] = it.get("name") or it.get("hostname") or it["mac"]
 
-    def _execute(self, tool_id, name, inp):
-        self._executed = True
-        self._last_result = None
+    def _execute(self, tool_id, name, inp, op=None, track=True):
+        """Run one tool on the connection `op` started on. -> (tool result for the AI, raw result).
+        The raw result is returned, not kept on the agent: a report running at the same time
+        must not be able to swap it (undo of a create deletes the object it names).
+        track=False (reports): leave the chat's own bookkeeping alone."""
+        if track:
+            self._executed = True
         if inp is None:
-            return self._tool_result(tool_id, json.dumps({"error": "Tool arguments were not valid JSON"}), True)
+            return self._tool_result(tool_id, json.dumps({"error": "Tool arguments were not valid JSON"}), True), None
         try:
             inp = validate_input(inp)
         except ToolInputError as e:
-            return self._tool_result(tool_id, json.dumps({"error": str(e)}), True)
+            return self._tool_result(tool_id, json.dumps({"error": str(e)}), True), None
         print(f"  tool: {name}({json.dumps(_mask_for_display(inp))})")
         try:
             if name == SSH_TOOL_NAME:
-                result = self._run_ssh(inp)
+                result = self._run_ssh(inp, op)
             elif name == WAN_TOOL_NAME:
                 if not self._get_wan:
                     raise UniFiError("WAN history isn't available in this mode.", "input")
@@ -1011,6 +1116,7 @@ class Agent:
                     days = max(1, min(int(inp.get("days") or 7), 90))
                 except (TypeError, ValueError):
                     days = 7
+                self._same_network(op, None)
                 result = self._get_wan(days)
             elif name == KNOW_TOOL_NAME:
                 if not self._knowledge:
@@ -1021,18 +1127,18 @@ class Agent:
                     k = 5
                 result = self._knowledge.search(str(inp.get("query") or ""), k)
             else:
-                result = EXECUTORS[name](self._get_client(), inp)
-            self._last_result = result
-            self._remember_names(name, result)
-            return self._tool_result(tool_id, to_tool_text(result))
+                result = EXECUTORS[name](self._client(op), inp)
+            if track:
+                self._remember_names(name, result)
+            return self._tool_result(tool_id, to_tool_text(result)), result
         except KeyError as e:
-            return self._tool_result(tool_id, json.dumps({"error": f"Missing required input {e}"}), True)
+            return self._tool_result(tool_id, json.dumps({"error": f"Missing required input {e}"}), True), None
         except (UniFiError, SSHError) as e:
-            return self._tool_result(tool_id, json.dumps({"error": str(e)}), True)
+            return self._tool_result(tool_id, json.dumps({"error": str(e)}), True), None
         except Exception as e:  # keep the conversation alive on unexpected errors
-            return self._tool_result(tool_id, json.dumps({"error": f"{type(e).__name__}: {e}"}), True)
+            return self._tool_result(tool_id, json.dumps({"error": f"{type(e).__name__}: {e}"}), True), None
 
-    def _run_ssh(self, inp):
+    def _run_ssh(self, inp, op=None):
         if not self._get_context().get("ssh_enabled") or self._get_ssh is None:
             raise SSHError("SSH is not turned on for this connection, so ssh_command can't be used. "
                            "Answer from the API tools instead.", "disabled")
@@ -1043,7 +1149,7 @@ class Agent:
             timeout = max(5, min(int(inp.get("timeout") or 60), 300))
         except (TypeError, ValueError):
             timeout = 60
-        return self._get_ssh().run(command, timeout=timeout)
+        return self._ssh(op).run(command, timeout=timeout)
 
     def _usage(self, settings, turn, kind):
         if self._on_usage:
@@ -1206,12 +1312,13 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
                     except ToolInputError as e:
                         results.append(self._tool_result(c["id"], json.dumps({"error": str(e)}), True))
                 elif c["name"] in EXECUTORS_ALL:
-                    results.append(self._execute(c["id"], c["name"], c["input"]))
+                    results.append(self._execute(c["id"], c["name"], c["input"], op=self._op)[0])
                 else:
                     results.append(self._tool_result(c["id"], json.dumps({"error": f"Unknown tool {c['name']}"}), True))
 
             if writes:
-                self.pending = {"results": results, "writes": writes, "via": settings["provider"]}
+                self.pending = {"results": results, "writes": writes, "via": settings["provider"],
+                                "pid": uuid.uuid4().hex[:16], "op": self._op}
                 return {"reply": "\n\n".join(texts), "pending": self.pending_view(), "by": by}
             self._append_user(results)
 
@@ -1220,13 +1327,15 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
             f"if you want me to keep going.)_"]), "pending": None, "by": by}
 
     # ── action report ─────────────────────────────────────────────────────────
-    def generate_report(self, progress=None):
+    def generate_report(self, progress=None, op=None):
         """Read-only whole-network review -> structured, prioritised findings.
 
-        Runs separately from the chat (doesn't touch chat history). Only read tools
-        are offered, so nothing can be changed. The model must finish by calling
+        Runs separately from the chat (doesn't touch chat history or its state), on the
+        connection `op` (default: the active one when it starts). Only read tools are
+        offered, so nothing can be changed. The model must finish by calling
         submit_report, whose input is the report.
         """
+        op = op or self._op_context()
         settings, provider = self._provider()
         tools = [t for t in self._tools() if t["name"] not in WRITE_NAMES] + [REPORT_TOOL]
         history = []
@@ -1255,7 +1364,7 @@ signal, high retries, outdated firmware, security gaps), use short sections and 
                 if c["name"] in EXECUTORS_ALL and not needs_approval(c["name"], c["input"]):
                     if progress:
                         progress(c["name"])
-                    results.append(self._execute(c["id"], c["name"], c["input"]))
+                    results.append(self._execute(c["id"], c["name"], c["input"], op=op, track=False)[0])
                 else:
                     results.append(self._tool_result(c["id"], json.dumps({"error": "Not available in report mode"}), True))
             provider.append_user(history, results)

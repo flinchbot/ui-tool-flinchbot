@@ -567,26 +567,34 @@ def start_embedding():
     return True
 
 
+def _chunk_key(c):
+    """What a vector belongs to: the passage itself, not its position. The list can be
+    reordered or rebuilt (an import, an edited or deleted document) while a batch is out."""
+    return c.get("doc"), c.get("title"), c.get("section"), c.get("text")
+
+
 def _embed_all():
     try:
         with _lock:
             idx = _load()
-            todo = [i for i, c in enumerate(idx["chunks"]) if "vec" not in c]
+            todo = [{"key": _chunk_key(c), "text": f"{c['title']}. {c['section']}\n{c['text']}"}
+                    for c in idx["chunks"] if "vec" not in c]
             _job["total"] = len(todo)
             model = idx.get("embed_model")
         for start in range(0, len(todo), EMBED_BATCH):
             batch = todo[start:start + EMBED_BATCH]
-            with _lock:
-                texts = [f"{idx['chunks'][i]['title']}. {idx['chunks'][i]['section']}\n{idx['chunks'][i]['text']}"
-                         for i in batch]
-            vecs = embed(texts, "doc")
+            vecs = embed([b["text"] for b in batch], "doc")
             with _lock:
                 idx = _load()
                 if idx.get("embed_model") != model:          # settings changed under us: start again later
                     break
-                for i, v in zip(batch, vecs):
-                    if i < len(idx["chunks"]):
-                        idx["chunks"][i]["vec"] = v
+                waiting = {}
+                for c in idx["chunks"]:
+                    if "vec" not in c:
+                        waiting.setdefault(_chunk_key(c), []).append(c)
+                for b, v in zip(batch, vecs):
+                    for c in waiting.get(b["key"], ()):       # gone or changed meanwhile: nothing to attach
+                        c["vec"] = v
                 _job["done"] = min(len(todo), start + len(batch))
                 if (start // EMBED_BATCH) % 10 == 9:
                     _save(idx)
@@ -777,9 +785,10 @@ MAX_PACKAGE = 400_000_000          # uncompressed bytes accepted from a shared l
 
 
 def export_package(include_own=False):
-    """A ZIP of the documents that may legally be shared, with a NOTICE crediting each and a
-    list of what was left out and why. Never the index: it holds text from every document.
-    -> (zip bytes, summary)"""
+    """A ZIP of the documents that may legally be shared, with a NOTICE crediting each and saying
+    how many were left out and why. The NOTICE never names a left-out document: a title can say
+    a lot (a customer, a project), and leaving the document out must leave its name out too.
+    Never the index: it holds text from every document. -> (zip bytes, summary)"""
     st = status()
     take = [d for d in st["documents"] if not d["error"] and
             (d["licence"] == "shareable" or (include_own and d["licence"] == "yours"))]
@@ -792,7 +801,14 @@ def export_package(include_own=False):
                    f"  Source: {d.get('source') or 'added by the person who exported this library'}",
                    f"  Terms: {d['licence_why']}", ""]
     if left:
-        notice += ["Left out (not shareable):", ""] + [f"* {d['title']}: {d['licence_why']}" for d in left] + [""]
+        kinds = {"yours": "the exporter's own document(s), not chosen for sharing",
+                 "personal": "document(s) whose publisher doesn't allow redistribution"}
+        counts = {}
+        for d in left:
+            k = d["licence"] if d["licence"] in kinds else ("unreadable" if d["error"] else "personal")
+            counts[k] = counts.get(k, 0) + 1
+        kinds["unreadable"] = "document(s) that couldn't be read"
+        notice += [f"{len(left)} other document(s) in the exporter's library were left out:", ""] +                   [f"* {n} {kinds[k]}" for k, n in sorted(counts.items())] + [""]
     m = sources()
     meta = {"format": PACKAGE_FORMAT, "version": 1, "exported": stamp,
             "documents": [{"file": d["name"], "title": d["title"], "licence": d["licence"], "terms": d["licence_why"],

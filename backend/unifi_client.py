@@ -690,8 +690,14 @@ class UniFiClient:
         return self.delete(self._rest(kind, oid))
 
 
-def test_connection(profile, secret):
+def test_connection(profile, secret, accept_fingerprint=None):
     """Work out the console type, check the login, list sites, capture the cert.
+
+    A saved certificate pin stays in force: if the console presents a different
+    certificate, the TLS handshake stops before any request (so before the password or
+    API key is sent) and the result is kind "cert_changed" with the new fingerprint.
+    The user can then accept exactly that fingerprint: called again with
+    accept_fingerprint, the test signs in only to a console presenting it.
 
     Returns a dict for the UI. Never raises for expected failures.
     """
@@ -702,10 +708,10 @@ def test_connection(profile, secret):
     else:
         kinds = ["unifi_os", "standalone"]
     pinned = profile.get("fingerprint")
+    pin = accept_fingerprint or pinned or None
     errors = []
     for kind in kinds:
-        # Test without the pin so a changed cert is reported instead of blocking.
-        c = UniFiClient(dict(profile, console_type=kind, fingerprint=None), secret)
+        c = UniFiClient(dict(profile, console_type=kind, fingerprint=pin), secret)
         try:
             c.login()
             sites = c.list_sites()
@@ -723,6 +729,15 @@ def test_connection(profile, secret):
                 "cert_changed": bool(pinned and fp and fp != pinned),
             }
         except UniFiError as e:
+            if e.kind == "cert" and e.fingerprint:
+                fp = e.fingerprint
+                return {"ok": False, "kind": "cert_changed", "fingerprint": fp,
+                        "fingerprint_display": format_fingerprint(fp), "pinned": pinned,
+                        "error": "The console presented a DIFFERENT certificate from the one "
+                                 + ("you accepted" if accept_fingerprint else "saved for this connection")
+                                 + ". Nothing was sent to it: the password or API key stays private. "
+                                 "Trust the new certificate only if you know the console was reset, "
+                                 "replaced or had its certificate changed."}
             errors.append(e)
             if e.kind != "notfound":
                 break      # a real answer (rejected, locked, unreachable): never make a 2nd attempt

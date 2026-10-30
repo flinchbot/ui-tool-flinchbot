@@ -15,8 +15,11 @@ Security
     UniFi login.
   * Command output is sent to the AI as-is: nothing in free text can be
     redacted reliably. The UI says so where you turn SSH on.
-  * Shell features that chain or redirect (; && || & > < ` $( ) are never
-    treated as read-only. Pipes are fine when every stage is read-only.
+  * Shell features that chain, redirect or expand (; && || & > < ` $( ) { } ${ } $'')
+    are never treated as read-only. Pipes are fine when every stage is read-only.
+  * Each command's options are checked the way the program itself reads them
+    (glued short options, abbreviated long options), so "sort -o FILE" and
+    "ip a a ADDR" are recognised as writes. curl always asks first.
 """
 
 import base64
@@ -64,10 +67,42 @@ def format_hostkey(fp_hex):
 
 
 # ── read-only command classifier ─────────────────────────────────────────────
-# first word -> None (always read-only) or a function(args) -> True if read-only.
-def _no_flags(*bad):
-    bad = set(bad)
-    return lambda args: not any(a in bad or any(a.startswith(b + "=") for b in bad) for a in args)
+# first word -> None (harmless whatever its arguments) or a function(args) -> True if read-only.
+#
+# How options are read: GNU tools accept "-o file", "-ofile" and "-xyo file" for the same
+# option, and long options may be abbreviated ("--out" means "--output"). So a short option
+# letter counts wherever it appears in a "-..." word (a value glued to another option can
+# trip this too, which only means the command asks for approval), and a long option counts
+# when it is a prefix of a forbidden one. Anything the rules can't vouch for asks first.
+def _opts(args):
+    """-> (short option letters, long option names, positional words). '--' ends options."""
+    short, long_, pos, ended = set(), set(), [], False
+    for a in args:
+        if ended or a == "-" or not a.startswith("-"):
+            pos.append(a)
+        elif a == "--":
+            ended = True
+        elif a.startswith("--"):
+            long_.add(a.split("=", 1)[0])
+        else:
+            short.update(a[1:])
+    return short, long_, pos
+
+
+def _long_hit(given, bad):
+    """GNU getopt_long accepts any unambiguous prefix, so '--out' is '--output'."""
+    return any(b == g or (len(g) >= 4 and b.startswith(g)) for g in given for b in bad)
+
+
+def _deny(short="", long=(), max_pos=None):
+    bad_short, bad_long = set(short), tuple(long)
+
+    def rule(args):
+        s, l, pos = _opts(args)
+        if s & bad_short or _long_hit(l, bad_long):
+            return False
+        return max_pos is None or len(pos) <= max_pos
+    return rule
 
 
 def _no_words(*bad):
@@ -84,60 +119,115 @@ def _needs(flag):
     return lambda args: flag in args
 
 
+def _all(*rules):
+    return lambda args: all(r(args) for r in rules)
+
+
+def _count_given(args):
+    return any(a == "-c" or (a.startswith("-c") and a[2:].isdigit()) for a in args)
+
+
+def _date(args):
+    # "date 010100002030" sets the clock; only "+FORMAT" may follow the options.
+    s, l, pos = _opts(args)
+    return not ("s" in s or _long_hit(l, ("--set",))) and all(p.startswith("+") for p in pos)
+
+
+_IPROUTE_READ = {"show", "list", "ls", "lst", "get"}
+_IPROUTE_VALUE_OPTS = {"-f", "-family", "-n", "-netns", "-l", "-loops", "-rc", "-rcvbuf"}
+
+
+def _iproute(args):
+    """ip / bridge: OBJECT [show|list|get ...]. iproute2 accepts abbreviated commands
+    ("ip a a" is "ip addr add") and "-batch FILE", so only these forms are read-only."""
+    words, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("-"):
+            o = a[1:] if a.startswith("--") else a
+            if o.startswith("-b") or o.startswith("-fo"):       # -batch FILE, -force
+                return False
+            if o in _IPROUTE_VALUE_OPTS:
+                skip = True
+            continue
+        words.append(a)
+    return len(words) <= 1 or words[1] in _IPROUTE_READ
+
+
+_ETHTOOL_READ = {"-i", "-S", "-k", "-a", "-g", "-c", "-l", "-m", "-P", "-T", "-d", "-e", "-x", "-u", "-n",
+                 "--driver", "--statistics", "--module-info", "--register-dump", "--eeprom-dump",
+                 "--phy-statistics"}
+
+
+def _ethtool(args):
+    opts = [a for a in args if a.startswith("-")]
+    pos = [a for a in args if not a.startswith("-")]
+    return len(opts) <= 1 and all(o in _ETHTOOL_READ or o.startswith("--show-") for o in opts) and len(pos) <= 1
+
+
+_IPTABLES_WRITE = _deny("AIDRFXNPZEM", ("--append", "--insert", "--delete", "--replace", "--flush",
+                                        "--delete-chain", "--new-chain", "--policy", "--zero", "--rename-chain",
+                                        "--modprobe"))
+
 _READ_ONLY = {
     # files and text
-    "cat": None, "head": None, "zcat": None, "wc": None, "sort": None, "uniq": None, "cut": None,
-    "tr": None, "column": None, "strings": None, "file": None, "md5sum": None, "sha256sum": None,
+    "cat": None, "head": None, "zcat": None, "wc": None, "cut": None,
+    "tr": None, "column": None, "strings": None, "md5sum": None, "sha256sum": None,
     "echo": None, "printf": None, "true": None, "basename": None, "dirname": None, "realpath": None,
-    "tail": _no_flags("-f", "-F", "--follow"),
+    "sort": _deny("oT", ("--output", "--temporary-directory", "--compress-program")),
+    "uniq": _deny(max_pos=1),                                  # a second file name is where it WRITES
+    "file": _deny("C", ("--compile",)),
+    "tail": _deny("fF", ("--follow", "--retry")),
     "grep": None, "egrep": None, "fgrep": None, "zgrep": None,
-    "ls": None, "stat": None, "du": None, "df": None, "readlink": None, "tree": None,
+    "ls": None, "stat": None, "du": None, "df": None, "readlink": None,
+    "tree": _deny("o"),
     "find": _no_words("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"),
     # system
-    "uptime": None, "w": None, "who": None, "id": None, "hostname": None, "uname": None, "free": None,
+    "uptime": None, "w": None, "who": None, "id": None, "uname": None, "free": None,
+    "hostname": _deny("Fb", ("--file", "--boot"), max_pos=0),  # "hostname NAME" renames the box
     "ps": None, "pgrep": None, "lsof": None, "lsblk": None, "lscpu": None, "lsusb": None, "lspci": None,
-    "nproc": None, "vmstat": None, "iostat": None, "mpstat": None, "last": None, "lastlog": None,
-    "date": _no_flags("-s", "--set"),
+    "nproc": None, "vmstat": None, "iostat": None, "mpstat": None, "last": None,
+    "lastlog": _deny("CS", ("--clear", "--set")),
+    "date": _date,
     "top": _needs("-b"),
-    "dmesg": _no_flags("-c", "-C", "--clear", "-n", "--console-level"),
-    "journalctl": _no_flags("--vacuum-size", "--vacuum-time", "--vacuum-files", "--rotate", "--flush", "--sync"),
+    "dmesg": _deny("cCnDE", ("--clear", "--read-clear", "--console-level", "--console-off", "--console-on")),
+    "journalctl": _deny("", ("--vacuum-size", "--vacuum-time", "--vacuum-files", "--rotate", "--flush", "--sync",
+                             "--relinquish-var", "--smart-relinquish-var", "--setup-keys", "--update-catalog",
+                             "--cursor-file")),
     "systemctl": _second_in("status", "list-units", "list-unit-files", "list-timers", "list-dependencies",
                             "is-active", "is-enabled", "is-failed", "show", "cat"),
-    "service": lambda args: len(args) >= 2 and args[1] == "status",
+    "service": lambda args: len(args) == 2 and args[1] == "status",
     "docker": lambda args: bool(args) and (args[0] in ("ps", "logs", "inspect", "images", "version", "info",
                                                        "top", "port", "diff")
                                            or (args[0] == "stats" and "--no-stream" in args)),
     "podman": _second_in("ps", "logs", "inspect", "images", "version", "info", "top"),
     # network
-    "ip": _no_words("add", "del", "delete", "set", "flush", "change", "replace", "append", "up", "down", "exec"),
+    "ip": _iproute,
+    "bridge": _iproute,
     "ifconfig": lambda args: len([a for a in args if not a.startswith("-")]) <= 1 and
                              not any(a in ("up", "down", "add", "del", "mtu", "netmask", "hw", "promisc") for a in args),
-    "ss": None, "netstat": None, "nstat": None,
-    "arp": _no_flags("-s", "-d", "-f"),
+    "ss": _deny("KD", ("--kill", "--diag")),
+    "netstat": None, "nstat": None,
+    "arp": _deny("sdf", ("--set", "--delete", "--file")),
     "route": _no_words("add", "del", "delete", "flush", "change"),
-    "ping": lambda args: "-c" in args or any(a.startswith("-c") for a in args),
-    "ping6": lambda args: "-c" in args or any(a.startswith("-c") for a in args),
+    "ping": _count_given,
+    "ping6": _count_given,
     "traceroute": None, "tracepath": None, "nslookup": None, "dig": None, "host": None,
     "mtr": lambda args: "-r" in args or "--report" in args,
-    "iptables": _no_flags("-A", "-I", "-D", "-R", "-F", "-X", "-N", "-P", "-Z", "-E", "--append", "--insert",
-                          "--delete", "--replace", "--flush", "--delete-chain", "--new-chain", "--policy",
-                          "--zero", "--rename-chain"),
-    "ip6tables": _no_flags("-A", "-I", "-D", "-R", "-F", "-X", "-N", "-P", "-Z", "-E", "--append", "--insert",
-                           "--delete", "--replace", "--flush", "--delete-chain", "--new-chain", "--policy",
-                           "--zero", "--rename-chain"),
-    "nft": _second_in("list"),
-    "ethtool": lambda args: not any(a in ("-s", "-K", "-A", "-G", "-C", "-r", "-E", "-f", "-p", "-L", "-X",
-                                           "--change", "--set-channels", "--reset", "--flash") or
-                                    a.startswith("--set") or a.startswith("--change") for a in args),
+    "iptables": _IPTABLES_WRITE,
+    "ip6tables": _IPTABLES_WRITE,
+    "nft": lambda args: bool(args) and args[0] == "list" and not any(a.startswith("-") for a in args),
+    "ethtool": _ethtool,
     "brctl": _second_in("show", "showmacs", "showstp"),
-    "bridge": _no_words("add", "del", "delete", "set", "replace", "change", "flush"),
     "swconfig": lambda args: "show" in args and "set" not in args and "load" not in args,
-    "tcpdump": lambda args: "-w" not in args and ("-c" in args or any(a.startswith("-c") for a in args)),
-    "curl": _no_flags("-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-                      "-F", "--form", "-T", "--upload-file", "-o", "--output", "-O", "--remote-name",
-                      "-K", "--config", "--remote-name-all"),
+    "tcpdump": _all(_count_given, _deny("wzCG")),            # -w writes a file, -z runs a program
+    # curl is not here: too many of its options write files or upload data (-o, -D, -c, -T, -d @file,
+    # -H @file, --trace...). A curl command waits for approval like any other change.
     # UniFi OS / UniFi device tools (only clearly informational sub-commands)
-    "info": None, "ubnt-device-info": None,
+    "info": _deny("o", ("--output", "--dribble")),
+    "ubnt-device-info": None,
     "mca-cli-op": _second_in("info"),
     "ubnt-systool": _second_in("cputemp", "hwaddr", "serialnum", "board", "shortname", "id", "boardname"),
     "ubnt-tools": _second_in("id"),
@@ -146,6 +236,28 @@ _READ_ONLY = {
 
 _SHELL_PUNCT = {";", "&", "&&", "||", "(", ")", "<", ">", ">>", "<<", ">&", "<&", "|&"}
 _WRAPPERS = ("sudo", "nice", "ionice", "time")
+def _expands(command):
+    """True if the shell would expand part of the command into new words: brace expansion
+    ("{-o,/tmp/x}"), ANSI-C or locale quoting ($'-o', $"-o"), or ${...}. Text inside single
+    quotes is literal ('end$', '{' in a grep pattern), so it doesn't count."""
+    quote, i = None, -1
+    while i + 1 < len(command):
+        i += 1
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\":
+            i += 1                      # the next character is literal
+        elif ch == "'" and quote is None:
+            quote = "'"
+        elif ch == '"':
+            quote = None if quote == '"' else '"'
+        elif ch == "$" and command[i + 1:i + 2] in ("'", '"', "{"):
+            return True
+        elif ch in "{}" and quote is None:
+            return True
+    return False
 
 
 def _tokens(command):
@@ -156,11 +268,13 @@ def _tokens(command):
 
 def is_read_only(command):
     """True only if every pipeline stage is a known read-only command with no
-    state-changing options and no shell chaining/redirection. Anything we can't
-    classify is NOT read-only (it then needs the user's approval)."""
+    state-changing options and no shell chaining/redirection/expansion. Anything we
+    can't classify is NOT read-only (it then needs the user's approval)."""
     if not isinstance(command, str) or not command.strip() or len(command) > MAX_COMMAND_CHARS:
         return False
     if "\n" in command or "\r" in command or "`" in command or "$(" in command:
+        return False
+    if _expands(command):
         return False
     try:
         toks = _tokens(command)
@@ -184,7 +298,7 @@ def is_read_only(command):
         if not stage:
             return False
         name = stage[0].rsplit("/", 1)[-1]
-        if "=" in name:                 # VAR=value cmd: don't try to be clever
+        if "=" in name or "$" in name:      # VAR=value cmd, or a name built from a variable
             return False
         if name not in _READ_ONLY:
             return False
@@ -325,12 +439,17 @@ def _clip(buf):
     return text
 
 
-def test_ssh(profile, password):
+def test_ssh(profile, password, accept_hostkey=None):
     """Connect once, capture the host key, run a harmless command. Never raises for
-    expected failures - returns a dict for the UI, like unifi_client.test_connection."""
+    expected failures - returns a dict for the UI, like unifi_client.test_connection.
+
+    A saved host key stays pinned: a different key is reported (kind "hostkey_changed")
+    during the key exchange, before the password is sent. Called again with the key the
+    user accepted (accept_hostkey), it logs in only if the console presents that key."""
     pinned = profile.get("ssh_hostkey")
     c = SSHClient(profile["host"], profile.get("ssh_port") or DEFAULT_PORT,
-                  profile.get("ssh_username") or "root", password, expected_hostkey=None)
+                  profile.get("ssh_username") or "root", password,
+                  expected_hostkey=accept_hostkey or pinned or None)
     try:
         c.connect()
         try:
@@ -343,6 +462,13 @@ def test_ssh(profile, password):
                 "hostkey_changed": bool(pinned and fp and fp != pinned),
                 "uname": banner[0] if banner else ""}
     except SSHError as e:
+        if e.kind == "hostkey" and e.hostkey:
+            return {"ok": False, "kind": "hostkey_changed", "hostkey": e.hostkey,
+                    "hostkey_display": format_hostkey(e.hostkey), "pinned": pinned,
+                    "error": "The console presented a DIFFERENT SSH host key from the one "
+                             + ("you accepted" if accept_hostkey else "saved for this connection")
+                             + ". The password was not sent. Trust the new key only if you know the "
+                             "console was reset or replaced."}
         return {"ok": False, "kind": e.kind, "error": str(e)}
     finally:
         c.close()

@@ -101,6 +101,7 @@ class State:
                                    f"connection and enter it again.", "auth")
                 self._ssh = SSHClient(profile["host"], profile.get("ssh_port"), profile.get("ssh_username"),
                                       secret, expected_hostkey=profile.get("ssh_hostkey"))
+                self._ssh.profile_id = profile["id"]        # lets the agent check it's the network it started on
                 self._ssh_profile = self._key(profile, self.SSH_KEYS)
             return self._ssh
 
@@ -190,7 +191,8 @@ def ai_ready():
 
 def agent_context():
     p = cfg.active_profile() or {}
-    return {"name": p.get("name"), "site": p.get("site", "default"),
+    return {"id": p.get("id"), "host": p.get("host"), "port": p.get("port"),
+            "name": p.get("name"), "site": p.get("site", "default"),
             "console": CONSOLE_LABELS.get(p.get("console_type") or "unifi_os"),
             "ssh_enabled": bool(p.get("ssh_enabled")), "ssh_username": p.get("ssh_username")}
 
@@ -338,11 +340,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_page(self):
-        html = page_template().replace("__APP_TOKEN__", APP_TOKEN).replace("__APP_VERSION__", APP_VERSION)
+        # A fresh nonce per page: only the page's own <script> runs, never script that ends up
+        # in the page some other way (e.g. markup in an AI answer).
+        nonce = secrets.token_urlsafe(18)
+        html = page_template().replace("__APP_TOKEN__", APP_TOKEN).replace("__APP_VERSION__", APP_VERSION) \
+            .replace("__CSP_NONCE__", nonce)
         body = html.encode()
         self._headers(200, "text/html; charset=utf-8", len(body))
         self.send_header("Content-Security-Policy",
-                         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                         f"default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
                          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                          "font-src https://fonts.gstatic.com; img-src 'self' data: blob:; "
                          "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -508,6 +514,9 @@ def r_status(_):
             out["connected"] = True
         except UniFiError as e:
             out["error"], out["error_kind"] = str(e), e.kind
+            if e.kind == "cert" and e.fingerprint:
+                out["error_fingerprint"] = e.fingerprint
+                out["error_fingerprint_display"] = format_fingerprint(e.fingerprint)
         try:
             b = state.client().login_blocked()
             if b:
@@ -670,7 +679,19 @@ def r_connection_save(b):
     return r_connections(None) | {"saved_id": profile["id"]}
 
 
+_FP_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _accepted_fp(b, key):
+    """The certificate / host key fingerprint the user just accepted on screen (or None)."""
+    fp = str(b.pop(key, None) or "").strip().lower()
+    if fp and not _FP_RE.match(fp):
+        raise ValueError("That fingerprint isn't valid.")
+    return fp or None
+
+
 def r_connection_test(b):
+    accept = _accepted_fp(b, "accept_fingerprint")
     secret = (b.pop("secret", None) or "").strip()
     stored = cfg.get_profile(b["id"]) if b.get("id") else None
     if stored and not secret:
@@ -696,7 +717,7 @@ def r_connection_test(b):
             wait = int(hit["until"] - now)
             return {"ok": False, "kind": hit["kind"], "error": hit["error"] +
                     f" (Not sent again: {'try again in about ' + str(max(1, wait // 60)) + ' min' if hit['kind'] == 'ratelimit' else 'change the username or password first'}.)"}
-    result = test_connection(profile, secret)
+    result = test_connection(profile, secret, accept_fingerprint=accept)
     if not result["ok"]:
         if result["kind"] == "ratelimit":
             _test_failures[host_key] = {"kind": "ratelimit", "error": result["error"], "until": now + 600}
@@ -711,7 +732,9 @@ _test_failures = {}     # recent failed tests: (host,port) for lockouts, (+creds
 
 
 def r_ssh_test(b):
-    """Test SSH for a connection (saved or being edited): login, host key, one command."""
+    """Test SSH for a connection (saved or being edited): login, host key, one command.
+    A saved host key stays pinned; a different one is reported before the password is sent."""
+    accept = _accepted_fp(b, "accept_hostkey")
     secret = (b.pop("ssh_secret", None) or "").strip()
     stored = cfg.get_profile(b["id"]) if b.get("id") else None
     if stored and not secret:
@@ -740,7 +763,7 @@ def r_ssh_test(b):
     if hit and now < hit["until"]:
         return {"ok": False, "kind": hit["kind"],
                 "error": hit["error"] + " (Not sent again: change the username or password first.)"}
-    result = test_ssh(profile, secret)
+    result = test_ssh(profile, secret, accept_hostkey=accept)
     if not result["ok"] and result["kind"] == "auth":
         _test_failures[cred_key] = {"kind": "auth", "error": result["error"], "until": now + 3600}
     return result
@@ -761,10 +784,15 @@ def r_connection_activate(b):
 
 
 def r_connection_trust(b):
+    """Trust the certificate the user was shown (its fingerprint comes with the request):
+    the sign-in that follows only goes to a console presenting exactly that certificate."""
     stored = cfg.get_profile(b.get("id", ""))
     if not stored:
         raise ValueError("Unknown connection")
-    res = test_connection(dict(stored, fingerprint=None), cfg.get_secret(stored["id"]) or "")
+    fp = _accepted_fp(b, "fingerprint")
+    if not fp:
+        raise ValueError("Which certificate? Open the connection again and press Trust new certificate.")
+    res = test_connection(stored, cfg.get_secret(stored["id"]) or "", accept_fingerprint=fp)
     if res.get("ok"):
         cfg.update_profile_fields(stored["id"], fingerprint=res["fingerprint"],
                                   console_type=res["console_type"])
@@ -927,7 +955,12 @@ def r_chat(b):
 
 
 def r_decide(b):
-    return _with_usage(agent.decide(bool(b.get("approve"))))
+    """Approve/Deny on a card. The card's proposal id must come back: it ties the click to the
+    exact action the user saw (another tab may have replaced it since)."""
+    proposal = str(b.get("proposal") or "")
+    if not proposal:
+        raise AgentError("This approval card is out of date. Reload the page to see the action that's waiting.")
+    return _with_usage(agent.decide(bool(b.get("approve")), proposal=proposal))
 
 
 def r_stop(b):
@@ -1110,9 +1143,9 @@ def r_report(_):
     if not _report_lock.acquire(blocking=False):
         raise AgentError("A report is already being generated. Wait for it to finish.")
     try:
-        state.client()                       # fail fast with a clear message if not connected
-        p = cfg.active_profile()
-        report = agent.generate_report()
+        c = state.client()                   # fail fast with a clear message if not connected
+        p = dict(c.profile)                  # the network this report is about, whatever happens meanwhile
+        report = agent.generate_report(op={k: p.get(k) for k in ("id", "host", "port", "site", "name")})
         report.update(generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                       network=p["name"], host=p["host"], site=p.get("site", "default"),
                       model=f"{PROVIDERS[cfg.active_provider()].label} · {cfg.provider_model(cfg.active_provider())}",
@@ -1136,18 +1169,19 @@ def button_action(tool, inp, target=""):
     except ToolInputError as e:
         raise ValueError(str(e))
     c = state.client()
-    prep, note = changelog.prepare(tool, inp)
+    p = dict(c.profile)                      # snapshot, change and log entry all for this one network
+    prep, note = changelog.prepare(tool, inp, get_client=lambda: c)
     try:
         result = EXECUTORS[tool](c, inp)
     except ToolInputError as e:
         raise ValueError(str(e))
     except UniFiError as e:
         changelog.record(tool, inp, _LABEL_FOR[tool], "approved", {"content": str(e), "is_error": True},
-                         via="button", target=target)
+                         via="button", target=target, profile=p)
         raise
     rec = changelog.record(tool, inp, _LABEL_FOR[tool], "approved",
                            {"content": json.dumps(redact(result), default=str)[:400], "is_error": False},
-                           prep, via="button", note=note, target=target, result_obj=result)
+                           prep, via="button", note=note, target=target, result_obj=result, profile=p)
     agent.add_note(f"The user did this from a tool window: {_LABEL_FOR[tool]} {target}.")
     return {"result": redact(result), "change": {"id": rec["id"], "can_undo": bool(rec.get("rollback")),
                                                  "undo": (rec.get("rollback") or {}).get("describe")}}
@@ -1209,10 +1243,12 @@ _scan_lock = threading.Lock()
 
 def r_scorecard(_):
     c = state.client()
-    findings, passed = scorecard.check(scorecard_data(c))
+    data = scorecard_data(c)
+    findings, passed = scorecard.check(data)
     findings = scorecard.sort(findings)
-    return dict(scorecard.grade(findings), findings=findings, passed=passed, nmap=nmap_scan.info(),
-                network=cfg.active_profile()["name"])
+    unchecked = scorecard.coverage(data)
+    return dict(scorecard.grade(findings, unchecked), findings=findings, passed=passed, unchecked=unchecked,
+                nmap=nmap_scan.info(), network=c.profile["name"])
 
 
 def r_scorecard_scan(_):
@@ -1229,14 +1265,24 @@ def r_scorecard_scan(_):
             except nmap_scan.ScanError:
                 continue
         try:
-            hosts = nmap_scan.sweep(ips)
+            sw = nmap_scan.sweep(ips)
         except nmap_scan.ScanError as e:
             raise ValueError(str(e))
+        hosts = sw["hosts"]
         findings = scorecard.sort(scorecard.from_scan(hosts, clients))
-        changelog.record("nmap_sweep", {"hosts": len(ips)}, "Scan the LAN for risky open ports (Nmap)", "approved",
-                         {"content": f"{len(ips)} devices checked, {len(hosts)} with risky ports open", "is_error": False},
-                         via="button")
-        return {"findings": findings, "checked": len(ips), "limit": nmap_scan.MAX_SWEEP_HOSTS}
+        # Say what was really covered: devices over the limit, IPv6-only ones and ones Nmap gave
+        # up on were NOT checked, so they aren't counted as clean.
+        checked = sw["submitted"] - len(sw["timed_out"])
+        summary = f"{checked} of {sw['requested']} devices checked, {len(hosts)} with risky ports open"
+        if sw["skipped"]:
+            summary += f"; {sw['skipped']} not scanned ({sw['skipped_reason']})"
+        if sw["timed_out"]:
+            summary += f"; {len(sw['timed_out'])} didn't finish in time"
+        changelog.record("nmap_sweep", {"hosts": sw["submitted"]}, "Scan the LAN for risky open ports (Nmap)",
+                         "approved", {"content": summary, "is_error": False}, via="button")
+        return {"findings": findings, "checked": checked, "requested": sw["requested"], "submitted": sw["submitted"],
+                "skipped": sw["skipped"], "skipped_reason": sw["skipped_reason"], "timed_out": sw["timed_out"],
+                "limit": nmap_scan.MAX_SWEEP_HOSTS}
     finally:
         _scan_lock.release()
 
@@ -1321,18 +1367,29 @@ def r_kit_snapshot(_):
 
 
 def _kit_baseline(b):
-    """With compare=true: the active console as it is now (e.g. just after the reset)."""
+    """With compare=true: the active console as it is now (e.g. just after the reset).
+    -> (masked copy, full copy with secrets: stays on the server) or (None, None)."""
     if not b.get("compare"):
-        return None
+        return None, None
     c, p = _kit_net()
-    base, _found = resetkit.split(resetkit.snapshot(c, p))
-    return base
+    full = resetkit.snapshot(c, p)
+    base, _found = resetkit.split(full)
+    return base, full
+
+
+def _kit_full(sid):
+    """The snapshot with its secrets, for comparing them on the server; None if they can't be read
+    (then secret fields count as changed rather than the same)."""
+    try:
+        return resetkit.load(sid, with_secrets=True)
+    except resetkit.KitError:
+        return None
 
 
 def r_kit_variance(b):
     snap = resetkit.load(b.get("id"))
-    base = _kit_baseline(b)
-    v = resetkit.variance(snap, base)
+    base, base_full = _kit_baseline(b)
+    v = resetkit.variance(snap, base, full=_kit_full(b.get("id")) if base else None, base_full=base_full)
     return dict(v, snapshot={k: snap.get(k) for k in ("id", "taken_at", "connection", "host", "site",
                                                       "network_version", "secret_count")},
                 compared_with=(cfg.active_profile() or {}).get("name") if base else None)
@@ -1344,15 +1401,19 @@ def r_kit_script(b):
     full = resetkit.load(sid, with_secrets=True) if embed else None
     sel = b.get("selected")
     selected = set(map(str, sel)) if isinstance(sel, list) else None
+    base, base_full = _kit_baseline(b)
+    if base and full is None:
+        full = _kit_full(sid)               # to compare passwords; only written in with embed_secrets
     text, stats = resetkit.script(snap, full=full, selected=selected, embed_secrets=embed,
-                                  baseline=_kit_baseline(b))
+                                  baseline=base, base_full=base_full)
     net = re.sub(r"[^A-Za-z0-9._-]+", "-", snap.get("connection") or "unifi").strip("-") or "unifi"
     return {"text": text, "stats": stats, "filename": f"unifi-restore_{net}_{sid}{'_WITH-SECRETS' if embed else ''}.sh"}
 
 
 def r_kit_report(b):
     snap = resetkit.load(b.get("id"))
-    v = resetkit.variance(snap, _kit_baseline(b))
+    base, base_full = _kit_baseline(b)
+    v = resetkit.variance(snap, base, full=_kit_full(b.get("id")) if base else None, base_full=base_full)
     net = re.sub(r"[^A-Za-z0-9._-]+", "-", snap.get("connection") or "unifi").strip("-") or "unifi"
     return {"markdown": resetkit.report_markdown(snap, v), "filename": f"unifi-customised_{net}_{snap['id']}.md"}
 

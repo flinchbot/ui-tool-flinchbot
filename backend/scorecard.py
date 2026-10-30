@@ -6,7 +6,9 @@ Every finding says what was found, why it matters, how to fix it in the UniFi UI
 and carries a prompt for "Fix with flinchbot" (the AI then proposes the change
 through the usual Approve card, with Undo where the app supports it).
 
-grade(findings) turns them into a 0-100 score and a letter.
+grade(findings, unchecked) turns them into a 0-100 score and a letter, or no grade
+("?") when a check couldn't run because its data couldn't be read: unknown is not safe.
+coverage(data) lists those checks.
 """
 
 import re
@@ -180,7 +182,7 @@ def check(data):
                         f"WAN port {pf.get('dst_port')} goes to {target} from anywhere. Make sure that device is patched.",
                         ["Limit the source if you can (Settings → Routing → Port forwarding → Source)."],
                         f"Review my port forward “{name}”: is it still needed and is it safe?", [name]))
-    if data.get("port_forwards") == []:
+    if data.get("port_forwards") == [] and "port_forwards" not in (data.get("unavailable") or {}):
         passed.append("No port forwards: nothing on the LAN is exposed directly")
 
     # ── firewall (zone-based) ────────────────────────────────────────────────
@@ -266,10 +268,29 @@ def from_scan(hosts, clients):
     return F
 
 
-def grade(findings):
+AREAS = {"settings": "Gateway settings (UPnP, intrusion prevention, device SSH, automatic backups)",
+         "port_forwards": "Port forwards", "policies": "Firewall policies", "zones": "Firewall zones",
+         "networks": "Networks (IoT separation)"}
+
+
+def coverage(data):
+    """Checks that couldn't run. -> [{"area", "reason", "unsupported"}]. "unsupported": the console
+    has no such feature (an older firmware), which doesn't stop a grade; anything else does."""
+    out = []
+    for key, err in (data.get("unavailable") or {}).items():
+        unsupported = err.get("kind") == "notfound"
+        out.append({"key": key, "area": AREAS.get(key, key), "unsupported": unsupported,
+                    "reason": "not on this console" if unsupported else f"couldn't be read: {err.get('error')}"})
+    return out
+
+
+def grade(findings, unchecked=()):
     score = max(0, 100 - sum(WEIGHT.get(f["severity"], 0) for f in findings))
     letter = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
-    return {"score": score, "grade": letter,
+    incomplete = any(not u["unsupported"] for u in unchecked or ())
+    if incomplete:                # some checks never ran: a grade would claim more than we know
+        score, letter = None, "?"
+    return {"score": score, "grade": letter, "incomplete": incomplete,
             "counts": {k: sum(1 for f in findings if f["severity"] == k) for k in ORDER},
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds")}
 

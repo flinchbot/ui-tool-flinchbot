@@ -496,7 +496,7 @@
 <div id="overlay" class="overlay" hidden><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
 <div id="toast" class="toast" hidden></div>
 
-<script>
+<script nonce="__CSP_NONCE__">
 'use strict';
 const TOKEN = document.querySelector('meta[name="app-token"]').content;
 const $ = id => document.getElementById(id);
@@ -594,6 +594,8 @@ async function refreshStatus() {
   try { status = await api('GET', '/api/status'); }
   catch (e) { renderConn(null, e.message); return null; }
   renderConn(status);
+  const waiting = status.pending && status.pending[0] && status.pending[0].proposal;
+  document.querySelectorAll('.approval-card').forEach(c => { if (!busy && c.dataset.proposal !== waiting) c.markStale && c.markStale(); });
   if (status.login_blocked) {
     const mins = status.retry_after ? Math.max(1, Math.ceil(status.retry_after / 60)) : 0;
     showBanner(`Sign-in to “${status.active.name}” failed, so flinchbot has stopped trying (repeated attempts make UniFi lock sign-ins). ` +
@@ -716,8 +718,12 @@ function explainAlert(a) {
 }
 
 // ── chat ──────────────────────────────────────────────────────────────────
+// Code blocks are set aside while the rest is formatted. The placeholder only holds a number into
+// this call's own list of (already escaped) blocks, and NUL characters are removed from the input
+// first, so text from the AI can't forge a placeholder that turns into markup.
 function formatMarkdown(text) {
-  const lines = esc(text).replace(/```([\s\S]*?)```/g, (_, c) => '\u0000' + btoa(unescape(encodeURIComponent(c))) + '\u0000').split('\n');
+  const blocks = [];
+  const lines = esc(String(text).replace(/\u0000/g, '')).replace(/```([\s\S]*?)```/g, (_, c) => '\u0000' + (blocks.push(c) - 1) + '\u0000').split('\n');
   let out = '', list = null;
   const inline = s => s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
                         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>').replace(/_\((.+?)\)_/g, '<em>($1)</em>');
@@ -732,7 +738,7 @@ function formatMarkdown(text) {
     else { close(); out += inline(line) + '<br>'; }
   }
   close();
-  return out.replace(/\u0000([^\u0000]*)\u0000/g, (_, b) => `<pre>${decodeURIComponent(escape(atob(b)))}</pre>`);
+  return out.replace(/\u0000(\d+)\u0000/g, (_, n) => `<pre>${blocks[Number(n)] ?? ''}</pre>`);
 }
 
 function clearEmpty() { const e = $('messages').querySelector('.empty-state'); if (e) e.remove(); }
@@ -813,19 +819,33 @@ function addApproval(pending) {
       Object.keys(p.details || {}).filter(k => k !== 'mac').length
         ? h('pre', {}, JSON.stringify(p.details, null, 2)) : null)),
     h('div', { class: 'row' }, approve, deny), decided);
-  const wrap = h('div', { class: 'msg assistant' }, h('div', { class: 'msg-avatar' }, botAvatar()),
+  const proposal = pending[0] && pending[0].proposal;
+  const wrap = h('div', { class: 'msg assistant approval-card', 'data-proposal': proposal || '' }, h('div', { class: 'msg-avatar' }, botAvatar()),
     h('div', { class: 'msg-body' }, h('div', { class: 'msg-name' }, `${BOT_NAME} · needs your approval`), card));
   const entry = { kind: 'approval', items: pending, decision: 'Waiting for approval', at: new Date() };
   transcript.push(entry);
+  // Another tab (or a newer answer) replaced or answered this action: the card can't approve it any more.
+  wrap.markStale = () => {
+    if (wrap.dataset.done) return;
+    wrap.dataset.done = '1'; entry.decision = 'No longer waiting';
+    approve.remove(); deny.remove();
+    decided.textContent = 'No longer waiting: this action was answered or replaced elsewhere (another tab or a newer message).';
+  };
   const decide = async ok => {
+    wrap.dataset.done = '1';
     entry.decision = ok ? 'Approved' : 'Denied';
     approve.disabled = deny.disabled = true;
     decided.textContent = ok ? 'Approved — running…' : 'Denied.';
-    const d = await runChat('/api/chat/decide', { approve: ok });
-    decided.textContent = ok ? 'Approved.' : 'Denied.';
+    const d = await runChat('/api/chat/decide', { approve: ok, proposal });
     approve.remove(); deny.remove();
+    if (!d) { entry.decision = 'Not done'; decided.textContent = 'Nothing was done: see the message below.'; return; }
+    decided.textContent = ok ? 'Approved.' : 'Denied.';
+    for (const c of d.changes || []) {
+      if (c.skipped) decided.append(h('div', { class: 'muted' }, `■ Not run (Stop was pressed first): ${c.label}`));
+      if (c.log_error) decided.append(h('div', { class: 'muted' }, `⚠ ${c.label}: ${c.log_error}`));
+    }
     // One-click undo for changes the app could snapshot (Wi-Fi / LAN edits, creates, Wi-Fi deletes)
-    for (const c of (d && d.changes) || []) {
+    for (const c of d.changes || []) {
       if (!c.can_undo) continue;
       const b = h('button', { class: 'btn', style: 'margin-left:8px;padding:2px 10px', title: c.undo },
         pending.length > 1 ? `↶ Undo: ${c.label}` : '↶ Undo');
@@ -897,14 +917,16 @@ function addStopped(path, d) {
   const decide = path.endsWith('decide'), second = path.endsWith('second-opinion');
   const text = second ? 'Stopped. The second opinion was dropped.'
     : !decide ? 'Stopped. This question was dropped, so it isn\'t part of the conversation.'
-    : d ? 'Stopped. The approved change ran; only the answer after it was dropped.'
-        : 'Stopped. The approved change ran; only the answer after it was dropped. Undo is in 🧾 Changes.';
+    : d ? 'Stopped. An approved change that had already started ran to the end (a change can\'t be cut off half-way); the rest were not started and the answer after them was dropped.'
+        : 'Stopped. An approved change that had already started still runs to the end on the console; the rest are not started. Check 🧾 Changes for what ran (Undo is there).';
   if (!decide && !second) [...document.querySelectorAll('.msg.user')].pop()?.classList.add('stopped');
   transcript.push({ kind: 'note', text, at: new Date() });
   $('messages').append(h('div', { class: 'msg-stopped' }, '■ ', text)); scrollDown();
 }
 
 async function runChat(path, body) {
+  // A new message answers any waiting action with "not approved" (the server does the same).
+  if (path === '/api/chat') document.querySelectorAll('.approval-card').forEach(c => c.markStale && c.markStale());
   setBusy(true); showTyping();
   chatAbort = new AbortController();
   let ok = false;
@@ -1186,7 +1208,8 @@ function localSection(info, wizard) {
   sec.payload = () => (url.value.trim() || info.url) ? { url: url.value.trim(), context: Number(context.value) || 32768, kb_first: kbFirst.checked } : undefined;
   sec.el = h('div', {},
     h('div', { class: 'note' }, 'Use an AI running on your own computer or one in your office. Your network data goes only to that server. ',
-      'Nothing goes to Anthropic or OpenAI unless you ask for a second opinion.'),
+      'Nothing goes to Anthropic or OpenAI unless you ask for a second opinion, or turn one of them on under “If it can’t answer” below: ',
+      'then, when the local AI fails, the whole conversation goes to that AI, straight away unless “ask me first” is ticked.'),
     field('Server', preset, 'Picks the usual port. Any server that speaks the OpenAI Chat Completions API works.'),
     field('Address', url, h('span', {}, 'The computer running the AI, and its port. On this computer use localhost. ',
       'On another computer, the AI must accept network connections: Ollama needs OLLAMA_HOST=0.0.0.0 on that computer, LM Studio has a “Serve on local network” switch. ',
@@ -1457,6 +1480,20 @@ function openConnectionForm(data, existing, wizard) {
     sshOut.replaceChildren(result('warn', `Connecting to ${v.host}:${v.ssh_port} over SSH…`));
     let r;
     try { r = await api('POST', '/api/connections/ssh-test', v); } catch (e) { r = { ok: false, error: e.message }; }
+    if (!r.ok && r.kind === 'hostkey_changed') {
+      // The password wasn't sent. Log in only to the exact key the user accepts here.
+      if (!confirm(`${r.error}
+
+New host key:
+${r.hostkey_display}
+
+Trust this key and log in?`)) {
+        sshTested = null; sshOut.replaceChildren(result('bad', r.error)); return { ok: false };
+      }
+      sshOut.replaceChildren(result('warn', `Connecting to ${v.host}:${v.ssh_port} over SSH…`));
+      try { r = await api('POST', '/api/connections/ssh-test', { ...v, accept_hostkey: r.hostkey }); } catch (e) { r = { ok: false, error: e.message }; }
+      if (r.ok) r.trusted = true;
+    }
     if (!r.ok) { sshTested = null; sshOut.replaceChildren(result('bad', r.error)); return r; }
     sshTested = r;
     sshOut.replaceChildren(result(r.hostkey_changed ? 'warn' : 'ok',
@@ -1479,6 +1516,20 @@ function openConnectionForm(data, existing, wizard) {
     out.replaceChildren(result('warn', `Connecting to ${v.host}:${v.port}…`));
     let r;
     try { r = await api('POST', '/api/connections/test', v); } catch (e) { r = { ok: false, error: e.message }; }
+    if (!r.ok && r.kind === 'cert_changed') {
+      // Nothing was sent to the console. Sign in only to the exact certificate the user accepts here.
+      if (!confirm(`${r.error}
+
+New certificate fingerprint:
+${r.fingerprint_display}
+
+Trust this certificate and sign in?`)) {
+        tested = null; out.replaceChildren(result('bad', r.error)); return { ok: false };
+      }
+      out.replaceChildren(result('warn', `Connecting to ${v.host}:${v.port}…`));
+      try { r = await api('POST', '/api/connections/test', { ...v, accept_fingerprint: r.fingerprint }); } catch (e) { r = { ok: false, error: e.message }; }
+      if (r.ok) r.trusted = true;
+    }
     if (!r.ok) { tested = null; out.replaceChildren(result('bad', r.error)); return r; }
     tested = r;
     if (r.sites.length > 1 || !r.site_found) {
@@ -1523,14 +1574,14 @@ function openConnectionForm(data, existing, wizard) {
           return;
         }
       }
-      if (r && r.cert_changed && !confirm('The console presented a DIFFERENT certificate from the one saved before. Save and trust it?')) return;
+      if (r && r.cert_changed && !r.trusted && !confirm('The console presented a DIFFERENT certificate from the one saved before. Save and trust it?')) return;
       let s = sshTested;
       if (needsSshTest() && !s) {
         primary.textContent = 'Testing SSH…';
         s = await runSshTest();
         if (!s || !s.ok) return;
       }
-      if (s && s.hostkey_changed && !confirm('The console presented a DIFFERENT SSH host key from the one saved before. Save and trust it?')) return;
+      if (s && s.hostkey_changed && !s.trusted && !confirm('The console presented a DIFFERENT SSH host key from the one saved before. Save and trust it?')) return;
       const v = values();
       if (r && r.ok) { v.console_type = r.console_type; v.fingerprint = r.fingerprint; }
       if (s && s.ok && v.ssh_enabled) v.ssh_hostkey = s.hostkey;
@@ -1558,8 +1609,15 @@ function openConnectionForm(data, existing, wizard) {
     catch (e) { toast(e.message, true); }
   }
   async function trust() {
-    if (!confirm('Trust the certificate the console presents right now? Do this only if you know the console was reset, replaced or had its certificate changed.')) return;
-    const r = await api('POST', '/api/connections/trust-cert', { id: existing.id }).catch(e => ({ ok: false, error: e.message }));
+    const fp = status && status.error_fingerprint;
+    if (!fp) { out.replaceChildren(result('bad', 'The new certificate isn’t known yet. Close this window, wait for the connection check, and try again.')); return; }
+    if (!confirm(`Trust this certificate? Do this only if you know the console was reset, replaced or had its certificate changed.
+
+New certificate fingerprint:
+${status.error_fingerprint_display}
+
+The app will sign in only to a console that presents exactly this certificate.`)) return;
+    const r = await api('POST', '/api/connections/trust-cert', { id: existing.id, fingerprint: fp }).catch(e => ({ ok: false, error: e.message }));
     if (r.ok) { toast('New certificate trusted.'); await refreshStatus(); await refreshNetwork(); openConnections(); }
     else out.replaceChildren(result('bad', r.error));
   }
@@ -2241,6 +2299,14 @@ async function openDetective(showAll = false) {
 }
 
 // ── security scorecard ─────────────────────────────────────────────────────
+// What an Nmap sweep really covered: devices sent to Nmap, devices left out (over the limit or
+// IPv6), and devices Nmap gave up on. "No risky ports" only speaks for the ones it finished.
+function scanSummary(x) {
+  const parts = [`Nmap checked ${x.checked} of ${x.requested} devices: ${x.findings.length} with risky ports open.`];
+  if (x.skipped) parts.push(`${x.skipped} not scanned (${x.skipped_reason}).`);
+  if (x.timed_out && x.timed_out.length) parts.push(`${x.timed_out.length} didn’t finish in time, so they are unknown: ${x.timed_out.slice(0, 8).join(', ')}${x.timed_out.length > 8 ? '…' : ''}.`);
+  return parts.join(' ');
+}
 const SC_WEIGHT = { critical: 25, high: 12, medium: 6, low: 2 };
 function scGrade(findings) {
   const score = Math.max(0, 100 - findings.reduce((n, f) => n + (SC_WEIGHT[f.severity] || 0), 0));
@@ -2252,7 +2318,9 @@ async function openScorecard(extra = null) {
   let r;
   try { r = await api('GET', '/api/scorecard'); } catch (e) { failModal('Security scorecard', e, openScorecard); return; }
   const findings = [...r.findings, ...((extra && extra.findings) || [])];
-  const g = scGrade(findings), sevs = ['critical', 'high', 'medium', 'low'];
+  // A check whose data couldn't be read is unknown, not a pass: then there is no grade.
+  const g = r.incomplete ? { score: null, grade: '?' } : scGrade(findings), sevs = ['critical', 'high', 'medium', 'low'];
+  const unchecked = r.unchecked || [];
   const card = f => h('details', { class: 'chg', open: f.severity === 'critical' || f.severity === 'high' || null },
     h('summary', {}, h('span', { class: `badge ${f.severity}` }, f.severity), h('span', { class: 'what' }, f.title, h('small', {}, ' · ', f.category))),
     h('div', { class: 'body' }, h('div', {}, f.detail),
@@ -2261,20 +2329,25 @@ async function openScorecard(extra = null) {
       h('button', { class: 'btn', style: 'margin-top:6px', onclick: () => askFlinchbot(`Fix: ${f.title}`, f.ask) }, '💬 Fix with flinchbot')));
   const scanBtn = h('button', { class: 'btn', disabled: !r.nmap.installed || null,
     title: r.nmap.installed ? 'Nmap checks every connected device for risky open ports (telnet, SMB, RDP, VNC, MQTT…)' : 'Install Nmap from nmap.org to use this' },
-    extra ? `↻ Scan again (${extra.checked} checked)` : '🔍 Scan devices for risky ports (Nmap)');
+    extra ? `↻ Scan again (${extra.checked} of ${extra.requested} checked)` : '🔍 Scan devices for risky ports (Nmap)');
   scanBtn.addEventListener('click', async () => {
     if (!confirm('Scan every connected device for risky open ports with Nmap? It takes a few minutes and some devices log it as a port scan.')) return;
     scanBtn.disabled = true; scanBtn.textContent = 'Scanning… (a few minutes)';
     try { const x = await api('POST', '/api/scorecard/scan', {}); openScorecard(x); }
     catch (e) { toast(e.message, true); scanBtn.disabled = false; scanBtn.textContent = '🔍 Scan devices for risky ports (Nmap)'; }
   });
-  const color = { A: 'var(--ok)', B: 'var(--ok)', C: 'var(--medium)', D: 'var(--warn)', F: 'var(--danger)' }[g.grade];
+  const color = { A: 'var(--ok)', B: 'var(--ok)', C: 'var(--medium)', D: 'var(--warn)', F: 'var(--danger)', '?': 'var(--muted)' }[g.grade];
   openModal(...modalHead('Security scorecard', `${r.network} · ${fmtWhen(r.generated_at)} · rule-based, from the console's own settings`),
     h('div', { class: 'wan-stats' },
-      h('div', { class: 'wan-stat', style: 'flex:0 0 150px;text-align:center' }, h('div', { class: 'v', style: `font-size:2.5rem;color:${color}` }, g.grade), h('div', { class: 'l' }, `${g.score} / 100`)),
+      h('div', { class: 'wan-stat', style: 'flex:0 0 150px;text-align:center' }, h('div', { class: 'v', style: `font-size:2.5rem;color:${color}` }, g.grade),
+        h('div', { class: 'l' }, g.score === null ? 'not rated: some checks couldn’t run' : `${g.score} / 100`)),
       ...sevs.map(s => h('div', { class: 'wan-stat' }, h('div', { class: 'v' }, String(findings.filter(f => f.severity === s).length)), h('div', { class: 'l' }, s)))),
-    extra ? h('div', { class: 'note', style: 'margin:6px 0' }, `Nmap checked ${extra.checked} devices${extra.checked >= extra.limit ? ` (the first ${extra.limit})` : ''}: ${extra.findings.length} with risky ports open.`) : null,
-    h('div', { class: 'chg-list', style: 'max-height:46vh' }, findings.length ? findings.map(card) : h('div', { class: 'muted' }, 'No problems found.'),
+    unchecked.length ? h('div', { class: 'note warn', style: 'margin:6px 0' },
+      h('b', {}, `Not checked (${unchecked.length}): `), unchecked.map(u => `${u.area}: ${u.reason}`).join(' · '),
+      r.incomplete ? ' Nothing is assumed about these, so there is no grade until they can be read.' : '') : null,
+    extra ? h('div', { class: 'note', style: 'margin:6px 0' }, scanSummary(extra)) : null,
+    h('div', { class: 'chg-list', style: 'max-height:46vh' }, findings.length ? findings.map(card)
+      : h('div', { class: 'muted' }, unchecked.length ? 'No problems found in what could be checked.' : 'No problems found.'),
       r.passed.length ? h('details', { class: 'chg' }, h('summary', {}, h('span', { class: 'badge ok' }, 'ok'), h('span', { class: 'what' }, `${r.passed.length} checks passed`)),
         h('ul', { class: 'clues' }, ...r.passed.map(p => h('li', {}, p)))) : null),
     h('div', { class: 'actions' }, h('span', { class: 'left' }, scanBtn),
@@ -2810,6 +2883,7 @@ async function openKitSnapshot(id, compare = false) {
     h('label', { class: 'kit-opt' }, cmp, ' Compare with ', h('b', {}, status.active ? `“${status.active.name}”` : 'the active connection'),
       ' now (after the reset) and list only what differs'),
     v.exact ? null : h('div', { class: 'note', style: 'margin:6px 0' }, 'Things you added are exact. Built-in objects and settings can’t be compared with a factory console the app has never seen, so they show their current values, unticked. Tick the ones you want written back, or compare after the reset.'),
+    v.exact && !v.secrets_compared ? h('div', { class: 'note warn', style: 'margin:6px 0' }, 'The saved passwords and keys couldn’t be read for this comparison, so every password field is listed as changed. Nothing that might be needed is left out.') : null,
     ...Object.entries(v.unavailable || {}).map(([k, e]) => h('div', { class: 'note warn', style: 'margin:6px 0' }, `Not read: ${k} (${e})`)),
     h('div', { class: 'chg-list', style: 'max-height:46vh' }, sections.length ? sections : h('div', { class: 'muted' }, 'Nothing differs.')),
     field('Passwords, Wi-Fi keys and VPN configs', embed, `Either way, the snapshot keeps them encrypted on this computer, with the key in ${storeName()}.`),

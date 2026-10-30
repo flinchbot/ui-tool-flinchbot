@@ -16,6 +16,7 @@ class _Server(paramiko.ServerInterface):
         self.ready = threading.Event()
 
     def check_auth_password(self, username, password):
+        self.mock.passwords_seen.append(password)
         if (username, password) == (self.mock.username, self.mock.password):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
@@ -37,6 +38,7 @@ class MockSSH:
         self.username, self.password = username, password
         self.key = paramiko.ECDSAKey.generate()
         self.commands = []
+        self.passwords_seen = []         # every password a client sent
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", port))
