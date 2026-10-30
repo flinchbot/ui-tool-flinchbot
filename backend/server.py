@@ -40,6 +40,8 @@ from unifi_client import (CONSOLE_LABELS, UniFiClient, UniFiError,  # noqa: E402
                           format_fingerprint, test_connection)
 from ssh_client import SSHClient, SSHError, format_hostkey, test_ssh  # noqa: E402
 import envcheck                                                        # noqa: E402
+import knowledge                                                       # noqa: E402
+import kb_import                                                       # noqa: E402
 import history                                                         # noqa: E402
 import resetkit                                                        # noqa: E402
 import detective                                                       # noqa: E402
@@ -57,10 +59,12 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.13.0"
+APP_VERSION = "2.14.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
+BIG_BODIES = {("POST", "/api/chat"): MAX_CHAT_BODY,
+              ("POST", "/api/knowledge/upload"): 90_000_000}      # a 30 MB document or a 60 MB shared library, base64
 
 
 # ── application state ─────────────────────────────────────────────────────────
@@ -210,7 +214,7 @@ def record_usage(provider, model, usage, kind, chat_id):
 
 
 agent = Agent(state.client, agent_settings, agent_context, get_ssh=state.ssh, changes=changelog, get_wan=wan_history,
-              on_usage=record_usage)
+              on_usage=record_usage, knowledge=knowledge)
 
 
 def _last_speedtest_ms(connection_id):
@@ -363,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
             if ctype != "application/json":
                 raise HttpError(415, "Content-Type must be application/json")
         length = int(self.headers.get("Content-Length") or 0)
-        limit = MAX_CHAT_BODY if (self.command, self.path.split("?", 1)[0]) == ("POST", "/api/chat") else MAX_BODY
+        limit = BIG_BODIES.get((self.command, self.path.split("?", 1)[0]), MAX_BODY)
         if length > limit:
             raise HttpError(413, "Request too large")
         if not length:
@@ -916,6 +920,100 @@ def r_stop(b):
     return {"stopped": agent.stop()}
 
 
+# ── knowledge library ─────────────────────────────────────────────────────────
+def r_knowledge(_):
+    return dict(knowledge.status(), importer=kb_import.status(), imported=kb_import.imported(),
+                feeds=kb_import.feeds(), suggested_feeds=[{"title": t, "url": u} for t, u in kb_import.SUGGESTED_FEEDS])
+
+
+def r_knowledge_feed_add(b):
+    kb_import.add_feed(str(b.get("url") or ""), b.get("title"))
+    return r_knowledge(None)
+
+
+def r_knowledge_feed_remove(b):
+    kb_import.remove_feed(str(b.get("url") or ""))
+    return r_knowledge(None)
+
+
+def r_knowledge_import(b):
+    started = kb_import.start(str(b.get("source") or ""), bool(b.get("all_lines")))
+    if not started:
+        raise ValueError("An import is already running. Wait for it, or stop it first.")
+    return r_knowledge(None)
+
+
+def r_knowledge_import_cancel(_):
+    kb_import.cancel()
+    return r_knowledge(None)
+
+
+def r_knowledge_upload(b):
+    try:
+        data = base64.b64decode(str(b.get("data") or ""), validate=True)
+    except ValueError:
+        raise ValueError("The file arrived damaged. Try again.")
+    name = knowledge.add_file(str(b.get("name") or ""), data)
+    return dict(r_knowledge(None), added=name)
+
+
+def r_knowledge_fetch(b):
+    name = knowledge.add_url(str(b.get("url") or ""))
+    return dict(r_knowledge(None), added=name)
+
+
+def r_knowledge_delete(b):
+    knowledge.delete(str(b.get("name") or ""))
+    return r_knowledge(None)
+
+
+def r_knowledge_rebuild(_):
+    """Read every document again (after changing how they're read, or if the index looks wrong)."""
+    with knowledge._lock:
+        try:
+            os.remove(knowledge._index_path())
+        except FileNotFoundError:
+            pass
+        knowledge.reset_cache()
+    return r_knowledge(None)
+
+
+def r_knowledge_search(b):
+    return knowledge.search(str(b.get("query") or ""), b.get("k") or 5)
+
+
+def r_knowledge_settings(b):
+    model = str(b.get("embed_model") or "").strip()
+    if model and not cfg.get_setting("LOCAL_AI_URL"):
+        raise ValueError("Meaning search uses an embedding model on your Local AI server. Set up Local AI in Settings first.")
+    cfg.write_env_file({"KNOWLEDGE_EMBED_MODEL": model})
+    return r_knowledge(None)
+
+
+def r_knowledge_models(_):
+    """Models on the Local AI server, embedding models first (for the meaning-search picker)."""
+    if not cfg.get_setting("LOCAL_AI_URL"):
+        return {"models": []}
+    models = [m["id"] for m in agent.list_models("local")]
+    return {"models": sorted(models, key=lambda m: (not re.search(r"embed|bge|e5|minilm|gte", m, re.I), m.lower()))}
+
+
+def r_knowledge_export(b):
+    """Download the shareable part of the library (RFCs, NIST/CISA; your own files only if asked)."""
+    data, summary = knowledge.export_package(bool(b.get("include_own")))
+    if not summary["included"]:
+        raise ValueError("Nothing in the library may be shared: only RFCs, NIST/CISA publications and (if you tick "
+                         "the box) your own documents can be. Ubiquiti, IEEE, vendor and blog material is for your "
+                         "own reference.")
+    return dict(summary, filename=f"knowledge-library-shareable_{datetime.now():%Y-%m-%d}.zip",
+                data=base64.b64encode(data).decode())
+
+
+def r_knowledge_open(_):
+    knowledge.open_folder()
+    return {"ok": True}
+
+
 def r_second_opinion(b):
     return _with_usage(agent.second_opinion(str(b.get("provider") or "")))
 
@@ -1318,6 +1416,20 @@ ROUTES = {
     ("POST", "/api/chat/decide"):             r_decide,
     ("POST", "/api/chat/stop"):               r_stop,
     ("POST", "/api/chat/second-opinion"):     r_second_opinion,
+    ("GET",  "/api/knowledge"):               r_knowledge,
+    ("POST", "/api/knowledge/upload"):        r_knowledge_upload,
+    ("POST", "/api/knowledge/fetch"):         r_knowledge_fetch,
+    ("POST", "/api/knowledge/delete"):        r_knowledge_delete,
+    ("POST", "/api/knowledge/rebuild"):       r_knowledge_rebuild,
+    ("POST", "/api/knowledge/search"):        r_knowledge_search,
+    ("POST", "/api/knowledge/settings"):      r_knowledge_settings,
+    ("GET",  "/api/knowledge/models"):        r_knowledge_models,
+    ("POST", "/api/knowledge/open"):          r_knowledge_open,
+    ("POST", "/api/knowledge/export"):        r_knowledge_export,
+    ("POST", "/api/knowledge/import"):        r_knowledge_import,
+    ("POST", "/api/knowledge/import/cancel"): r_knowledge_import_cancel,
+    ("POST", "/api/knowledge/feeds/add"):     r_knowledge_feed_add,
+    ("POST", "/api/knowledge/feeds/remove"):  r_knowledge_feed_remove,
     ("POST", "/api/settings/local-probe"):    r_local_probe,
     ("POST", "/api/settings/local-find"):     r_local_find,
     ("POST", "/api/reset"):                   r_reset,
@@ -1400,6 +1512,7 @@ def main():
     print("  Press Ctrl+C to stop.\n")
     scheduler.start()                  # speed tests, only for connections where a schedule is set
     watch_internet()
+    threading.Thread(target=knowledge.refresh, name="knowledge-refresh", daemon=True).start()   # files added while closed
     if not args.no_browser and not kept:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:

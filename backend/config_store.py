@@ -95,6 +95,7 @@ DEFAULTS = {
     "LOCAL_AI_KEY":      "",                   # most local servers need none
     "LOCAL_AI_MODEL":    "",
     "LOCAL_AI_CONTEXT":  "32768",              # tokens the server reads per request; must match the server's own setting
+    "KNOWLEDGE_EMBED_MODEL": "",               # embedding model on the Local AI server for meaning search (optional)
     "SERVER_HOST":       "127.0.0.1",
     "SERVER_PORT":       "8080",
     "MAX_TOOL_ROUNDS":   "15",
@@ -103,7 +104,7 @@ DEFAULTS = {
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.
 EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT",
-                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT"}
+                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT", "KNOWLEDGE_EMBED_MODEL"}
 
 # Per-provider .env keys
 PROVIDER_KEYS = {

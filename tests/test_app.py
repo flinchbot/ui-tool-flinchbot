@@ -11,6 +11,7 @@ Run from the project folder:
 import http.client
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -437,6 +438,11 @@ class FakeLocalAI:
             def do_POST(self):
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
                 outer.requests.append(req)
+                if self.path == "/v1/embeddings":
+                    if req.get("model") not in outer.models:
+                        return self._send(404, {"error": {"message": "model not found"}})
+                    return self._send(200, {"object": "list", "model": req["model"], "data": [
+                        {"object": "embedding", "index": i, "embedding": fake_vector(t)} for i, t in enumerate(req["input"])]})
                 if req.get("model") not in outer.models:
                     return self._send(404, {"error": {"message": f"model '{req.get('model')}' not found"}})
                 words = len(json.dumps(req["messages"]).split())
@@ -461,6 +467,38 @@ class FakeLocalAI:
             self.srv.shutdown()
             self.srv.server_close()        # close the port too, so a client gets "connection refused"
             self.srv = None
+
+
+# Words that mean the same thing get the same dimension, so "meaning search" can find a passage
+# that shares no keyword with the question - like a real embedding model would.
+_SYNONYMS = {"plug": 0, "plugs": 0, "iot": 0, "smart": 0, "gadgets": 0, "drop": 1, "disconnect": 1, "offline": 1,
+             "flaky": 1, "steering": 2, "band": 2, "5ghz": 2}
+
+
+def fake_vector(text):
+    v = [0.0] * 16
+    for w in re.findall(r"[a-z0-9]+", text.lower().replace("search_document:", "").replace("search_query:", "")):
+        v[_SYNONYMS.get(w, 3 + (sum(map(ord, w)) % 13))] += 1.0
+    return v
+
+
+def make_pdf(text):
+    """A one-page PDF with real text in it (what pypdf reads)."""
+    stream = f"BT /F1 14 Tf 20 100 Td ({text}) Tj ET".encode()
+    objs = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 144]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+            b"<</Length %d>>stream\n" % len(stream) + stream + b"\nendstream",
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+    out, offs = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += b"%d 0 obj" % i + o + b"endobj\n"
+    x = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for o in offs:
+        out += b"%010d 00000 n \n" % o
+    out += b"trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+    return bytes(out)
 
 
 def l_call(id_, name, args):
@@ -1216,13 +1254,407 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(a.history[0]["results"], [])
 
 
+class KnowledgeTests(unittest.TestCase):
+    """backend/knowledge.py: the documents the AI can search."""
+
+    def setUp(self):
+        import knowledge
+        self.k = knowledge
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        knowledge.reset_cache()
+        for key in ("KNOWLEDGE_EMBED_MODEL", "LOCAL_AI_URL"):
+            os.environ.pop(key, None)
+        self.addCleanup(knowledge.reset_cache)
+        self.addCleanup(lambda: [os.environ.pop(key, None) for key in ("KNOWLEDGE_EMBED_MODEL", "LOCAL_AI_URL")])
+
+    def add_samples(self):
+        k = self.k
+        k.add_file("band-steering.md", (b"# Wi-Fi\n## Band steering\nBand steering moves dual-band clients to 5 GHz. "
+                                        b"Turn it off for smart plugs that keep dropping.\n\n## Minimum RSSI\n"
+                                        b"Minimum RSSI makes the AP drop clients with a weak signal."))
+        k.add_file("vlans.html", (b"<html><head><title>IoT VLAN guide</title><script>steal()</script></head><body>"
+                                  b"<nav>Home | Products</nav><h1>Put IoT on its own VLAN</h1><p>Create a network for "
+                                  b"smart-home devices and block it from the LAN with a firewall policy.</p></body></html>"))
+        k.add_file("u6-pro.pdf", make_pdf("The U6-Pro supports 802.11ax and needs PoE+."))
+
+    def test_reads_markdown_html_and_pdf(self):
+        self.add_samples()
+        st = self.k.status()
+        docs = {d["name"]: d for d in st["documents"]}
+        self.assertEqual(set(docs), {"band-steering.md", "vlans.html", "u6-pro.pdf"})
+        self.assertEqual((docs["vlans.html"]["title"], docs["vlans.html"]["type"]), ("IoT VLAN guide", "web page"))
+        self.assertEqual(docs["u6-pro.pdf"]["type"], "PDF")
+        self.assertTrue(all(d["passages"] >= 1 and not d["error"] for d in docs.values()), docs)
+        title, parts = self.k.extract(os.path.join(self.k.folder(), "vlans.html"))
+        text = " ".join(t for _, t in parts)
+        self.assertNotIn("steal()", text)                          # scripts and menus aren't text
+        self.assertNotIn("Products", text)
+        self.assertEqual(parts[0][0], "Put IoT on its own VLAN")    # headings become sections
+        r = self.k.search("u6-pro poe", 3)
+        self.assertEqual((r["results"][0]["doc"], r["results"][0]["section"], r["mode"]), ("u6-pro.pdf", "page 1", "keyword"))
+        r = self.k.search("minimum rssi weak signal", 3)
+        self.assertEqual(r["results"][0]["section"], "Wi-Fi › Minimum RSSI")
+        self.assertIn("802.11ax", self.k.tokens("U6-Pro 802.11ax"))
+
+    def test_chunks_are_passage_sized(self):
+        text = "\n\n".join(f"Paragraph {i}. " + "word " * 120 for i in range(30))
+        parts = self.k.chunk([("Big", text)])
+        self.assertGreater(len(parts), 10)
+        self.assertTrue(all(len(t) <= self.k.CHUNK + 10 for _, t in parts))
+        self.assertTrue(all(sec == "Big" for sec, _ in parts))
+
+    def test_changes_to_the_folder_are_picked_up(self):
+        self.add_samples()
+        self.k.search("band", 1)
+        with open(os.path.join(self.k.folder(), "notes.txt"), "w", encoding="utf-8") as f:
+            f.write("Our guest Wi-Fi is called Visitors and uses VLAN 30.")    # dropped in by hand
+        self.assertEqual(self.k.search("guest visitors vlan", 1)["results"][0]["doc"], "notes.txt")
+        self.k.delete("notes.txt")
+        self.assertNotIn("notes.txt", [d["name"] for d in self.k.status()["documents"]])
+        with self.assertRaises(self.k.KnowledgeError):
+            self.k.add_file("virus.exe", b"MZ")
+        with self.assertRaises(self.k.KnowledgeError):
+            self.k.delete("../connections.json")
+        name = self.k.add_file("..\\..\\evil.md", b"# x\ny")                 # never outside the folder
+        self.assertEqual(name, "evil.md")
+        self.assertTrue(os.path.isfile(os.path.join(self.k.folder(), "evil.md")))
+        self.assertEqual(self.k.add_file("evil.md", b"# again"), "evil (2).md")
+
+    def test_meaning_search_with_a_local_embedding_model(self):
+        fake = FakeLocalAI(models=("qwen3:30b", "nomic-embed-text:latest"))
+        self.addCleanup(fake.stop)
+        os.environ.update(LOCAL_AI_URL=fake.url, KNOWLEDGE_EMBED_MODEL="nomic-embed-text:latest")
+        self.add_samples()
+        for _ in range(100):                                       # vectors are added in the background
+            if not self.k._job["running"] and self.k.status()["with_meaning"] == self.k.status()["passages"]:
+                break
+            time.sleep(0.05)
+        st = self.k.status()
+        self.assertEqual(st["with_meaning"], st["passages"], st)
+        self.assertTrue(fake.requests[0]["input"][0].startswith("search_document: "))
+        # no keyword in common with any passage, so only meaning search can find these
+        self.assertEqual(self.k._BM25(self.k._load()["chunks"]).scores("gadgets flaky"), [0.0] * st["passages"])
+        r = self.k.search("gadgets flaky", 2)
+        self.assertEqual(r["mode"], "keyword + meaning")
+        self.assertEqual({x["doc"] for x in r["results"]} - {"band-steering.md", "vlans.html"}, set())
+        self.assertTrue(r["results"])
+        self.assertTrue(fake.requests[-1]["input"][0].startswith("search_query: "))
+        fake.stop()                                                # server gone: keyword search carries on
+        r = self.k.search("u6-pro", 1)
+        self.assertEqual((r["mode"], r["results"][0]["doc"]), ("keyword", "u6-pro.pdf"))
+        self.assertIn("Meaning search is unavailable", r["note"])
+
+    def test_add_a_web_page_by_address(self):
+        class Page(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = (b"<html><head><title>Configure band steering | UniFi Help</title></head><body>"
+                        b"<h1>Band steering</h1><p>Steer clients to 5 GHz.</p></body></html>")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        web = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        threading.Thread(target=web.serve_forever, daemon=True).start()
+        self.addCleanup(web.server_close)
+        self.addCleanup(web.shutdown)
+        name = self.k.add_url(f"http://127.0.0.1:{web.server_port}/articles/123")
+        self.assertEqual(name, "Configure band steering.html")
+        with open(os.path.join(self.k.folder(), name), encoding="utf-8") as f:
+            self.assertIn("<!-- source: http://127.0.0.1:", f.read(200))
+        self.assertEqual(self.k.search("steer clients", 1)["results"][0]["title"], "Configure band steering | UniFi Help")
+        with self.assertRaises(self.k.KnowledgeError):
+            self.k.add_url("ftp://example.com/x")
+
+    def test_the_ai_gets_a_search_tool_only_with_documents(self):
+        import knowledge
+        a = agent_mod.Agent(lambda: None, lambda p=None: {"provider": "anthropic", "provider_label": "Claude",
+                            "api_key": "sk-ant-x", "model": "m", "max_rounds": 3, "max_tokens": 1000},
+                            lambda: {"name": "Lab", "console": "UniFi OS", "site": "default"}, knowledge=knowledge)
+        self.assertNotIn("search_knowledge", [t["name"] for t in a._tools()])
+        self.add_samples()
+        self.assertIn("search_knowledge", [t["name"] for t in a._tools()])
+        FakeAnthropic.script = [[tool("k1", "search_knowledge", {"query": "smart plugs keep dropping"})],
+                                [text("Turn off band steering for them (band-steering.md).")]]
+        FakeAnthropic.received = []
+        r = a.chat("my smart plugs keep dropping off")
+        self.assertEqual(r["reply"], "Turn off band steering for them (band-steering.md).")
+        result = FakeAnthropic.received[1]["messages"][-1]["content"][0]
+        self.assertEqual(result["type"], "tool_result")
+        self.assertIn("band-steering.md", result["content"])
+        self.assertIn("search_knowledge come from documents the user added", FakeAnthropic.received[0]["system"])
+        self.assertNotIn("search_knowledge", agent_mod.WRITE_NAMES)    # read-only: no Approve card
+
+
+class KnowledgeImportTests(unittest.TestCase):
+    """backend/kb_import.py against a fake help center, download site and RFC editor."""
+
+    def setUp(self):
+        import kb_import
+        import knowledge
+        self.imp, self.k = kb_import, knowledge
+        self.real_rfcs = list(kb_import.RFCS)
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        knowledge.reset_cache()
+        self.addCleanup(knowledge.reset_cache)
+        pdf = make_pdf("UniFi U6 Pro datasheet: 802.11ax, PoE+ 13 W.")
+        self.version = "2026-10-01T00:00:00Z"
+        self.releases = ["11.0.99", "11.0.95"]
+        outer = self
+
+        class Site(BaseHTTPRequestHandler):
+            def _send(self, body, ctype="application/json"):
+                body = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                base = f"http://127.0.0.1:{self.server.server_port}"
+                if self.path.startswith("/help"):
+                    page = int(re.search(r"[?&]page=(\d+)", self.path).group(1))
+                    arts = [{"id": 1, "title": "Band steering", "html_url": base + "/hc/1", "updated_at": outer.version,
+                             "draft": False, "body": "<p>Band steering moves clients to 5 GHz.</p>"},
+                            {"id": 2, "title": "Draft", "draft": True, "body": "<p>x</p>"}] if page == 1 else \
+                           [{"id": 3, "title": "Zone-Based Firewalls", "html_url": base + "/hc/3", "updated_at": outer.version,
+                             "draft": False, "body": "<h2>Zones</h2><p>Policies between zones.</p>"}]
+                    return self._send({"count": 3, "articles": arts,
+                                       "next_page": base + "/help?page=2" if page == 1 else None})
+                if self.path.startswith("/downloads"):
+                    def dl(name, cat, line, path):
+                        return {"name": name, "category": {"name": cat}, "product_lines": [line],
+                                "file_path": base + path, "date_published": "2026-01-01"}
+                    return self._send({"pagination": {"totalPages": 1}, "downloads": [
+                        dl("UniFi® U6 Pro Datasheet", "Datasheets", "unifi", "/ds/u6-pro.pdf"),
+                        dl("airMAX Rocket Quick Start Guide", "Quick Start Guides", "uisp", "/qsg/rocket.pdf"),
+                        dl("U6 Pro Firmware 6.7", "Firmware", "unifi", "/fw/u6.bin"),
+                        dl("UniFi G4 PTZ Installation Guide", "Installation Guides", "unifi", "/qig/g4-ptz")]})
+                if self.path.startswith("/rfc/") and self.path.endswith(".json"):
+                    return self._send({"title": "Dynamic Host Configuration Protocol", "status": "DRAFT STANDARD",
+                                       "pub_date": "March 1997", "obsoletes": ["RFC1541"], "obsoleted_by": [],
+                                       "updates": [], "updated_by": ["RFC3396", "RFC4361"],
+                                       "errata_url": "https://www.rfc-editor.org/errata/rfc2131"})
+                if self.path == "/edge":
+                    return self._send(b"<html><head><title>Edge Device Security | CISA</title></head><body>"
+                                      b"<h1>Edge devices</h1><p>Patch internet-facing VPN gateways first.</p></body></html>",
+                                      "text/html")
+                if self.path.endswith(".pdf"):
+                    return self._send(pdf, "application/pdf")
+                if self.path == "/feed.xml":
+                    items = "".join(
+                        f"<item><title>UniFi Network Application {v}</title><link>{base}/releases/{v}</link>"
+                        f"<pubDate>Fri, 30 Oct 2026 13:{v[-2:]}:00 GMT</pubDate><guid>{v}</guid>"
+                        f"<description><![CDATA[<h2>Bugfixes</h2><p>Fixed adoption over L3 in {v}.</p>]]></description></item>"
+                        for i, v in enumerate(outer.releases))
+                    return self._send(f"<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>UniFi releases</title>"
+                                      f"{items}</channel></rss>".encode(), "application/rss+xml")
+                if self.path == "/not-a-feed":
+                    return self._send(b"<html><body>hello</body></html>", "text/html")
+                if self.path.startswith("/rfc/"):
+                    return self._send(b"DHCP\n\n1.  Introduction\n\nThe Dynamic Host Configuration Protocol hands out "
+                                      b"addresses with a lease.", "text/plain")
+                self.send_error(404)
+
+            def log_message(self, *a):
+                pass
+        self.site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+        threading.Thread(target=self.site.serve_forever, daemon=True).start()
+        self.addCleanup(self.site.server_close)
+        self.addCleanup(self.site.shutdown)
+        base = f"http://127.0.0.1:{self.site.server_port}"
+        for name, value in (("HELP_API", base + "/help?per_page=100&page={page}"),
+                            ("DOWNLOADS_API", base + "/downloads?page={page}"),
+                            ("RFC_URL", base + "/rfc/rfc{n}.txt"), ("RFC_META", base + "/rfc/rfc{n}.json"),
+                            ("SECURITY_DOCS", [("NIST SP 800-153 - WLAN (2012)", base + "/ds/sp800-153.pdf"),
+                                               ("CISA - Edge Device Security", base + "/edge")]),
+                            ("RFCS", [(2131, "Dynamic Host Configuration Protocol (DHCP)")]), ("PAUSE", 0)):
+            self.addCleanup(setattr, kb_import, name, getattr(kb_import, name))
+            setattr(kb_import, name, value)
+
+    def run_import(self, source, all_lines=False):
+        self.assertTrue(self.imp.start(source, all_lines))
+        for _ in range(200):
+            if not self.imp.status()["running"]:
+                break
+            time.sleep(0.05)
+        st = self.imp.status()
+        self.assertFalse(st["running"])
+        self.assertIsNone(st["error"], st)
+        return st
+
+    def test_help_center(self):
+        st = self.run_import("ui-help")
+        self.assertEqual((st["added"], st["failed"], st["total"]), (2, 0, 3))          # the draft is skipped
+        names = sorted(d["name"] for d in self.k.status()["documents"])
+        self.assertEqual(names, ["UI Help - Band steering.html", "UI Help - Zone-Based Firewalls.html"])
+        r = self.k.search("policies between zones", 1)["results"][0]
+        self.assertEqual((r["title"], r["section"]), ("Zone-Based Firewalls", "Zones"))       # no repeated title
+        with open(os.path.join(self.k.folder(), names[0]), encoding="utf-8") as f:
+            self.assertIn("<!-- source: http://127.0.0.1:", f.read())
+        st = self.run_import("ui-help")                                             # nothing changed
+        self.assertEqual((st["added"], st["updated"], st["skipped"]), (0, 0, 2))
+        self.version = "2026-10-20T00:00:00Z"                                        # Ubiquiti edited them
+        st = self.run_import("ui-help")
+        self.assertEqual((st["added"], st["updated"], st["skipped"]), (0, 2, 0))
+        self.assertEqual(self.imp.imported()["ui-help"], 2)
+
+    def test_datasheets_unifi_only_unless_asked(self):
+        st = self.run_import("ui-docs")
+        self.assertEqual((st["total"], st["added"]), (1, 1))                     # firmware and UISP left out
+        self.assertEqual((st["web_only"], st["failed"]), (1, 0))                 # a page-flip viewer isn't a failure
+        doc = self.k.status()["documents"][0]
+        self.assertEqual((doc["name"], doc["type"], doc["error"]), ("UI Datasheet - UniFi U6 Pro Datasheet.pdf", "PDF", None))
+        self.assertEqual(self.k.search("u6 pro poe", 1)["results"][0]["doc"], doc["name"])
+        st = self.run_import("ui-docs", all_lines=True)
+        self.assertEqual((st["total"], st["added"], st["skipped"]), (2, 1, 1))
+        self.assertIn("UI Quick Start - airMAX Rocket Quick Start Guide.pdf", [d["name"] for d in self.k.status()["documents"]])
+
+    def test_rfcs(self):
+        st = self.run_import("rfc")
+        self.assertEqual(st["added"], 1)
+        doc = self.k.status()["documents"][0]
+        self.assertEqual(doc["name"], "RFC 2131 - Dynamic Host Configuration Protocol (DHCP).txt")
+        self.assertEqual((doc["tier"], doc["licence"]), ("standard", "shareable"))
+        with open(os.path.join(self.k.folder(), doc["name"]), encoding="utf-8") as f:
+            head = f.read(400)
+        self.assertIn("Status: DRAFT STANDARD · Published: March 1997", head)
+        self.assertIn("Obsoletes: RFC1541 · Obsoleted by: none", head)
+        self.assertIn("Updated by: RFC3396, RFC4361", head)
+        self.assertIn("Errata: https://www.rfc-editor.org/errata/rfc2131", head)
+        self.assertIn("lease", self.k.search("dhcp lease", 1)["results"][0]["text"])
+        self.assertEqual(self.k.search("dhcp lease", 1)["results"][0]["authority"], "Standard (IETF, IEEE, Wi-Fi Alliance)")
+
+    def test_security_guidance(self):
+        st = self.run_import("security")
+        self.assertEqual((st["added"], st["failed"]), (2, 0))
+        docs = {d["name"]: d for d in self.k.status()["documents"]}
+        self.assertEqual({d["tier"] for d in docs.values()}, {"guidance"})
+        self.assertEqual({d["licence"] for d in docs.values()}, {"shareable"})
+        self.assertEqual(self.k.search("vpn gateways patch", 1)["results"][0]["title"], "CISA - Edge Device Security")
+
+    def test_feeds(self):
+        base = f"http://127.0.0.1:{self.site.server_port}"
+        with self.assertRaises(self.k.KnowledgeError):
+            self.imp.add_feed(base + "/not-a-feed")
+        self.imp.add_feed(base + "/feed.xml")
+        self.assertEqual(self.imp.feeds()[0]["title"], "UniFi releases")
+        with self.assertRaises(self.k.KnowledgeError):
+            self.imp.add_feed(base + "/feed.xml")                                 # already subscribed
+        st = self.run_import("feeds")
+        self.assertEqual((st["total"], st["added"]), (2, 2))
+        r = self.k.search("adoption l3 11.0.99", 1)["results"][0]
+        self.assertEqual(r["title"], "UniFi Network Application 11.0.99")
+        self.releases = ["11.0.101"] + self.releases                              # a new release appears
+        st = self.run_import("feeds")
+        self.assertEqual((st["added"], st["skipped"]), (1, 2))
+        self.assertEqual(self.imp.imported()["feeds"], 3)
+        self.imp.remove_feed(base + "/feed.xml")                                  # unsubscribe: its items go too
+        self.assertEqual(self.imp.feeds(), [])
+        self.assertEqual(self.k.status()["documents"], [])
+        for _, url in self.imp.SUGGESTED_FEEDS:
+            self.assertTrue(url.startswith("https://"))
+
+    def test_the_real_rfc_list_is_sane(self):
+        nums = [n for n, _ in self.real_rfcs]
+        self.assertEqual(len(set(nums)), len(nums))                      # no duplicates
+        self.assertGreaterEqual(len(nums), 40)
+        self.assertTrue({791, 2131, 8200, 1035, 2865, 4862} <= set(nums))
+
+
+class KnowledgeSharingTests(unittest.TestCase):
+    """Authority ranking, licences, and exporting only what may be shared."""
+
+    def setUp(self):
+        import knowledge
+        self.k = knowledge
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        knowledge.reset_cache()
+        self.addCleanup(knowledge.reset_cache)
+
+    def library(self):
+        k = self.k
+        text = "Band steering pushes dual-band clients to 5 GHz; disable it for IoT devices that drop."
+        k.add_file("UI Help - Band steering.html",
+                   f"<!-- source: https://help.ui.com/hc/en-us/articles/1 --><title>Band steering</title><p>{text}</p>".encode())
+        k.add_file("Feed PP - Band steering opinions.html",
+                   f"<!-- source: https://packetpushers.net/blog/x --><title>Band steering opinions</title><p>{text}</p>".encode())
+        k.add_file("RFC 2131 - DHCP.txt", b"RFC 2131: Dynamic Host Configuration Protocol\nDHCP leases addresses.")
+        k.record_source("RFC 2131 - DHCP.txt", source="https://www.rfc-editor.org/rfc/rfc2131.txt", **{"from": "rfc"})
+        k.add_file("our-vlans.md", b"# Our VLANs\nVLAN 30 is IoT. VLAN 40 is cameras.")
+
+    def test_authority_ranks_and_labels(self):
+        self.library()
+        r = self.k.search("band steering iot drop", 5)["results"]
+        self.assertEqual([x["doc"] for x in r[:2]], ["UI Help - Band steering.html", "Feed PP - Band steering opinions.html"])
+        self.assertEqual((r[0]["authority"], r[0]["authority_rank"]), ("Ubiquiti official", 1))
+        self.assertEqual(r[1]["authority"], "Expert commentary")
+        self.assertEqual(r[0]["source"], "https://help.ui.com/hc/en-us/articles/1")
+        docs = {d["name"]: d for d in self.k.status()["documents"]}
+        self.assertEqual({n: (d["tier"], d["licence"]) for n, d in docs.items()}, {
+            "UI Help - Band steering.html": ("ubiquiti", "personal"),
+            "Feed PP - Band steering opinions.html": ("expert", "personal"),
+            "RFC 2131 - DHCP.txt": ("standard", "shareable"),
+            "our-vlans.md": ("yours", "yours")})
+
+    def test_at_most_two_passages_per_document(self):
+        self.k.add_file("long.md", ("\n\n".join(f"## Part {i}\nband steering detail {i} " + "x " * 500 for i in range(6))).encode())
+        self.k.add_file("short.md", b"# Other\nband steering in one line")
+        docs = [x["doc"] for x in self.k.search("band steering", 5)["results"]]
+        self.assertEqual(docs.count("long.md"), 2)
+        self.assertIn("short.md", docs)
+
+    def test_export_only_what_may_be_shared_and_open_it_elsewhere(self):
+        import io
+        import zipfile
+        self.library()
+        data, summary = self.k.export_package()
+        self.assertEqual((summary["included"], summary["left_out"]), (1, 3))
+        z = zipfile.ZipFile(io.BytesIO(data))
+        self.assertEqual(sorted(z.namelist()), ["NOTICE.txt", "documents/RFC 2131 - DHCP.txt", "library.json"])
+        notice = z.read("NOTICE.txt").decode()
+        self.assertIn("IETF Trust Legal Provisions", notice)
+        self.assertIn("Band steering: © Ubiquiti Inc.", notice)                   # what was left out, and why
+        self.assertNotIn("knowledge_index", " ".join(z.namelist()))                # never the index or vectors
+        data2, summary2 = self.k.export_package(include_own=True)
+        self.assertIn("documents/our-vlans.md", zipfile.ZipFile(io.BytesIO(data2)).namelist())
+        # someone else opens it: documents arrive with their source and terms
+        shutil.rmtree(cfg.DATA_DIR, ignore_errors=True)
+        self.k.reset_cache()
+        self.assertEqual(self.k.add_file("shared.zip", data), "1 documents from a shared library")
+        doc = self.k.status()["documents"][0]
+        self.assertEqual((doc["name"], doc["tier"], doc["licence"]), ("RFC 2131 - DHCP.txt", "standard", "shareable"))
+
+    def test_shared_library_is_opened_safely(self):
+        import io
+        import json as _json
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("library.json", _json.dumps({"format": "flinchbot-knowledge", "version": 1, "documents": []}))
+            z.writestr("documents/../../evil.md", "# x\npwned")                    # zip-slip attempt
+            z.writestr("documents/run.exe", "MZ")                                    # not a document type
+        self.assertEqual(self.k.add_file("lib.zip", buf.getvalue()), "1 documents from a shared library")
+        self.assertEqual([d["name"] for d in self.k.status()["documents"]], ["evil.md"])
+        self.assertFalse(os.path.exists(os.path.join(cfg.DATA_DIR, "evil.md")))
+        other = io.BytesIO()
+        with zipfile.ZipFile(other, "w") as z:
+            z.writestr("random.txt", "hello")
+        with self.assertRaises(self.k.KnowledgeError):
+            self.k.add_file("other.zip", other.getvalue())
+
+
 class InstallReportTests(unittest.TestCase):
     """backend/install_deps.py: the launcher's list of what was installed, and why."""
 
     def test_every_requirement_has_a_purpose(self):
         import install_deps
         wanted = install_deps.requested()
-        self.assertEqual(list(wanted), ["anthropic", "keyring", "openai", "paramiko", "cryptography", "certifi"])
+        self.assertEqual(list(wanted), ["anthropic", "keyring", "openai", "paramiko", "cryptography", "certifi", "pypdf"])
         for name, purpose in wanted.items():
             self.assertTrue(purpose, f"{name} has no comment above it in requirements.txt")
             self.assertNotIn(" - ", purpose)            # only the part before " - " is shown

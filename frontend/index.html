@@ -199,6 +199,29 @@
   .so-menu button:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 10%,transparent); }
   .so-menu button:disabled { opacity:.5; cursor:not-allowed; }
   .net-off { opacity:.5; cursor:not-allowed !important; }
+  .kb-add { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+  .kb-row { display:flex; gap:8px; align-items:center; margin:10px 0; }
+  .kb-import { border:1px solid var(--border); border-radius:8px; padding:10px; margin:8px 0 4px; }
+  .kb-import-btns { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
+  .kb-imp { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left; padding:8px 10px; min-width:0; overflow:hidden; }
+  .kb-imp b { font-size:0.8125rem; font-family:var(--font-ui); white-space:normal; line-height:1.3; }
+  #kbRoot input[type=text] { min-width:0; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:8px 12px;
+                             color:var(--text); font-family:var(--font-ui); font-size:0.8125rem; outline:none; }
+  #kbRoot input[type=text]:focus { border-color:var(--accent); }
+  #kbRoot .kb-row select { width:100%; }
+  .kb-imp small { color:var(--muted); font-size:0.6875rem; font-weight:400; }
+  .kb-feeds { border-top:1px solid var(--border); margin-top:8px; padding-top:8px; }
+  .kb-feeds-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:0.8125rem; }
+  .kb-feeds-head .kb-imp { margin-left:auto; }
+  .kb-feed { display:flex; align-items:center; gap:8px; font-size:0.75rem; margin-top:6px; }
+  .kb-tier { margin-left:auto; font-size:0.6875rem; color:var(--muted); white-space:nowrap; padding-left:10px; }
+  .kb-lic { font-size:0.6875rem; padding:1px 7px; border-radius:var(--pill); border:1px solid var(--border); white-space:nowrap; }
+  .kb-lic.shareable { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent); }
+  .kb-lic.personal { color:var(--muted); }
+  .kb-share { border-top:1px solid var(--border); margin-top:10px; padding-top:10px; }
+  .kb-opt { display:flex; align-items:center; gap:6px; font-size:0.75rem; color:var(--muted); margin:8px 0 4px; }
+  #kbRoot.drag { outline:2px dashed var(--accent); outline-offset:6px; border-radius:8px; }
+  .kb-passage { white-space:pre-wrap; font-family:var(--font-ui); font-size:0.75rem; max-height:220px; overflow:auto; margin:6px 0 0; }
   .off-note { font-size:0.85em; font-weight:400; }
   body.ai-offline .quick-btn, body.ai-offline .send-btn:not(.stop) { opacity:.4; pointer-events:none; }
   .so-menu button span { color:var(--muted); font-family:var(--font-mono); font-size:0.6875rem; }
@@ -348,12 +371,13 @@
       <button class="btn" id="wanBtn" title="Internet speed and WAN events over time; scheduled speed tests">📈 WAN</button>
       <button class="btn" id="changesBtn" title="Every change made through this app, with Undo where possible">🧾 Changes</button>
       <div style="position:relative">
-        <button class="btn" id="toolsBtn" title="Port map, device detective, security scorecard, handbook, factory-reset kit, AI cost" aria-haspopup="true">🧰 Tools ▾</button>
+        <button class="btn" id="toolsBtn" title="Port map, device detective, security scorecard, handbook, knowledge library, factory-reset kit, AI cost" aria-haspopup="true">🧰 Tools ▾</button>
         <div id="toolsMenu" class="menu" style="left:auto;right:0;min-width:300px" hidden>
           <button class="menu-item" data-tool="ports"><span class="check">🔌</span><span>Switch port map<small>what is plugged into every port, PoE, errors</small></span></button>
           <button class="menu-item" data-tool="detective"><span class="check">🕵</span><span>Device detective<small>who is that unnamed or new device?</small></span></button>
           <button class="menu-item" data-tool="scorecard"><span class="check">🛡</span><span>Security scorecard<small>grade the network; fix with flinchbot</small></span></button>
           <button class="menu-item" data-tool="handbook"><span class="check">📘</span><span>Network handbook<small>printable documentation of the whole network</small></span></button>
+          <button class="menu-item" data-tool="knowledge"><span class="check">📚</span><span>Knowledge library<small>documents flinchbot can search: help articles, PDFs, notes</small></span></button>
           <button class="menu-item" data-tool="resetkit"><span class="check">♻</span><span>Factory-reset kit<small>what is customised, plus SSH restore commands</small></span></button>
           <button class="menu-item" data-tool="usage"><span class="check">💰</span><span>AI usage and cost<small>tokens and estimated spend</small></span></button>
           <button class="menu-item" data-tool="updates"><span class="check">⬆</span><span>Updates<small>check GitHub for a new version of this app</small></span></button>
@@ -2125,6 +2149,219 @@ async function openScorecard(extra = null) {
   $('modal').classList.add('wide');
 }
 
+// ── knowledge library ──────────────────────────────────────────────────────
+// Documents flinchbot can search (Ubiquiti help articles, release notes, PDFs, your own notes).
+// Kept in data/knowledge/ and indexed on this computer; the AI gets a search_knowledge tool.
+const KB_ACCEPT = '.pdf,.md,.markdown,.txt,.text,.rst,.html,.htm,.zip';
+async function openKnowledge() {
+  busyModal('Knowledge library', 'Loading…');
+  let s;
+  try { s = await api('GET', '/api/knowledge'); } catch (e) { failModal('Knowledge library', e, openKnowledge); return; }
+  renderKnowledge(s);
+}
+function fileAsBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).slice(String(r.result).indexOf(',') + 1));
+    r.onerror = () => rej(new Error(`couldn't read ${file.name}`));
+    r.readAsDataURL(file);
+  });
+}
+function renderKnowledge(s, note) {
+  const root = h('div', { id: 'kbRoot' });
+  const msg = h('div');
+  if (note) msg.append(note);
+  const say = (kind, text) => msg.replaceChildren(result(kind, text));
+
+  // add documents: files (button or drop), a web page, or the folder itself
+  const fileIn = h('input', { type: 'file', multiple: true, hidden: true, accept: KB_ACCEPT });
+  const addFiles = async list => {
+    const files = Array.from(list || []);
+    if (!files.length) return;
+    const done = [], bad = [];
+    for (const [i, f] of files.entries()) {
+      say('warn', `Adding ${f.name} (${i + 1} of ${files.length})…`);
+      try {
+        if (f.size > (/\.zip$/i.test(f.name) ? 60e6 : 30e6)) throw new Error(/\.zip$/i.test(f.name) ? 'over 60 MB' : 'over 30 MB');
+        s = await api('POST', '/api/knowledge/upload', { name: f.name, data: await fileAsBase64(f) });
+        done.push(s.added);
+      } catch (e) { bad.push(`${f.name}: ${e.message}`); }
+    }
+    renderKnowledge(s, h('div', {},
+      done.length ? result('ok', `Added ${done.join(', ')}.`) : null,
+      bad.length ? result('bad', `Not added: ${bad.join('; ')}`) : null));
+  };
+  fileIn.addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+  const url = h('input', { type: 'text', placeholder: 'https://help.ui.com/hc/en-us/articles/…', spellcheck: 'false', style: 'flex:1' });
+  const fetchBtn = needsNet(h('button', { class: 'btn' }, 'Add page'));
+  const fetchPage = async () => {
+    if (!url.value.trim()) { say('bad', 'Paste the address of a web page or PDF first.'); return; }
+    fetchBtn.disabled = true; say('warn', `Downloading ${url.value.trim()}…`);
+    try { s = await api('POST', '/api/knowledge/fetch', { url: url.value.trim() }); renderKnowledge(s, result('ok', `Added ${s.added}.`)); }
+    catch (e) { say('bad', e.message); fetchBtn.disabled = false; }
+  };
+  fetchBtn.addEventListener('click', fetchPage);
+  url.addEventListener('keydown', e => { if (e.key === 'Enter') fetchPage(); });
+
+
+  // bulk imports: Ubiquiti Help Center, Ubiquiti datasheets & guides, networking RFCs
+  const imp = s.importer || {}, counts = s.imported || {};
+  const allLines = h('input', { type: 'checkbox' });
+  const impBtn = (source, label, sub) => needsNet(h('button', { class: 'btn kb-imp', disabled: imp.running || null, onclick: async () => {
+    try { s = await api('POST', '/api/knowledge/import', { source, all_lines: allLines.checked }); renderKnowledge(s); }
+    catch (e) { say('bad', e.message); } } }, h('b', {}, label), h('small', {}, sub)));
+
+  // feeds: release notes, blogs; every item becomes a document, updated by Update feeds
+  const feedUrl = h('input', { type: 'text', placeholder: 'RSS or Atom feed address', spellcheck: 'false', style: 'flex:1' });
+  const subscribe = async (url, title) => {
+    try { s = await api('POST', '/api/knowledge/feeds/add', { url, title }); s = await api('POST', '/api/knowledge/import', { source: 'feeds' }); renderKnowledge(s, result('ok', `Subscribed to ${title || url}. Fetching its items now.`)); }
+    catch (e) { say('bad', e.message); }
+  };
+  const subscribed = new Set((s.feeds || []).map(f => f.url));
+  const feedBox = h('div', { class: 'kb-feeds' },
+    h('div', { class: 'kb-feeds-head' }, h('b', {}, '📰 Feeds'), h('span', { class: 'muted' }, ' release notes, blogs: every item becomes a document'),
+      (s.feeds || []).length ? impBtn('feeds', '↻ Update feeds', `${counts.feeds || 0} items in the library`) : null),
+    ...(s.feeds || []).map(f => h('div', { class: 'kb-feed' }, h('span', { style: 'flex:1' }, f.title, h('small', { class: 'muted mono' }, ` ${f.url}`)),
+      h('button', { class: 'btn', title: 'Unsubscribe and remove its items from the library', onclick: async () => {
+        if (!confirm(`Unsubscribe from “${f.title}” and remove its items from the library?`)) return;
+        try { s = await api('POST', '/api/knowledge/feeds/remove', { url: f.url }); renderKnowledge(s); } catch (e) { say('bad', e.message); } } }, '✕'))),
+    h('div', { class: 'kb-row', style: 'margin:6px 0 0' }, feedUrl, needsNet(h('button', { class: 'btn', onclick: () => feedUrl.value.trim() && subscribe(feedUrl.value.trim()) }, 'Subscribe'))),
+    (s.suggested_feeds || []).filter(f => !subscribed.has(f.url)).length ? h('div', { class: 'kb-row', style: 'margin:6px 0 0;flex-wrap:wrap' },
+      h('span', { class: 'muted', style: 'font-size:0.75rem' }, 'Suggested:'),
+      ...(s.suggested_feeds || []).filter(f => !subscribed.has(f.url)).map(f => needsNet(h('button', { class: 'btn', onclick: () => subscribe(f.url, f.title) }, `+ ${f.title}`)))) : null);
+  const tally = x => `${x.added} new, ${x.updated} updated, ${x.skipped} unchanged${x.web_only ? `, ${x.web_only} web-only guides skipped (no downloadable text)` : ''}${x.failed ? `, ${x.failed} failed` : ''}`;
+  const importBox = h('div', { class: 'kb-import' },
+    h('div', { class: 'kb-import-btns' },
+      impBtn('ui-help', '📘 Ubiquiti Help Center', counts['ui-help'] ? `${counts['ui-help']} articles in the library · update` : 'every English article'),
+      impBtn('ui-docs', '📄 Ubiquiti datasheets & guides', counts['ui-docs'] ? `${counts['ui-docs']} PDFs in the library · update` : 'datasheets, user, install and quick start guides'),
+      impBtn('rfc', '📜 Networking RFCs', counts.rfc ? `${counts.rfc} in the library · update` : 'IP, DHCP, DNS, IPv6, NAT, RADIUS, VPN, routing'),
+      impBtn('security', '🛡 Security guidance', counts.security ? `${counts.security} in the library · update` : 'NIST: Wi-Fi, firewalls, VPN, DNS, IPv6, zero trust, IoT')),
+    h('label', { class: 'kb-opt' }, allLines, ' Datasheets & guides for every Ubiquiti product line (UISP, airMAX…), not just UniFi'),
+    feedBox,
+    imp.running ? h('div', { class: 'result warn', style: 'display:flex;align-items:center;gap:10px' },
+        h('span', { style: 'flex:1' }, `Importing ${imp.label}… ${imp.done} of ${imp.total || '?'} (${tally(imp)})`),
+        h('button', { class: 'btn', onclick: async () => { try { s = await api('POST', '/api/knowledge/import/cancel', {}); renderKnowledge(s); } catch (e) { say('bad', e.message); } } }, 'Stop'))
+      : imp.finished_at ? h('div', { class: imp.error ? 'result bad' : 'result ok' }, imp.error || `${imp.label}: ${tally(imp)}.`,
+          imp.errors && imp.errors.length ? h('details', {}, h('summary', {}, 'What failed'), h('pre', { class: 'kb-passage' }, imp.errors.join('\n'))) : null)
+      : null,
+    h('div', { class: 'muted', style: 'font-size:0.6875rem;margin-top:4px' }, 'Ubiquiti’s documents are copyrighted: they’re downloaded to this computer for your own reference and stay in data/knowledge. RFCs and NIST/CISA publications may be shared (Export below). IEEE standards and vendor or community sites aren’t crawled: add single pages you need with Add page. Running an import again fetches only what changed.'));
+
+  // meaning search: an embedding model on the Local AI server
+  const embedSel = h('select', { style: 'flex:1' }, h('option', { value: '' }, 'Off: keyword search only'),
+    s.embed_model ? h('option', { value: s.embed_model, selected: true }, s.embed_model) : null);
+  embedSel.disabled = !s.local_ai;
+  if (s.local_ai) {
+    api('GET', '/api/knowledge/models').then(r => {
+      const cur = embedSel.value;
+      embedSel.replaceChildren(h('option', { value: '' }, 'Off: keyword search only'),
+        ...r.models.map(m => h('option', { value: m, selected: m === cur }, m + (/embed|bge|e5|minilm|gte/i.test(m) ? '  (embedding model)' : ''))));
+      if (cur && !r.models.includes(cur)) embedSel.prepend(h('option', { value: cur, selected: true }, `${cur} (not on the server)`));
+    }).catch(() => {});
+  }
+  embedSel.addEventListener('change', async () => {
+    try { s = await api('POST', '/api/knowledge/settings', { embed_model: embedSel.value }); renderKnowledge(s,
+      result('ok', embedSel.value ? `Meaning search on with ${embedSel.value}. Adding it to every passage now; keyword search works meanwhile.` : 'Meaning search off: keyword search only.')); }
+    catch (e) { say('bad', e.message); }
+  });
+
+  // share: only what may legally be shared (RFCs, NIST/CISA; your own files if you say so)
+  const shareable = s.documents.filter(d => d.licence === 'shareable').length, own = s.documents.filter(d => d.licence === 'yours').length;
+  const inclOwn = h('input', { type: 'checkbox' });
+  const exportBtn = h('button', { class: 'btn', disabled: !(shareable || own) || null }, '⇪ Export shareable library');
+  exportBtn.addEventListener('click', async () => {
+    exportBtn.disabled = true;
+    try {
+      const r = await api('POST', '/api/knowledge/export', { include_own: inclOwn.checked });
+      const bin = atob(r.data), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      download(r.filename, bytes, 'application/zip');
+      say('ok', `Exported ${r.included} document${r.included === 1 ? '' : 's'} with a NOTICE crediting each. Left out ${r.left_out} that may not be shared (Ubiquiti, IEEE, vendor and blog material${inclOwn.checked ? '' : ', and your own files'}). The search index is never exported; the person who opens it rebuilds theirs.`);
+    } catch (e) { say('bad', e.message); }
+    finally { exportBtn.disabled = false; }
+  });
+  const shareBox = h('div', { class: 'kb-share' },
+    h('div', { class: 'kb-row', style: 'margin:0;flex-wrap:wrap' }, exportBtn,
+      h('label', { class: 'kb-opt', style: 'margin:0' }, inclOwn, ` Include my own documents (${own}) — only if I have the right to share them`)),
+    h('div', { class: 'muted', style: 'font-size:0.6875rem;margin-top:4px' },
+      `${shareable} shareable: RFCs (IETF Trust terms) and NIST/CISA publications (US Government works). Everything else stays on this computer. ` +
+      'To open a library someone shared with you, add its .zip with Add files.'));
+
+  // try a search: see what the AI would find
+  const q = h('input', { type: 'text', placeholder: 'Try a search, e.g. band steering IoT devices drop', style: 'flex:1' });
+  const found = h('div');
+  const trySearch = async () => {
+    if (!q.value.trim()) return;
+    found.replaceChildren(result('warn', 'Searching…'));
+    try {
+      const r = await api('POST', '/api/knowledge/search', { query: q.value.trim(), k: 5 });
+      found.replaceChildren(
+        h('div', { class: 'muted', style: 'font-size:0.75rem;margin:6px 0' }, `Search: ${r.mode}.${r.note ? ' ' + r.note : ''}`),
+        ...r.results.map(x => h('details', { class: 'chg' },
+          h('summary', {}, h('span', { class: 'what' }, x.title, x.section ? h('small', { class: 'muted' }, ` · ${x.section}`) : null),
+            h('span', { class: 'kb-tier', title: 'How much flinchbot trusts this source' }, x.authority)),
+          h('pre', { class: 'kb-passage' }, x.text))));
+    } catch (e) { found.replaceChildren(result('bad', e.message)); }
+  };
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') trySearch(); });
+
+  // status and documents
+  const job = s.job || {};
+  const meaning = s.embed_model ? ` + meaning (${s.embed_model}: ${s.with_meaning.toLocaleString()} of ${s.passages.toLocaleString()} passages)` : '';
+  const statusLine = h('div', { class: 'note', style: 'margin:0 0 12px' },
+    `${s.documents.length} document${s.documents.length === 1 ? '' : 's'} · ${s.passages.toLocaleString()} passages · search: keyword${meaning}.`,
+    s.reading && s.reading.running ? h('div', {}, `Reading documents… ${s.reading.done} of ${s.reading.total}. Searches use what’s already read meanwhile.`) : null,
+    job.running ? h('div', {}, `Adding meaning search… ${job.done} of ${job.total}`) : null,
+    !job.running && job.error ? h('div', { style: 'color:var(--danger)' }, `Meaning search: ${job.error}`) : null);
+  const del = async d => {
+    if (!confirm(`Remove “${d.title}” from the knowledge library? The file is deleted from data/knowledge.`)) return;
+    try { s = await api('POST', '/api/knowledge/delete', { name: d.name }); renderKnowledge(s, result('ok', `Removed ${d.name}.`)); }
+    catch (e) { say('bad', e.message); }
+  };
+  const docs = s.documents.length ? h('table', { class: 'data-table' },
+    h('thead', {}, h('tr', {}, ...['Document', 'Authority', 'Sharing', 'Size', 'Passages', 'Added', ''].map(t => h('th', {}, t)))),
+    h('tbody', {}, ...s.documents.map(d => h('tr', {},
+      h('td', {}, h('div', {}, d.title), d.title !== d.name ? h('small', { class: 'muted mono' }, d.name) : null,
+        d.error ? h('div', { style: 'color:var(--danger);font-size:0.75rem' }, d.error) : null),
+      h('td', { style: 'font-size:0.75rem' }, d.authority),
+      h('td', {}, h('span', { class: `kb-lic ${d.licence}`, title: d.licence_why }, { shareable: 'shareable', personal: 'personal use', yours: 'yours' }[d.licence] || d.licence)),
+      h('td', { class: 'mono' }, fmtSize(d.size)),
+      h('td', { class: 'mono' }, String(d.passages), s.embed_model && d.passages && d.with_meaning === d.passages ? ' ✓' : ''),
+      h('td', {}, fmtWhen(d.added)),
+      h('td', {}, h('button', { class: 'btn', title: 'Remove from the library', onclick: () => del(d) }, '✕'))))))
+    : h('div', { class: 'muted', style: 'padding:12px 0' }, 'No documents yet. Add Ubiquiti help articles, UniFi release notes, PDFs or your own notes.');
+
+  root.append(statusLine, msg,
+    h('div', { class: 'kb-add' },
+      h('button', { class: 'btn primary', onclick: () => fileIn.click() }, '📄 Add files'),
+      h('button', { class: 'btn', title: 'Open data/knowledge on this computer to drop in many files at once', onclick: async () => {
+        try { await api('POST', '/api/knowledge/open', {}); toast('Opened the folder. Files you put there are read the next time the library is opened or searched.'); }
+        catch (e) { say('bad', e.message); } } }, '📂 Open the folder'),
+      h('span', { class: 'muted', style: 'font-size:0.75rem' }, 'PDF, Markdown, text, HTML · or drop files here'), fileIn),
+    importBox,
+    h('div', { class: 'kb-row' }, url, fetchBtn),
+    field('Meaning search (optional)', h('div', { class: 'kb-row', style: 'margin:0' }, embedSel),
+      s.local_ai ? 'Finds passages that say the same thing in other words. Pick an embedding model on your Local AI server, such as nomic-embed-text (Ollama: ollama pull nomic-embed-text). The passages go only to that server.'
+                 : 'Needs a Local AI server with an embedding model (Settings → Local AI). Keyword search works without it.'),
+    h('div', { class: 'kb-row' }, q, h('button', { class: 'btn', onclick: trySearch }, 'Search')), found,
+    shareBox,
+    h('div', { style: 'max-height:36vh;overflow:auto;margin-top:10px' }, docs));
+  root.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); root.classList.add('drag'); } });
+  root.addEventListener('dragleave', e => { if (!root.contains(e.relatedTarget)) root.classList.remove('drag'); });
+  root.addEventListener('drop', e => { e.preventDefault(); root.classList.remove('drag'); addFiles(e.dataTransfer.files); });
+
+  openModal(...modalHead('Knowledge library', 'Documents flinchbot can search when it answers: Ubiquiti help articles, UniFi release notes, vendor PDFs, your own notes. ' +
+      'Kept in data/knowledge on this computer and read here; the AI sees only the passages that match a question. Treat added files like attachments: remove passwords first.'),
+    root,
+    h('div', { class: 'actions' }, h('span', { class: 'left' }, h('button', { class: 'btn', title: 'Read every document again', onclick: async () => {
+        try { s = await api('POST', '/api/knowledge/rebuild', {}); renderKnowledge(s, result('ok', 'Read every document again.')); } catch (e) { say('bad', e.message); } } }, '↻ Read all again')),
+      h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
+  $('modal').classList.add('wide');
+  if (job.running || imp.running || (s.reading && s.reading.running)) setTimeout(async () => {   // keep progress current while importing / reading / adding vectors
+    if (!document.getElementById('kbRoot')) return;
+    try { const n = await api('GET', '/api/knowledge'); if (document.getElementById('kbRoot')) renderKnowledge(n); } catch {}
+  }, 2000);
+}
+
 // ── network handbook ───────────────────────────────────────────────────────
 function openHandbook() {
   if (needConnection()) return;
@@ -2506,7 +2743,7 @@ $('toolsMenu').addEventListener('click', e => {
   const b = e.target.closest('[data-tool]'); if (!b) return;
   $('toolsMenu').hidden = true;
   ({ ports: openPortMap, detective: openDetective, scorecard: openScorecard, handbook: openHandbook,
-     resetkit: openResetKit, usage: openUsage, updates: () => openUpdates(true) })[b.dataset.tool]();
+     resetkit: openResetKit, usage: openUsage, updates: () => openUpdates(true), knowledge: openKnowledge })[b.dataset.tool]();
 });
 
 $('exportBtn').addEventListener('click', e => { e.stopPropagation(); $('exportMenu').hidden = !$('exportMenu').hidden; });
