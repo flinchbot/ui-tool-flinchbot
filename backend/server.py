@@ -59,7 +59,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.15.1"
+APP_VERSION = "2.16.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -159,6 +159,7 @@ def agent_settings(provider=None):
         # instructions and tool list, the rest is shared by the answer and the conversation.
         ctx = cfg.local_context()
         s["base_url"], s["context"] = cfg.get_setting("LOCAL_AI_URL"), ctx
+        s["kb_first"] = cfg.get_setting("LOCAL_AI_KB_FIRST") != "0"
         s["max_tokens"] = min(s["max_tokens"], max(1024, ctx // 8))
         s["history_chars"] = max(16_000, (ctx - s["max_tokens"] - 7000) * 3)
     return s
@@ -525,7 +526,8 @@ def r_settings_get(_):
                            "key_prefix": cls.key_prefix, "key_set": bool(key),
                            "key_hint": mask_key(key), "model": cfg.provider_model(name),
                            "ready": cfg.provider_ready(name)}
-    providers["local"].update(url=cfg.get_setting("LOCAL_AI_URL"), context=cfg.local_context())
+    providers["local"].update(url=cfg.get_setting("LOCAL_AI_URL"), context=cfg.local_context(),
+                              kb_first=cfg.get_setting("LOCAL_AI_KB_FIRST") != "0")
     return {"provider": cfg.active_provider(), "providers": providers, "fallback": cfg.fallback_list(),
             "port": int(cfg.get_setting("SERVER_PORT")),
             "running_port": HTTP_PORT,
@@ -567,6 +569,8 @@ def r_settings_save(b):
     local = b.get("local") or {}
     if "url" in local:
         updates["LOCAL_AI_URL"] = normalize_base_url(local["url"])     # raises ValueError for a non-address
+    if "kb_first" in local:
+        updates["LOCAL_AI_KB_FIRST"] = "1" if local["kb_first"] else "0"
     if local.get("context") not in (None, ""):
         ctx = int(local["context"])
         if not 2048 <= ctx <= 2_000_000:

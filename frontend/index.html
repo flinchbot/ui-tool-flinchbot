@@ -212,6 +212,12 @@
   .so-menu button:disabled { opacity:.5; cursor:not-allowed; }
   .net-off { opacity:.5; cursor:not-allowed !important; }
   #kbRoot { display:flex; flex-direction:column; gap:10px; }
+  .set-tabs { display:flex; gap:6px; margin:-4px 0 16px; border-bottom:1px solid var(--border); }
+  .set-tabs button { background:none; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:var(--muted); cursor:pointer; font-size:0.875rem; margin-bottom:-1px; }
+  .set-tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .field .set-check { display:flex; font-weight:400; font-size:0.8125rem; color:var(--text); margin-bottom:6px; }
+  .field .set-check input { width:auto; margin:0; }
+  .kb-used { color:var(--muted); }
   #kbRoot input[type=text] { flex:1; min-width:0; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:8px 12px;
                              color:var(--text); font-family:var(--font-ui); font-size:0.8125rem; outline:none; }
   #kbRoot input[type=text]:focus { border-color:var(--accent); }
@@ -410,13 +416,12 @@
       <button class="btn" id="wanBtn" title="Internet speed and WAN events over time; scheduled speed tests">📈 WAN</button>
       <button class="btn" id="changesBtn" title="Every change made through this app, with Undo where possible">🧾 Changes</button>
       <div style="position:relative">
-        <button class="btn" id="toolsBtn" title="Port map, device detective, security scorecard, handbook, knowledge library, factory-reset kit, AI cost" aria-haspopup="true">🧰 Tools ▾</button>
+        <button class="btn" id="toolsBtn" title="Port map, device detective, security scorecard, handbook, factory-reset kit, AI cost" aria-haspopup="true">🧰 Tools ▾</button>
         <div id="toolsMenu" class="menu" style="left:auto;right:0;min-width:300px" hidden>
           <button class="menu-item" data-tool="ports"><span class="check">🔌</span><span>Switch port map<small>what is plugged into every port, PoE, errors</small></span></button>
           <button class="menu-item" data-tool="detective"><span class="check">🕵</span><span>Device detective<small>who is that unnamed or new device?</small></span></button>
           <button class="menu-item" data-tool="scorecard"><span class="check">🛡</span><span>Security scorecard<small>grade the network; fix with flinchbot</small></span></button>
           <button class="menu-item" data-tool="handbook"><span class="check">📘</span><span>Network handbook<small>printable documentation of the whole network</small></span></button>
-          <button class="menu-item" data-tool="knowledge"><span class="check">📚</span><span>Knowledge library<small>documents flinchbot can search: help articles, PDFs, notes</small></span></button>
           <button class="menu-item" data-tool="resetkit"><span class="check">♻</span><span>Factory-reset kit<small>what is customised, plus SSH restore commands</small></span></button>
           <button class="menu-item" data-tool="usage"><span class="check">💰</span><span>AI usage and cost<small>tokens and estimated spend</small></span></button>
           <button class="menu-item" data-tool="updates"><span class="check">⬆</span><span>Updates<small>check GitHub for a new version of this app</small></span></button>
@@ -909,6 +914,11 @@ async function runChat(path, body) {
     if (d.stopped) addStopped(path, d);
     if (d.fell_back && d.fell_back.length) addFellBack(d.fell_back, d.fallback_offer ? null : d.by);
     if (d.fallback_offer) addFallbackOffer(d.fallback_offer);
+    if (d.knowledge && d.knowledge.length) {
+      const t = `Searched the knowledge library first: ${d.knowledge.slice(0, 3).join(' · ')}${d.knowledge.length > 3 ? ` and ${d.knowledge.length - 3} more` : ''}`;
+      transcript.push({ kind: 'note', text: t, at: new Date() });
+      $('messages').append(h('div', { class: 'msg-stopped kb-used', title: 'Settings → Local AI → Search the knowledge library first' }, '📚 ', t));
+    }
     let el = null;
     if (d.reply && d.reply.trim()) el = addMessage('assistant', d.reply, { by: d.by, second: !!d.second_opinion });
     if (d.usage) renderUsageChip(d.usage);
@@ -1172,7 +1182,8 @@ function localSection(info, wizard) {
     if (!model.value) { out.replaceChildren(result('bad', 'Pick a model first.')); return false; }
     return true;
   };
-  sec.payload = () => (url.value.trim() || info.url) ? { url: url.value.trim(), context: Number(context.value) || 32768 } : undefined;
+  const kbFirst = h('input', { type: 'checkbox', checked: info.kb_first !== false || null });
+  sec.payload = () => (url.value.trim() || info.url) ? { url: url.value.trim(), context: Number(context.value) || 32768, kb_first: kbFirst.checked } : undefined;
   sec.el = h('div', {},
     h('div', { class: 'note' }, 'Use an AI running on your own computer or one in your office. Your network data goes only to that server. ',
       'Nothing goes to Anthropic or OpenAI unless you ask for a second opinion.'),
@@ -1188,7 +1199,11 @@ function localSection(info, wizard) {
     field('Model', model, 'Pick one with tool support. Small models (7–8B) often call the wrong tool; 20B or larger works much better. Changes still wait for Approve.'),
     field('Context size (tokens)', context, 'How much the server reads per request. 32,768 or more is recommended: the instructions and tools alone are about 6,000. Set the same on the server.'),
     h('div', { class: 'actions', style: 'justify-content:flex-start;margin:-6px 0 8px' }, btnCheck),
-    checkOut);
+    checkOut,
+    field('Knowledge library', h('label', { class: 'kb-check set-check' }, kbFirst, ' Search the knowledge library first'),
+      'Before the local model answers, the app searches your knowledge library with your question and gives the model the best '
+      + 'passages, so it can’t skip the lookup and answer from memory. Costs about 2,000 tokens per question; only used when '
+      + 'the library has documents. The model can still search again itself.'));
   return sec;
 }
 // The assistant is always "flinchbot" in the chat; which AI powers it is shown in About/exports/reports.
@@ -1197,7 +1212,7 @@ const aiName = () => BOT_NAME;
 const providerName = () => (status && status.provider_label) || 'AI';
 function botAvatar() { return h('img', { src: '/static/flinchbot-icon.png', alt: '' }); }
 
-async function openSettings(wizard) {
+async function openSettings(wizard, tab) {
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { toast(e.message, true); return; }
   let provider = s.provider;
@@ -1327,8 +1342,28 @@ async function openSettings(wizard) {
       h('h3', { style: 'font-size:15px;margin-bottom:12px' }, 'Step 1 · Choose your AI'),
       ...body, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => save(() => openConnections(null, true, true)) }, 'Save & continue →')));
   } else {
-    openModal(...modalHead('Settings', `Saved to ${s.env_path}`), ...body,
+    // Two tabs: the AI (saved with Save) and the knowledge library (each action applies at once)
+    const paneAI = h('div', {}, ...body,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), h('button', { class: 'btn primary', onclick: () => save() }, 'Save')));
+    const paneKB = h('div', { hidden: true });
+    const tabAI = h('button', { type: 'button', class: 'on' }, '🤖 AI'), tabKB = h('button', { type: 'button' }, '📚 Knowledge library');
+    let kbLoaded = false;
+    const show = async which => {
+      const kb = which === 'knowledge';
+      tabAI.className = kb ? '' : 'on'; tabKB.className = kb ? 'on' : '';
+      paneAI.hidden = kb; paneKB.hidden = !kb;
+      $('modal').classList.toggle('wide', kb);
+      if (kb && !kbLoaded) {
+        kbLoaded = true;
+        paneKB.replaceChildren(result('warn', 'Loading…'));
+        try { const p = await knowledgePane(); paneKB.replaceChildren(p.el); p.start(); }
+        catch (e) { kbLoaded = false; paneKB.replaceChildren(result('bad', e.message)); }
+      }
+    };
+    tabAI.addEventListener('click', () => show('ai'));
+    tabKB.addEventListener('click', () => show('knowledge'));
+    openModal(...modalHead('Settings', `Saved to ${s.env_path}`), h('div', { class: 'set-tabs' }, tabAI, tabKB), paneAI, paneKB);
+    if (tab === 'knowledge') show('knowledge');
   }
   choose(provider);
 }
@@ -2271,10 +2306,10 @@ function fileAsBase64(file) {
 const kbTally = x => [`${x.added} new`, x.updated ? `${x.updated} updated` : null, x.skipped ? `${x.skipped} unchanged` : null,
   x.web_only ? `${x.web_only} web-only guides skipped` : null, x.failed ? `${x.failed} failed` : null].filter(Boolean).join(', ');
 
-async function openKnowledge() {
-  busyModal('Knowledge library', 'Loading…');
-  let s;
-  try { s = await api('GET', '/api/knowledge'); } catch (e) { failModal('Knowledge library', e, openKnowledge); return; }
+function openKnowledge() { return openSettings(false, 'knowledge'); }
+
+async function knowledgePane() {
+  let s = await api('GET', '/api/knowledge');
   const root = h('div', { id: 'kbRoot' });
   const summary = h('div', { class: 'kb-summary' }), progress = h('div'), msg = h('div', { class: 'kb-msg' });
   const say = (kind, text) => { msg.replaceChildren(result(kind, text)); };
@@ -2514,15 +2549,13 @@ async function openKnowledge() {
     } finally { polling = false; }
   }
 
-  openModal(...modalHead('Knowledge library', 'Documents flinchbot searches when it answers. Stored and searched on this computer; the AI only sees the passages that match a question.'),
+  const el = h('div', {},
+    h('p', { class: 'lead', style: 'margin-top:0' }, 'Documents flinchbot searches when it answers. Stored and searched on this computer; the AI only sees the passages that match a question. Changes here apply at once.'),
     root,
     h('div', { class: 'actions' }, h('span', { class: 'left' }, h('button', { class: 'btn', title: 'Read every document again from scratch', onclick: async () => {
         try { apply(await api('POST', '/api/knowledge/rebuild', {})); say('ok', 'Reading every document again.'); poll(); } catch (e) { say('bad', e.message); } } }, '↻ Read all again')),
       h('button', { class: 'btn primary', onclick: closeModal }, 'Close')));
-  $('modal').classList.add('wide');
-  apply(s);
-  loadModels();
-  poll();
+  return { el, start: () => { apply(s); loadModels(); poll(); } };
 }
 
 // ── network handbook ───────────────────────────────────────────────────────
@@ -2906,7 +2939,7 @@ $('toolsMenu').addEventListener('click', e => {
   const b = e.target.closest('[data-tool]'); if (!b) return;
   $('toolsMenu').hidden = true;
   ({ ports: openPortMap, detective: openDetective, scorecard: openScorecard, handbook: openHandbook,
-     resetkit: openResetKit, usage: openUsage, updates: () => openUpdates(true), knowledge: openKnowledge })[b.dataset.tool]();
+     resetkit: openResetKit, usage: openUsage, updates: () => openUpdates(true) })[b.dataset.tool]();
 });
 
 $('exportBtn').addEventListener('click', e => { e.stopPropagation(); $('exportMenu').hidden = !$('exportMenu').hidden; });

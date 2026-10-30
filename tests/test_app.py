@@ -1443,6 +1443,33 @@ class KnowledgeTests(unittest.TestCase):
         with self.assertRaises(self.k.KnowledgeError):
             self.k.add_url("ftp://example.com/x")
 
+    def test_search_first_for_local_ai(self):
+        """Settings → Local AI → Search the knowledge library first."""
+        import knowledge
+        fake = FakeLocalAI()
+        self.addCleanup(fake.stop)
+        settings = {"provider": "local", "provider_label": "Local AI", "api_key": "", "base_url": fake.url,
+                    "model": "qwen3:30b", "max_rounds": 3, "max_tokens": 4096, "kb_first": True}
+        a = agent_mod.Agent(lambda: None, lambda p=None: settings,
+                            lambda: {"name": "Lab", "console": "UniFi OS", "site": "default"}, knowledge=knowledge)
+        with RealOpenAI():
+            r = a.chat("my smart plugs keep dropping")                       # empty library: nothing added
+        self.assertNotIn("knowledge", r)
+        self.assertNotIn("knowledge_passages", json.dumps(fake.requests[-1]["messages"]))
+        self.add_samples()
+        with RealOpenAI():
+            r = a.chat("my smart plugs keep dropping")
+        self.assertEqual(r["knowledge"][0], "band-steering.md")
+        sent = fake.requests[-1]["messages"][-1]["content"]
+        self.assertTrue(sent.startswith("my smart plugs keep dropping\n\n[App note: the app searched"))
+        self.assertIn("<knowledge_passages>\n[1] band-steering.md › Wi-Fi › Band steering (Your own document)", sent)
+        self.assertIn("Turn it off for smart plugs", sent)
+        settings["kb_first"] = False                                          # off: the model decides itself
+        with RealOpenAI():
+            r = a.chat("my smart plugs keep dropping")
+        self.assertNotIn("knowledge", r)
+        self.assertNotIn("knowledge_passages", fake.requests[-1]["messages"][-1]["content"])
+
     def test_the_ai_gets_a_search_tool_only_with_documents(self):
         import knowledge
         a = agent_mod.Agent(lambda: None, lambda p=None: {"provider": "anthropic", "provider_label": "Claude",
@@ -2206,6 +2233,11 @@ class ServerTests(unittest.TestCase):
                          [{"provider": "anthropic", "ask": True}, {"provider": "local", "ask": False}])
         self.assertEqual(srv.agent_settings()["fallback"], [{"provider": "anthropic", "ask": True}])   # local isn't set up
         self.req("POST", "/api/settings", {"fallback": []})
+        self.assertTrue(self.req("GET", "/api/settings")[1]["providers"]["local"]["kb_first"])     # on by default
+        self.req("POST", "/api/settings", {"local": {"kb_first": False}})
+        self.assertEqual(cfg.get_setting("LOCAL_AI_KB_FIRST"), "0")
+        self.assertFalse(self.req("GET", "/api/settings")[1]["providers"]["local"]["kb_first"])
+        self.req("POST", "/api/settings", {"local": {"kb_first": True}})
         st = self.req("GET", "/api/status")[1]
         self.assertEqual([a["id"] for a in st["ai_ready"]], ["anthropic", "openai"])
         self.assertIn("online", st)                       # None until the background check runs

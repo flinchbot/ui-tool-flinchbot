@@ -95,6 +95,7 @@ DEFAULTS = {
     "LOCAL_AI_KEY":      "",                   # most local servers need none
     "LOCAL_AI_MODEL":    "",
     "LOCAL_AI_CONTEXT":  "32768",              # tokens the server reads per request; must match the server's own setting
+    "LOCAL_AI_KB_FIRST": "1",                  # search the knowledge library with each question before the local model answers
     "KNOWLEDGE_EMBED_MODEL": "",               # embedding model on the Local AI server for meaning search (optional)
     "AI_FALLBACK":       "",                   # AIs that take over when the chosen one can't answer, in order: "local,anthropic:ask"
     "SERVER_HOST":       "127.0.0.1",
@@ -105,7 +106,8 @@ DEFAULTS = {
 
 # Keys the settings UI is allowed to write. Anything else in .env is preserved.
 EDITABLE_KEYS = {"AI_PROVIDER", "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "SERVER_PORT",
-                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT", "KNOWLEDGE_EMBED_MODEL", "AI_FALLBACK"}
+                 "LOCAL_AI_URL", "LOCAL_AI_KEY", "LOCAL_AI_MODEL", "LOCAL_AI_CONTEXT", "KNOWLEDGE_EMBED_MODEL", "AI_FALLBACK",
+                 "LOCAL_AI_KB_FIRST"}
 
 # Per-provider .env keys
 PROVIDER_KEYS = {
