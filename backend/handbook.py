@@ -73,7 +73,26 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
     info = (data.get("sysinfo") or [{}])
     info = info[0] if isinstance(info, list) and info else info if isinstance(info, dict) else {}
     S = {s.get("key"): s for s in data.get("settings") or [] if isinstance(s, dict)}
+    U = data.get("unavailable") or {}
     sections = []
+
+    def gap(key, what):
+        """A note in place of data the console didn't return: "couldn't read the port forwards"
+        must never print as "None", and unread settings never as "off"."""
+        err = U.get(key)
+        if not err:
+            return ""
+        if err.get("kind") == "notfound":
+            return f'<p class="muted">{_e(what)}: not on this console.</p>'
+        return (f'<p class="warn">{_e(what)} couldn\'t be read from the console ({_e(err.get("error"))}), '
+                f'so this part is missing.</p>')
+
+    def table(key, what, headers, rows):
+        return gap(key, what) or _table(headers, rows)
+
+    def setting(value, missing="not reported"):
+        """A gateway setting: unknown when the settings couldn't be read, never "off"."""
+        return "unknown (gateway settings couldn't be read)" if "settings" in U else (value or missing)
 
     def section(sid, title, body):
         sections.append((sid, title, f'<h2 id="{sid}">{_e(title)}</h2>{body}'))
@@ -87,15 +106,20 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
     over = '<div class="cards">' + "".join(f'<div class="card"><b>{_e(v)}</b><span>{_e(l)}</span></div>' for v, l in cards) + "</div>"
     country = (S.get("country") or {}).get("code")
     tz = (S.get("locale") or {}).get("timezone")
+    usg = S.get("usg")
+    upnp = None if usg is None else ("on" if usg.get("upnp_enabled") else "off")
+    no_health = "unknown (couldn't be read)" if "health" in U else ""
     over += _table(["Item", "Value"], [
         ["Console", _e(f"{info.get('name') or info.get('hostname') or host} ({info.get('ubnt_device_type') or info.get('udm_version') or ''})")],
         ["Console address", _e(host)],
-        ["ISP", _e(wan.get("isp_name") or wan.get("isp_organization") or "")],
-        ["Gateway", _e(wan.get("gw_name") or "")],
-        ["Time zone", _e(tz or "")], ["Country code", _e(country or "")],
-        ["Intrusion prevention", _e((S.get("ips") or {}).get("ips_mode") or "")],
-        ["UPnP", "on" if (S.get("usg") or {}).get("upnp_enabled") else "off"],
+        ["ISP", _e(wan.get("isp_name") or wan.get("isp_organization") or no_health)],
+        ["Gateway", _e(wan.get("gw_name") or no_health)],
+        ["Time zone", _e(setting(tz, ""))], ["Country code", _e(setting(country, ""))],
+        ["Intrusion prevention", _e(setting((S.get("ips") or {}).get("ips_mode")))],
+        ["UPnP", _e(setting(upnp))],
     ])
+    over += "".join(gap(k, w) for k, w in (("settings", "Gateway settings"), ("health", "Current health"),
+                                           ("sysinfo", "Console details")))
     section("overview", "Overview", over)
 
     # networks
@@ -107,7 +131,8 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
             rows.append([_e(n.get("name")), _e(n.get("purpose")), _e(n.get("vlan") if n.get("vlan_enabled") or n.get("vlan") else "untagged"),
                          f"<code>{_e(n.get('ip_subnet') or '')}</code>", _e(dhcp), _e(dns), _e(n.get("domain_name") or ""),
                          _e(zones.get(n.get("firewall_zone_id")) or "")])
-    body = _table(["Name", "Purpose", "VLAN", "Gateway / subnet", "DHCP range", "DNS handed out", "Domain", "Firewall zone"], rows)
+    body = table("networks", "The networks", ["Name", "Purpose", "VLAN", "Gateway / subnet", "DHCP range",
+                                              "DNS handed out", "Domain", "Firewall zone"], rows)
     wans = [n for n in nets if n.get("purpose") == "wan"]
     if wans:
         body += "<h3>Internet (WAN)</h3>" + _table(["Name", "Type", "VLAN", "Zone"], [
@@ -178,12 +203,12 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
         extra = t.get("ips") or t.get("client_macs") or t.get("regions") or [netname.get(n, n) for n in t.get("network_ids") or []]
         port = f" port {t['port']}" if t.get("port") else ""
         return f"{zones.get(t.get('zone_id'), '?')}: {mt}{' ' + ', '.join(map(str, extra))[:200] if extra else ''}{port}"
-    body = _table(["Name", "Action", "Protocol", "From", "To", "On"], [
+    body = gap("zones", "Firewall zone names") + table("policies", "Firewall policies", ["Name", "Action", "Protocol", "From", "To", "On"], [
         [_e(x.get("name")), _e(x.get("action")), _e(x.get("protocol")), _e(target(x.get("source"))),
          _e(target(x.get("destination"))), "yes" if x.get("enabled", True) else "no"]
         for x in sorted(pol, key=lambda x: x.get("index") or 0)])
     pf = [x for x in data.get("port_forwards") or [] if isinstance(x, dict)]
-    body += "<h3>Port forwards</h3>" + _table(["Name", "WAN port", "To", "Protocol", "Source", "On"], [
+    body += "<h3>Port forwards</h3>" + table("port_forwards", "Port forwards", ["Name", "WAN port", "To", "Protocol", "Source", "On"], [
         [_e(x.get("name")), _e(x.get("dst_port")), f"<code>{_e(x.get('fwd'))}:{_e(x.get('fwd_port'))}</code>",
          _e(x.get("proto")), _e(x.get("src") or "any"), "yes" if x.get("enabled", True) else "no"] for x in pf])
     tr = [x for x in data.get("traffic_routes") or [] if isinstance(x, dict)]
@@ -191,7 +216,11 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
         body += "<h3>Policy-based routes</h3>" + _table(["Description", "Matches", "Via", "Kill switch", "On"], [
             [_e(x.get("description")), _e(x.get("matching_target")), _e(netname.get(x.get("network_id")) or x.get("next_hop") or ""),
              "yes" if x.get("kill_switch_enabled") else "no", "yes" if x.get("enabled", True) else "no"] for x in tr])
+    elif U.get("traffic_routes", {}).get("kind") not in (None, "notfound"):
+        body += "<h3>Policy-based routes</h3>" + gap("traffic_routes", "Policy-based routes")
     rt = [x for x in data.get("routes") or [] if isinstance(x, dict)]
+    if not rt and U.get("routes", {}).get("kind") not in (None, "notfound"):
+        body += "<h3>Static routes</h3>" + gap("routes", "Static routes")
     if rt:
         body += "<h3>Static routes</h3>" + _table(["Name", "Network", "Next hop", "On"], [
             [_e(x.get("name")), f"<code>{_e(x.get('static-route_network'))}</code>",
@@ -204,7 +233,8 @@ def build(data, network, host, include_passwords=False, changes=None, app_versio
              f"<code>{_e(u.get('fixed_ip'))}</code>" if u.get("use_fixedip") else "",
              _e(netname.get(u.get("network_id")) or "" if u.get("use_fixedip") else ""), _e(u.get("note") or "")]
             for u in sorted(users, key=lambda u: tuple(int(x) if x.isdigit() else 0 for x in str(u.get("fixed_ip") or "999").split(".")))]
-    section("clients", "Named clients and fixed IPs", _table(["Name", "MAC", "Fixed IP", "Network", "Note"], rows))
+    section("clients", "Named clients and fixed IPs",
+            table("users", "Named clients and fixed IPs", ["Name", "MAC", "Fixed IP", "Network", "Note"], rows))
 
     # current clients by network
     by_net = {}

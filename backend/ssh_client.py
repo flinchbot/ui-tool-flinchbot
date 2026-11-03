@@ -20,10 +20,16 @@ Security
   * Each command's options are checked the way the program itself reads them
     (glued short options, abbreviated long options), so "sort -o FILE" and
     "ip a a ADDR" are recognised as writes. curl always asks first.
+  * "#" is read the way the shell reads it (a comment only at the start of a word). A
+    command whose words the shell would still change (a wildcard or a $variable) asks
+    first, unless the program is harmless whatever its arguments.
+  * A program named by its path is accepted only from the system folders (/bin,
+    /usr/bin...): "/tmp/x/cat" is not cat.
 """
 
 import base64
 import hashlib
+import re
 import shlex
 import socket
 import threading
@@ -90,8 +96,10 @@ def _opts(args):
 
 
 def _long_hit(given, bad):
-    """GNU getopt_long accepts any unambiguous prefix, so '--out' is '--output'."""
-    return any(b == g or (len(g) >= 4 and b.startswith(g)) for g in given for b in bad)
+    """GNU getopt_long accepts any unambiguous prefix, even one letter: '--o' is '--output'
+    when no other long option starts with 'o'. A prefix shared with a harmless option is
+    ambiguous (the program refuses it), so counting it as a hit only means asking first."""
+    return any(len(g) >= 3 and b.startswith(g) for g in given for b in bad)
 
 
 def _deny(short="", long=(), max_pos=None):
@@ -156,6 +164,22 @@ def _iproute(args):
     return len(words) <= 1 or words[1] in _IPROUTE_READ
 
 
+def _ifconfig(args):
+    """Only "ifconfig [-a|-s|-v] [INTERFACE]". Settings are words after the interface, and
+    some are written with a dash ("-arp", "-promisc", "-allmulti"), so any other option or a
+    second word changes the interface."""
+    pos = [a for a in args if not a.startswith("-")]
+    return all(a in ("-a", "-s", "-v", "-S") for a in args if a.startswith("-")) and len(pos) <= 1
+
+
+def _nstat(args):
+    """nstat updates its history file unless told not to (-s); -r, -n and -d reset it,
+    write it without output, or start a daemon."""
+    s, l, _ = _opts(args)
+    keeps = "s" in s or _long_hit(l, ("--noupdate",))
+    return keeps and not (s & set("rnd") or _long_hit(l, ("--reset", "--nooutput", "--scan")))
+
+
 _ETHTOOL_READ = {"-i", "-S", "-k", "-a", "-g", "-c", "-l", "-m", "-P", "-T", "-d", "-e", "-x", "-u", "-n",
                  "--driver", "--statistics", "--module-info", "--register-dump", "--eeprom-dump",
                  "--phy-statistics"}
@@ -206,10 +230,9 @@ _READ_ONLY = {
     # network
     "ip": _iproute,
     "bridge": _iproute,
-    "ifconfig": lambda args: len([a for a in args if not a.startswith("-")]) <= 1 and
-                             not any(a in ("up", "down", "add", "del", "mtu", "netmask", "hw", "promisc") for a in args),
+    "ifconfig": _ifconfig,
     "ss": _deny("KD", ("--kill", "--diag")),
-    "netstat": None, "nstat": None,
+    "netstat": None, "nstat": _nstat,
     "arp": _deny("sdf", ("--set", "--delete", "--file")),
     "route": _no_words("add", "del", "delete", "flush", "change"),
     "ping": _count_given,
@@ -221,7 +244,7 @@ _READ_ONLY = {
     "nft": lambda args: bool(args) and args[0] == "list" and not any(a.startswith("-") for a in args),
     "ethtool": _ethtool,
     "brctl": _second_in("show", "showmacs", "showstp"),
-    "swconfig": lambda args: "show" in args and "set" not in args and "load" not in args,
+    "swconfig": lambda args: "show" in args and not any(a in ("set", "load", "apply", "reset") for a in args),
     "tcpdump": _all(_count_given, _deny("wzCG")),            # -w writes a file, -z runs a program
     # curl is not here: too many of its options write files or upload data (-o, -D, -c, -T, -d @file,
     # -H @file, --trace...). A curl command waits for approval like any other change.
@@ -236,11 +259,16 @@ _READ_ONLY = {
 
 _SHELL_PUNCT = {";", "&", "&&", "||", "(", ")", "<", ">", ">>", "<<", ">&", "<&", "|&"}
 _WRAPPERS = ("sudo", "nice", "ionice", "time")
-def _expands(command):
-    """True if the shell would expand part of the command into new words: brace expansion
-    ("{-o,/tmp/x}"), ANSI-C or locale quoting ($'-o', $"-o"), or ${...}. Text inside single
+_SYSTEM_DIRS = ("/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin")
+
+
+def _scan(command):
+    """-> (expands, wild). expands: the shell would build new words from part of the command:
+    brace expansion ("{-o,/tmp/x}"), ANSI-C or locale quoting ($'-o', $"-o"), or ${...}.
+    wild: a wildcard (* ? [) or a $variable the shell fills in, so the program gets words
+    nobody checked ("uniq *" can become "uniq a b", which overwrites b). Text inside single
     quotes is literal ('end$', '{' in a grep pattern), so it doesn't count."""
-    quote, i = None, -1
+    quote, i, wild = None, -1, False
     while i + 1 < len(command):
         i += 1
         ch = command[i]
@@ -254,15 +282,28 @@ def _expands(command):
         elif ch == '"':
             quote = None if quote == '"' else '"'
         elif ch == "$" and command[i + 1:i + 2] in ("'", '"', "{"):
-            return True
+            return True, wild
+        elif ch == "$":
+            wild = True
         elif ch in "{}" and quote is None:
-            return True
-    return False
+            return True, wild
+        elif ch in "*?[" and quote is None:
+            wild = True
+    return False, wild
+
+
+def _expands(command):
+    return _scan(command)[0]
+
+
+# "2>&1" (stderr into the same pipe) is the one redirection allowed, and only as a word of its own.
+_STDERR_TO_OUT = re.compile(r"(?<=\s)2>&1(?=\s|\||$)")
 
 
 def _tokens(command):
-    lex = shlex.shlex(command.replace(" 2>&1", " "), posix=True, punctuation_chars=True)
+    lex = shlex.shlex(_STDERR_TO_OUT.sub(" ", command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    lex.commenters = ""             # shlex ends a word at "#", the shell doesn't: "cat a#b; reboot"
     return list(lex)
 
 
@@ -274,7 +315,8 @@ def is_read_only(command):
         return False
     if "\n" in command or "\r" in command or "`" in command or "$(" in command:
         return False
-    if _expands(command):
+    expands, wild = _scan(command)
+    if expands:
         return False
     try:
         toks = _tokens(command)
@@ -297,14 +339,16 @@ def is_read_only(command):
             stage = stage[2:]
         if not stage:
             return False
-        name = stage[0].rsplit("/", 1)[-1]
+        folder, _, name = stage[0].rpartition("/")
+        if "/" in stage[0] and folder not in _SYSTEM_DIRS:
+            return False                    # "/tmp/x/cat" or "./cat" is some other program
         if "=" in name or "$" in name:      # VAR=value cmd, or a name built from a variable
             return False
         if name not in _READ_ONLY:
             return False
         rule = _READ_ONLY[name]
-        if rule is not None and not rule(stage[1:]):
-            return False
+        if rule is not None and (wild or not rule(stage[1:])):
+            return False                    # the rule can't vouch for words it never saw
     return True
 
 

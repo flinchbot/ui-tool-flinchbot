@@ -197,6 +197,25 @@ def describe(public):
     return f"Delete the {what} “{name}” that this change created"
 
 
+def _legacy(what):
+    """A record written by an older version kept no copy of what the change set, so Undo can't
+    tell whether anything was changed again since. It asks first, like any other conflict."""
+    return {"ok": False, "conflict": True, "legacy": True,
+            "detail": f"This change was logged by an older version of the app, which didn't keep what it set, "
+                      f"so Undo can't check whether {what} was changed again since. Undoing could overwrite "
+                      f"a newer change."}
+
+
+def _created_changes(created, current):
+    """Fields of a created object that differ now, including fields added or removed since.
+    Secrets the console doesn't send back aren't counted as removed."""
+    def own(k):
+        return not str(k).startswith("_") and k not in _SERVER_FIELDS
+    keys = {k for k in created if own(k) and (k in current or not is_secret_key(k))}
+    keys |= {k for k in current if own(k) and k not in created}
+    return {k: current.get(k) for k in keys if current.get(k) != created.get(k)}
+
+
 def undo(client, public, record_id, force=False):
     """Apply the undo. -> {"ok": True, "detail"} or {"ok": False, "conflict": True, "detail"}."""
     secrets = {}
@@ -212,6 +231,8 @@ def undo(client, public, record_id, force=False):
 
     if kind == "port_override":
         if "owned" not in full:            # logged by an older version: the whole port override goes back
+            if not force:
+                return _legacy(f"{full.get('name')}")
             client.restore_port_override(full["mac"], full["port_idx"], full.get("before"))
             return {"ok": True, "detail": f"Put back the previous settings of {full.get('name')}."}
         d = client.device_record(full["mac"])
@@ -240,6 +261,8 @@ def undo(client, public, record_id, force=False):
     if kind == "client_fields":
         owned = full.get("owned") or list(full["before"])
         after = full.get("after")
+        if not after and not force:
+            return _legacy(f"the name and note of client “{full.get('name') or full.get('mac')}”")
         if after and not force:
             now = _client_view(client.client_record(full["mac"]))
             changed = {k: now[k] for k in owned if k in after and now.get(k) != after[k]}
@@ -257,9 +280,11 @@ def undo(client, public, record_id, force=False):
             if e.kind == "notfound":
                 raise UniFiError(f"The {what} “{full.get('name')}” no longer exists.", "rollback")
             raise
+        if "after" not in full and not force:
+            return _legacy(f"the {what} “{full.get('name')}”")
         # Changed again since? Compare the fields we set. Secrets are compared too (here, never
         # shown), when the console returns them: undoing a password change must not quietly
-        # replace a newer password.
+        # replace a newer password. A field removed since counts as changed.
         changed = {k: current.get(k) for k, v in full.get("after", {}).items()
                    if k in full.get("before", {}) and (k in current or not is_secret_key(k))
                    and current.get(k) != v}
@@ -284,14 +309,16 @@ def undo(client, public, record_id, force=False):
 
     # delete_created: only if it is still what this change created
     created = full.get("created")
-    if created and not force:
+    if not force:
         try:
             current = client.get_object(obj_type, oid)
         except UniFiError as e:
             if e.kind != "notfound":
                 raise
             return {"ok": True, "detail": f"The {what} “{full.get('name')}” was already gone."}
-        changed = {k: current.get(k) for k, v in created.items() if k in current and current.get(k) != v}
+        if not created:
+            return _legacy(f"the {what} “{full.get('name')}”")
+        changed = _created_changes(created, current)
         if changed:
             return {"ok": False, "conflict": True, "changed": mask(changed),
                     "detail": f"The {what} “{full.get('name')}” was changed since it was created "

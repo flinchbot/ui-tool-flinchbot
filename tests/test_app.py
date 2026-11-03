@@ -1061,6 +1061,143 @@ class AgentTests(unittest.TestCase):
         last = self.agent.history[-1]
         self.assertEqual(len(last["results"]), 2)                       # both calls answered in the conversation
 
+    def test_undo_runs_only_on_the_console_and_site_the_change_was_made_on(self):
+        self.approve_tool("update_network", {"network_id": "n1", "settings": {"dhcpd_enabled": False}})
+        rid = self.changes.list()[0]["id"]
+        self.profile = dict(self.profile, host="10.9.9.9")         # the saved connection was edited: same id
+        rec = self.changes.list()[0]
+        self.assertTrue(rec["can_undo"])
+        self.assertFalse(rec["undo_here"])
+        self.assertIn("10.9.9.9", rec["undo_blocked"])
+        with self.assertRaises(UniFiError) as cm:
+            self.changes.undo(rid)
+        self.assertIn("now points to 10.9.9.9", str(cm.exception))
+        self.profile = dict(self.profile, host="127.0.0.1", site="branch")    # same console, another site
+        self.assertFalse(self.changes.list()[0]["undo_here"])
+        self.profile = dict(self.profile, site="default")
+        real = self.changes._get_client                             # edited between the check and the undo
+        self.changes._get_client = lambda: types.SimpleNamespace(profile={"id": "p1", "host": "10.9.9.9"})
+        with self.assertRaises(UniFiError):
+            self.changes.undo(rid)
+        self.changes._get_client = real
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], False)   # nothing was put back
+        self.assertTrue(self.changes.undo(rid)["ok"])
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], True)
+
+    def test_two_undos_at_once_recreate_a_deleted_wifi_only_once(self):
+        self.approve_tool("delete_wlan", {"wlan_id": "w1"})
+        rid = self.changes.list()[0]["id"]
+        orig, started, release, out = history.rollback.undo, threading.Event(), threading.Event(), []
+
+        def slow(*a, **k):
+            started.set()
+            release.wait(5)
+            return orig(*a, **k)
+        history.rollback.undo = slow
+        self.addCleanup(setattr, history.rollback, "undo", orig)
+        t = threading.Thread(target=lambda: out.append(self.changes.undo(rid)))
+        t.start()
+        self.assertTrue(started.wait(5))
+        with self.assertRaises(UniFiError) as cm:                   # a second click while the first runs
+            self.changes.undo(rid)
+        self.assertIn("being undone", str(cm.exception))
+        release.set()
+        t.join(5)
+        self.assertTrue(out[0]["ok"], out)
+        self.assertEqual(sum(1 for o in self.m.objects["wlanconf"].values() if o["name"] == "Home"), 1)
+        with self.assertRaises(UniFiError):
+            self.changes.undo(rid)
+
+    def test_an_undo_the_log_cant_record_still_succeeds_and_runs_only_once(self):
+        self.approve_tool("update_network", {"network_id": "n1", "settings": {"dhcpd_enabled": False}})
+        rid = self.changes.list()[0]["id"]
+
+        def broken(*a, **k):
+            raise OSError("disk full")
+        self.changes.record = broken
+        res = self.changes.undo(rid)
+        del self.changes.record
+        self.assertTrue(res["ok"], res)
+        self.assertIn("disk full", res["log_error"])
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], True)
+        rec = self.changes.list()[0]
+        self.assertEqual((rec["id"], rec["undone_by"], rec["can_undo"]), (rid, "unlogged", False))
+        with self.assertRaises(UniFiError):
+            self.changes.undo(rid)
+
+    def test_undo_of_a_record_from_an_older_version_asks_first(self):
+        import rollback
+        cases = [{"kind": "update", "object": "networkconf", "object_id": "n1", "name": "LAN",
+                  "before": {"dhcpd_enabled": False}},
+                 {"kind": "port_override", "object": "device", "mac": "aa:bb:cc:00:00:09", "port_idx": 1,
+                  "name": "Switch port 1", "before": None},
+                 {"kind": "client_fields", "object": "user", "mac": "aa:aa:aa:aa:aa:01", "object_id": "u1",
+                  "name": "Printer", "before": {"name": ""}},
+                 {"kind": "delete_created", "object": "wlanconf", "object_id": "w1", "name": "Home"}]
+        calls = len(self.m.calls)
+        for public in cases:
+            res = rollback.undo(self.client, public, "legacy")
+            self.assertTrue(res["conflict"] and res["legacy"], (public["kind"], res))
+            self.assertIn("older version", res["detail"])
+        self.assertFalse([c for c in self.m.calls[calls:] if c[0] != "GET" and "login" not in c[1]])  # nothing changed
+        self.assertIn("w1", self.m.objects["wlanconf"])
+        self.assertTrue(rollback.undo(self.client, cases[0], "legacy", force=True)["ok"])
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], False)
+
+    def test_undo_of_a_create_notices_fields_added_or_removed_since(self):
+        import rollback
+        self.approve_tool("create_wlan", {"name": "Guests", "password": "GuestPass1"})
+        rid = self.changes.list()[0]["id"]
+        new = next(o for o in self.m.objects["wlanconf"].values() if o["name"] == "Guests")
+        new["schedule_note"] = "added later"                            # a field the create didn't have
+        res = self.changes.undo(rid)
+        self.assertTrue(res["conflict"], res)
+        self.assertIn("schedule_note", res["detail"])
+        del new["schedule_note"]
+        gone = next(k for k in new if not k.startswith("_") and k not in ("name", "site_id", "external_id")
+                    and not rollback.is_secret_key(k))
+        new.pop(gone)                                                   # a field removed since
+        res = self.changes.undo(rid)
+        self.assertTrue(res["conflict"], res)
+        self.assertIn(gone, res["detail"])
+        self.assertTrue(self.changes.undo(rid, force=True)["ok"])
+        self.assertNotIn(new["_id"], self.m.objects["wlanconf"])
+
+    def test_an_ai_error_after_an_approved_change_still_reports_the_change(self):
+        FakeAnthropic.script = [[tool("t1", "update_network", {"network_id": "n1", "settings": {"dhcpd_enabled": False}})]]
+        self.agent.chat("turn dhcp off")                               # no second answer: the AI fails after
+        with self.assertRaises(Exception) as cm:
+            self.agent.decide(True)
+        changes = cm.exception.changes
+        self.assertTrue(changes[0]["ok"] and changes[0]["can_undo"], changes)
+        self.assertIs(self.m.objects["networkconf"]["n1"]["dhcpd_enabled"], False)
+        self.assertIsNone(self.agent.pending)
+        FakeAnthropic.script = [[text("ok")]]
+        self.assertEqual(self.agent.chat("and now?")["reply"], "ok")   # the conversation carries on
+        self.assertIn("couldn't answer after the change", json.dumps(FakeAnthropic.received[-1]["messages"][-1]))
+
+    def test_ssh_and_wan_history_stay_on_the_console_the_answer_started_on(self):
+        self.ctx.update(id="p1", host="127.0.0.1", port=self.m.port, ssh_enabled=True)
+        op = self.agent._op_context()
+        # the connection was edited meanwhile (same id, another address) and SSH rebuilt for it
+        self.ssh.target = {"id": "p1", "host": "10.0.0.9", "port": self.m.port, "site": "default"}
+        r, _ = self.agent._execute("s1", agent_mod.SSH_TOOL_NAME, {"command": "uptime"}, op=op)
+        self.assertTrue(r["is_error"] and "connection changed" in r["content"], r)
+        self.assertEqual(self.ssh.calls, [])
+        self.ssh.target = dict(self.ssh.target, host="127.0.0.1")
+        r, _ = self.agent._execute("s2", agent_mod.SSH_TOOL_NAME, {"command": "uptime"}, op=op)
+        self.assertFalse(r.get("is_error"), r)
+        self.assertEqual(self.ssh.calls, ["uptime"])
+        got = []
+        self.agent._get_wan = lambda days, client=None: got.append(client) or {"days": days}
+        r, _ = self.agent._execute("w1", agent_mod.WAN_TOOL_NAME, {"days": 3}, op=op)
+        self.assertFalse(r.get("is_error"), r)
+        self.assertIs(got[0], self.client)                             # read through that connection's client
+        self.ctx["host"] = "10.0.0.9"
+        r, _ = self.agent._execute("w2", agent_mod.WAN_TOOL_NAME, {"days": 3}, op=op)
+        self.assertTrue(r["is_error"] and "connection changed" in r["content"], r)
+        self.assertEqual(len(got), 1)
+
     def test_denied_and_non_undoable_changes_are_logged(self):
         FakeAnthropic.script = [[tool("t1", "block_client", {"mac": "de:ad:be:ef:00:01"})], [text("OK.")]]
         self.agent.chat("block it")
@@ -1113,7 +1250,7 @@ class AgentTests(unittest.TestCase):
         FakeAnthropic.script = [[text("ok")]]
         self.agent.chat("hi")
         self.assertNotIn("get_wan_history", {t["name"] for t in FakeAnthropic.received[-1]["tools"]})
-        self.agent._get_wan = lambda days: {"days": days, "summary": {"tests": 0}}
+        self.agent._get_wan = lambda days, client=None: {"days": days, "summary": {"tests": 0}}
         FakeAnthropic.script = [[tool("w", "get_wan_history", {"days": 500})], [text("ok")]]
         self.agent.chat("wan?")
         self.assertIn("get_wan_history", {t["name"] for t in FakeAnthropic.received[-2]["tools"]})
@@ -2304,6 +2441,24 @@ class SSHTests(unittest.TestCase):
         for c in needs_approval:
             self.assertFalse(ssh_client.is_read_only(c), c)
 
+    def test_second_review_bypasses_need_approval(self):
+        for cmd in ("cat a#b; reboot",                  # shlex read "#b; reboot" as a comment, the shell doesn't
+                    "cat x # ; reboot",
+                    "iptables --a INPUT -j DROP",       # one-letter abbreviation of --append
+                    "sort --o=/tmp/x f",
+                    "ifconfig eth0 -arp", "ifconfig eth0 -promisc",
+                    "uniq *",                           # the shell turns * into "a b": b is overwritten
+                    "sort $X f",
+                    "/tmp/x/cat f", "./cat f",          # not the system's cat
+                    "swconfig dev switch0 show apply",
+                    "nstat", "nstat -r", "nstat -s -r",     # nstat writes its history file
+                    "cat x 2>&1/tmp/y"):
+            self.assertFalse(ssh_client.is_read_only(cmd), cmd)
+        for cmd in ("cat /var/log/*.log", "grep -r 'a*b' /etc", "/usr/bin/uptime", "/bin/cat f", "nstat -s",
+                    "ifconfig -a", "ifconfig eth0", "cat x 2>&1 | grep y", "echo $HOME", 'grep "#x" f',
+                    "iptables -L -n", "journalctl --since today"):
+            self.assertTrue(ssh_client.is_read_only(cmd), cmd)
+
     def test_login_hostkey_pin_and_run(self):
         m = MockSSH()
         self.addCleanup(m.stop)
@@ -2639,6 +2794,17 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((w["schedule_hours"], w["summary"]["tests"]), (6, 1))
         self.assertTrue(w["svg"].startswith("<svg"))
         self.assertEqual(self.req("GET", "/api/changes")[1]["changes"][0]["label"], "Run a WAN speed test")
+
+    def test_5b_an_ai_error_after_approval_still_sends_the_change(self):
+        FakeAnthropic.script = [[tool("t1", "update_wlan", {"wlan_id": "w1", "settings": {"name": "Renamed"}})]]
+        s, r, _ = self.req("POST", "/api/chat", {"message": "rename the wifi"})
+        s, r, _ = self.req("POST", "/api/chat/decide", {"approve": True, "proposal": r["pending"][0]["proposal"]})
+        self.assertNotEqual(s, 200)                                    # the AI failed after the change ran...
+        self.assertTrue(r["changes"][0]["ok"] and r["changes"][0]["can_undo"], r)    # ...and the page hears of it
+        self.assertEqual(self.m.objects["wlanconf"]["w1"]["name"], "Renamed")
+        s, u, _ = self.req("POST", "/api/changes/undo", {"id": r["changes"][0]["id"]})
+        self.assertTrue(u["ok"], u)
+        self.assertEqual(self.m.objects["wlanconf"]["w1"]["name"], "Home")
 
 
 # ── v2.6: secrets, reset kit, port map, detective, scorecard, nmap, pricing ────
@@ -3285,6 +3451,45 @@ class ToolEndpointTests(unittest.TestCase):
         self.assertIsNone(self.req("GET", "/api/report")[1]["report"])
         self.assertEqual(os.path.dirname(srv._report_path("../../evil")), os.path.join(cfg.DATA_DIR, "reports"))
         self.assertIsNone(srv._report_path("../"))
+
+    def test_4_a_change_log_that_cant_be_written_doesnt_fail_a_finished_action(self):
+        sw = next(d for d in self.req("GET", "/api/portmap")[1]["devices"] if d["name"] == "Office switch")
+        orig = srv.changelog.record
+
+        def broken(*a, **k):
+            raise OSError("disk full")
+        srv.changelog.record = broken
+        try:
+            s, r, _ = self.req("POST", "/api/portmap/port", {"mac": sw["mac"], "port_idx": 5, "name": "Logless",
+                                                             "device": sw["name"]})
+            s2, b, _ = self.req("POST", "/api/backup", {})
+        finally:
+            srv.changelog.record = orig
+        self.assertEqual(s, 200, r)                                    # the port was renamed: not an error
+        self.assertFalse(r["change"]["can_undo"])
+        self.assertIn("disk full", r["change"]["log_error"])
+        self.assertEqual(s2, 200, b)
+        self.assertIn("disk full", b["log_error"])
+
+    def test_5_handbook_marks_what_it_couldnt_read(self):
+        import handbook
+        base = {"devices": [], "clients": [], "networks": [], "wlans": [], "port_forwards": [], "policies": [],
+                "zones": [], "settings": []}
+        html = handbook.build(dict(base, unavailable={"settings": {"kind": "http", "error": "HTTP 500"},
+                                                      "port_forwards": {"kind": "http", "error": "HTTP 500"},
+                                                      "users": {"kind": "http", "error": "HTTP 500"}}), "Home", "h")
+        self.assertIn("<td>UPnP</td><td>unknown (gateway settings couldn&#x27;t be read)</td>", html)
+        self.assertNotIn("<td>UPnP</td><td>off</td>", html)
+        self.assertIn("Port forwards couldn't be read from the console (HTTP 500)", html)
+        self.assertIn("Named clients and fixed IPs couldn't be read", html)
+        self.assertNotIn('<p class="muted">None.</p><h3>Static', html)
+        html = handbook.build(dict(base, settings=[{"key": "usg", "upnp_enabled": False}]), "Home", "h")
+        self.assertIn("<td>UPnP</td><td>off</td>", html)                # read, and really off
+        self.assertNotIn("couldn't be read", html)
+        self.assertNotIn("couldn&#x27;t be read", html)
+        s, hb, _ = self.req("GET", "/api/handbook")
+        self.assertEqual(s, 200, hb)
+        self.assertIn("network handbook", hb["html"])
 
 
 

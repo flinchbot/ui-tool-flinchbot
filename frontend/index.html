@@ -542,7 +542,7 @@ async function api(method, path, body, opts = {}) {
   if (r.status === 401 && data.kind === 'token') {
     showBanner('The app was restarted. Reload this page to reconnect.', [h('button', { class: 'btn', onclick: () => location.reload() }, 'Reload')]);
   }
-  if (!r.ok) throw Object.assign(new Error(data.error || `Request failed (${r.status})`), { kind: data.kind, status: r.status });
+  if (!r.ok) throw Object.assign(new Error(data.error || `Request failed (${r.status})`), { kind: data.kind, status: r.status, data });
   return data;
 }
 
@@ -839,7 +839,9 @@ function addApproval(pending) {
     const d = await runChat('/api/chat/decide', { approve: ok, proposal });
     approve.remove(); deny.remove();
     if (!d) { entry.decision = 'Not done'; decided.textContent = 'Nothing was done: see the message below.'; return; }
-    decided.textContent = ok ? 'Approved.' : 'Denied.';
+    const ran = (d.changes || []).some(c => c.ok && !c.skipped);
+    decided.textContent = !d.failed ? (ok ? 'Approved.' : 'Denied.')
+      : (ok ? (ran ? 'Approved. The change ran' : 'Approved') : 'Denied') + ', but the AI couldn\'t carry on afterwards: see the message below.';
     for (const c of d.changes || []) {
       if (c.skipped) decided.append(h('div', { class: 'muted' }, `■ Not run (Stop was pressed first): ${c.label}`));
       if (c.log_error) decided.append(h('div', { class: 'muted' }, `⚠ ${c.label}: ${c.log_error}`));
@@ -951,7 +953,11 @@ async function runChat(path, body) {
   } catch (e) {
     $('typing')?.remove();
     if (e.kind === 'stopped') { addStopped(path, null); ok = { stopped: true }; }
-    else addMessage('assistant', e.message, { error: true, plain: true });
+    else {
+      addMessage('assistant', e.message, { error: true, plain: true });
+      // Approve/Deny was carried out, then the AI failed: the card must still show what ran.
+      if (e.data && Array.isArray(e.data.changes)) ok = { changes: e.data.changes, failed: true };
+    }
   } finally {
     clearTimeout(stopTimer); stopTimer = null; chatAbort = null;
     setBusy(false); $('chatInput').focus();
@@ -2036,8 +2042,8 @@ async function undoChange(id, label, describe, btn) {
       if (!confirm(`${r.detail}\n\nUndo anyway?`)) { if (btn) btn.disabled = false; return false; }
       r = await api('POST', '/api/changes/undo', { id, force: true });
     }
-    toast(r.detail || 'Undone.');
-    addMessage('assistant', `↶ Undone: ${label}. ${r.detail || ''}`, { plain: true });
+    toast((r.detail || 'Undone.') + (r.log_error ? ` ⚠ ${r.log_error}` : ''), !!r.log_error);
+    addMessage('assistant', `↶ Undone: ${label}. ${r.detail || ''}${r.log_error ? ` ⚠ ${r.log_error}` : ''}`, { plain: true });
     if (btn) btn.replaceWith(h('span', { class: 'muted', style: 'margin-left:8px' }, '↶ Undone.'));
     refreshNetwork();
     return true;
@@ -2071,7 +2077,7 @@ async function openChanges(scope = 'here') {
         inputJson !== '{}' ? h('pre', {}, inputJson) : null,
         c.result ? h('div', {}, h('b', {}, 'Console said: '), c.result) : null,
         c.note ? h('div', {}, h('b', {}, 'Note: '), c.note) : null,
-        c.rollback ? h('div', {}, h('b', {}, 'Undo: '), c.rollback.describe + (c.undone_by ? ' (already undone)' : c.can_undo && !c.undo_here ? ' (switch to this connection to undo)' : '')) : null));
+        c.rollback ? h('div', {}, h('b', {}, 'Undo: '), c.rollback.describe + (c.undone_by ? ' (already undone)' : c.can_undo && !c.undo_here ? ` (${c.undo_blocked || 'switch to this connection to undo'})` : '')) : null));
   });
   const segBtn = (key, label) => h('button', { type: 'button', class: scope === key ? 'on' : '', onclick: () => openChanges(key) }, label);
   const base = `unifi-flinchbot-changes_${stamp(new Date())}`;
@@ -2109,7 +2115,7 @@ async function openWan(days = 7) {
   runBtn.addEventListener('click', async () => {
     if (!confirm('Run a speed test on the gateway now? It uses the full internet connection for about a minute, so others on the network may notice.')) return;
     runBtn.disabled = true; runBtn.textContent = 'Testing… (up to 2 min)';
-    try { const t = await api('POST', '/api/wan/speedtest', {}); toast(`↓ ${f(t.point.download_mbps)} / ↑ ${f(t.point.upload_mbps)} Mbps, ${f(t.point.latency_ms)} ms`); openWan(days); }
+    try { const t = await api('POST', '/api/wan/speedtest', {}); toast(`↓ ${f(t.point.download_mbps)} / ↑ ${f(t.point.upload_mbps)} Mbps, ${f(t.point.latency_ms)} ms` + (t.log_error ? ` ⚠ ${t.log_error}` : ''), !!t.log_error); openWan(days); }
     catch (e) { toast(e.message, true); runBtn.disabled = false; runBtn.textContent = '▶ Run a speed test now'; }
   });
   const ask = h('button', { class: 'btn', onclick: () => { closeModal(); sendMessage({ display: `Analyse my WAN health for the last ${days === 1 ? '24 hours' : days + ' days'}`,
@@ -2150,7 +2156,8 @@ async function runBackup() {
     const bin = atob(r.data), bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     download(r.filename, bytes, 'application/octet-stream');
-    toast(`Saved ${r.filename} (${fmtSize(r.size)}) to Downloads. Restore it in UniFi: Settings → System → Backups.`);
+    toast(`Saved ${r.filename} (${fmtSize(r.size)}) to Downloads. Restore it in UniFi: Settings → System → Backups.`
+          + (r.log_error ? ` ⚠ ${r.log_error}` : ''), !!r.log_error);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; btn.textContent = label; }
 }
@@ -2193,7 +2200,10 @@ function svgViewer(svgText, cls = 'topo-view') {
   return { view, fit, zoom };
 }
 function askFlinchbot(display, text) { closeModal(); sendMessage({ display, text }); }
-function undoNote(r) { return r.change && r.change.can_undo ? ' Undo is in 🧾 Changes.' : ''; }
+function undoNote(r) {
+  if (r.change && r.change.log_error) return ` ⚠ ${r.change.log_error}`;
+  return r.change && r.change.can_undo ? ' Undo is in 🧾 Changes.' : '';
+}
 
 // ── switch port map ────────────────────────────────────────────────────────
 async function openPortMap() {

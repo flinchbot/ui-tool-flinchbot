@@ -555,6 +555,15 @@ class _Stopped(Exception):
     """The user pressed Stop while an answer was being worked on."""
 
 
+def _attach_changes(e, changes):
+    """Approve/Deny that fails after some changes ran: the error carries the card entries
+    (e.changes), and the server sends them with the error message."""
+    try:
+        e.changes = [c for c in changes if c]
+    except Exception:
+        pass
+
+
 class _CantAnswer(Exception):
     """The AI worked but produced nothing usable (empty answer, only broken tool calls)."""
 
@@ -660,9 +669,14 @@ class Agent:
     def _ssh(self, op):
         self._same_network(op, None, SSHError)
         s = self._get_ssh()
-        pid = getattr(s, "profile_id", None)
-        if op and op.get("id") and pid and pid != op["id"]:
-            self._same_network(op, {"id": pid}, SSHError)
+        # The SSH client says which console it was built for: an edit that kept the connection's
+        # id but changed its address must not move the command to the new address.
+        target = getattr(s, "target", None)
+        if not isinstance(target, dict) or not target.get("id"):
+            pid = getattr(s, "profile_id", None)
+            target = {"id": pid} if pid else None
+        if op and op.get("id") and target:
+            self._same_network(op, target, SSHError)
         return s
 
     @staticmethod
@@ -810,8 +824,9 @@ class Agent:
                         results.append(self._tool_result(
                             w["id"], "The user declined this action. Do not retry it unless they ask.", True))
                         self._log_change(w, d, "denied", op=op)
-            except BaseException:
+            except BaseException as e:
                 self._live = None
+                _attach_changes(e, changes)
                 raise
             finally:
                 done = {r["id"] for r in results}
@@ -830,6 +845,16 @@ class Agent:
                 self.pending = None
                 self._notes.append("The user pressed Stop before you finished answering after the change above.")
                 out = {"reply": "", "pending": None, "stopped": True}
+            except Exception as e:
+                # The AI failed after the decision was carried out. The changes still ran (or were
+                # denied): keep them, and hand them to the page with the error, so the card shows
+                # what happened (and Undo) instead of "nothing was done".
+                self.history = self.history[:mark]
+                self.pending = None
+                self._notes.append("You couldn't answer after the change above (an error), so the user "
+                                   "hasn't seen an answer about it.")
+                _attach_changes(e, changes)
+                raise
             finally:
                 self._live = None
             out["changes"] = changes
@@ -1116,8 +1141,9 @@ class Agent:
                     days = max(1, min(int(inp.get("days") or 7), 90))
                 except (TypeError, ValueError):
                     days = 7
-                self._same_network(op, None)
-                result = self._get_wan(days)
+                # The client of the connection this answer started on: the history is read through
+                # it, so switching or editing the connection meanwhile can't swap the network.
+                result = self._get_wan(days, self._client(op))
             elif name == KNOW_TOOL_NAME:
                 if not self._knowledge:
                     raise UniFiError("The knowledge library isn't available in this mode.", "input")

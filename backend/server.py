@@ -59,7 +59,7 @@ from unifi_client import summarize_event                               # noqa: E
 from urllib.parse import parse_qs                                      # noqa: E402
 import urllib.request                                                  # noqa: E402
 
-APP_VERSION = "2.16.0"
+APP_VERSION = "2.17.0"
 APP_TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 1_000_000
 MAX_CHAT_BODY = 40_000_000     # a chat message may carry up to 5 images of 5 MB (base64 adds a third)
@@ -102,6 +102,7 @@ class State:
                 self._ssh = SSHClient(profile["host"], profile.get("ssh_port"), profile.get("ssh_username"),
                                       secret, expected_hostkey=profile.get("ssh_hostkey"))
                 self._ssh.profile_id = profile["id"]        # lets the agent check it's the network it started on
+                self._ssh.target = {k: profile.get(k) for k in ("id", "host", "port", "site")}
                 self._ssh_profile = self._key(profile, self.SSH_KEYS)
             return self._ssh
 
@@ -197,9 +198,13 @@ def agent_context():
             "ssh_enabled": bool(p.get("ssh_enabled")), "ssh_username": p.get("ssh_username")}
 
 
-def wan_history(days):
-    """WAN history for the active connection (the AI's get_wan_history tool and the WAN view)."""
-    c, p = state.client(), cfg.active_profile()
+def wan_history(days, client=None):
+    """WAN history for one connection: the active one (the WAN view), or the one `client` belongs
+    to (the AI's get_wan_history tool passes the client of the connection its answer started on,
+    so a switch in the middle can't hand it another network's history)."""
+    c = client or state.client()
+    p = dict(c.profile)
+    p.update({k: v for k, v in (cfg.get_profile(p.get("id")) or {}).items() if k == "speedtest_hours"})
     points, events, notes = wan.collect(c, days, history.speedtests(p["id"]))
     current = None
     try:
@@ -212,6 +217,16 @@ def wan_history(days):
 
 
 changelog = history.ChangeLog(state.client, cfg.active_profile)
+
+
+def log_quietly(*args, **kw):
+    """Write to the change log after an action has run. A log that can't be written (disk full,
+    permissions) must not make a finished action look failed. -> (record or None, error or None)"""
+    try:
+        return changelog.record(*args, **kw), None
+    except Exception as e:
+        print(f"  change log failed: {type(e).__name__}: {e}")
+        return None, f"The change log couldn't be written ({e}), so this isn't in it."
 
 
 def record_usage(provider, model, usage, kind, chat_id):
@@ -237,6 +252,13 @@ def switch_connection():
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+def _ran(e):
+    """Approve/Deny can fail after the approved changes ran (the AI errors while answering
+    about them). The error then carries the card entries, so the page still shows what ran."""
+    changes = getattr(e, "changes", None)
+    return {"changes": changes} if isinstance(changes, list) else {}
+
+
 def ai_error_message(e):
     prov = cfg.active_provider()
     return provider_error_message(e, prov, cfg.provider_model(prov))
@@ -420,18 +442,18 @@ class Handler(BaseHTTPRequestHandler):
         except updater.UpdateError as e:
             self.send_json({"error": str(e), "kind": e.kind}, 400)
         except UniFiError as e:
-            self.send_json({"error": str(e), "kind": e.kind}, 502)
+            self.send_json({"error": str(e), "kind": e.kind, **_ran(e)}, 502)
         except SSHError as e:
             self.send_json({"error": str(e), "kind": "ssh_" + e.kind}, 502)
         except (AgentError, ValueError) as e:
-            self.send_json({"error": str(e)}, 400)
+            self.send_json({"error": str(e), **_ran(e)}, 400)
         except Exception as e:
             msg = ai_error_message(e)
             if msg:
-                self.send_json({"error": msg, "kind": "ai"}, 502)
+                self.send_json({"error": msg, "kind": "ai", **_ran(e)}, 502)
             else:
                 traceback.print_exc()
-                self.send_json({"error": f"Internal error: {type(e).__name__}: {e}"}, 500)
+                self.send_json({"error": f"Internal error: {type(e).__name__}: {e}", **_ran(e)}, 500)
 
     do_GET = do_POST = _dispatch
 
@@ -884,18 +906,22 @@ def r_wan(b):
 
 def r_wan_speedtest(_):
     """The user pressed 'Run a speed test now' (an explicit action, so no approval card); logged."""
-    c, p = state.client(), cfg.active_profile()
+    c = state.client()
+    p = dict(c.profile)
     try:
         point = wan.run_speedtest(c)
     except UniFiError as e:
-        changelog.record("speedtest", {}, "Run a WAN speed test", "approved",
-                         {"content": str(e), "is_error": True}, via="button")
+        log_quietly("speedtest", {}, "Run a WAN speed test", "approved",
+                    {"content": str(e), "is_error": True}, via="button", profile=p)
         raise
-    history.record_speedtest(p["id"], point, "button")
-    changelog.record("speedtest", {}, "Run a WAN speed test", "approved",
-                     {"content": f"{point['download_mbps']} / {point['upload_mbps']} Mbps, {point['latency_ms']} ms",
-                      "is_error": False}, via="button")
-    return {"point": point}
+    try:
+        history.record_speedtest(p["id"], point, "button")
+    except Exception as e:
+        print(f"  speed test history failed: {e}")
+    _, log_error = log_quietly("speedtest", {}, "Run a WAN speed test", "approved",
+                               {"content": f"{point['download_mbps']} / {point['upload_mbps']} Mbps, "
+                                           f"{point['latency_ms']} ms", "is_error": False}, via="button", profile=p)
+    return {"point": point, "log_error": log_error}
 
 
 def r_wan_schedule(b):
@@ -921,21 +947,22 @@ def r_backup(_):
     if not _backup_lock.acquire(blocking=False):
         raise AgentError("A backup is already being made. Wait for it to finish.")
     try:
-        c, p = state.client(), cfg.active_profile()
+        c = state.client()
+        p = dict(c.profile)
         try:
             body, console_name = c.download_backup()
         except UniFiError as e:
-            changelog.record("backup", {}, "Download a config backup", "approved",
-                             {"content": str(e), "is_error": True}, via="button")
+            log_quietly("backup", {}, "Download a config backup", "approved",
+                        {"content": str(e), "is_error": True}, via="button", profile=p)
             raise
         net = re.sub(r"[^A-Za-z0-9._-]+", "-", p["name"]).strip("-") or "unifi"
         version = console_name.rsplit(".unf", 1)[0]
         filename = f"unifi-backup_{net}_{datetime.now().strftime('%Y-%m-%d_%H%M')}_v{version}.unf"
-        changelog.record("backup", {}, "Download a config backup", "approved",
-                         {"content": f"{len(body):,} bytes, saved by the browser as {filename}", "is_error": False},
-                         via="button")
+        _, log_error = log_quietly("backup", {}, "Download a config backup", "approved",
+                                   {"content": f"{len(body):,} bytes, saved by the browser as {filename}",
+                                    "is_error": False}, via="button", profile=p)
         return {"filename": filename, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
-                "data": base64.b64encode(body).decode()}
+                "data": base64.b64encode(body).decode(), "log_error": log_error}
     finally:
         _backup_lock.release()
 
@@ -1176,13 +1203,16 @@ def button_action(tool, inp, target=""):
     except ToolInputError as e:
         raise ValueError(str(e))
     except UniFiError as e:
-        changelog.record(tool, inp, _LABEL_FOR[tool], "approved", {"content": str(e), "is_error": True},
-                         via="button", target=target, profile=p)
+        log_quietly(tool, inp, _LABEL_FOR[tool], "approved", {"content": str(e), "is_error": True},
+                    via="button", target=target, profile=p)
         raise
-    rec = changelog.record(tool, inp, _LABEL_FOR[tool], "approved",
-                           {"content": json.dumps(redact(result), default=str)[:400], "is_error": False},
-                           prep, via="button", note=note, target=target, result_obj=result, profile=p)
+    rec, log_error = log_quietly(tool, inp, _LABEL_FOR[tool], "approved",
+                                 {"content": json.dumps(redact(result), default=str)[:400], "is_error": False},
+                                 prep, via="button", note=note, target=target, result_obj=result, profile=p)
     agent.add_note(f"The user did this from a tool window: {_LABEL_FOR[tool]} {target}.")
+    if log_error:      # the change ran: say so, with no Undo (there's no record to undo it from)
+        return {"result": redact(result), "change": {"id": None, "can_undo": False,
+                                                     "log_error": log_error + " Undo isn't available for it."}}
     return {"result": redact(result), "change": {"id": rec["id"], "can_undo": bool(rec.get("rollback")),
                                                  "undo": (rec.get("rollback") or {}).get("describe")}}
 
@@ -1278,8 +1308,8 @@ def r_scorecard_scan(_):
             summary += f"; {sw['skipped']} not scanned ({sw['skipped_reason']})"
         if sw["timed_out"]:
             summary += f"; {len(sw['timed_out'])} didn't finish in time"
-        changelog.record("nmap_sweep", {"hosts": sw["submitted"]}, "Scan the LAN for risky open ports (Nmap)",
-                         "approved", {"content": summary, "is_error": False}, via="button")
+        log_quietly("nmap_sweep", {"hosts": sw["submitted"]}, "Scan the LAN for risky open ports (Nmap)",
+                    "approved", {"content": summary, "is_error": False}, via="button", profile=dict(c.profile))
         return {"findings": findings, "checked": checked, "requested": sw["requested"], "submitted": sw["submitted"],
                 "skipped": sw["skipped"], "skipped_reason": sw["skipped_reason"], "timed_out": sw["timed_out"],
                 "limit": nmap_scan.MAX_SWEEP_HOSTS}
@@ -1289,17 +1319,22 @@ def r_scorecard_scan(_):
 
 # ── network handbook ──────────────────────────────────────────────────────────
 def r_handbook(b):
-    c, p = state.client(), cfg.active_profile()
+    c = state.client()
+    p = dict(c.profile)
+    data = scorecard_data(c)
+    missing = data.setdefault("unavailable", {})
 
-    def opt(fn):
+    def opt(key, fn):
+        """Optional parts: one that can't be read is listed in the handbook as missing, not as empty."""
         try:
             return fn()
-        except UniFiError:
+        except UniFiError as e:
+            missing[key] = {"kind": e.kind, "error": str(e)}
             return []
-    data = scorecard_data(c)
-    data.update(health=opt(c.get_health), sysinfo=opt(c.get_system_info), routes=opt(c.get_routing),
-                traffic_routes=opt(lambda: c.get(c.v2("trafficroutes"))),
-                users=opt(lambda: c._data(c.get(c.api("rest/user")))))
+    data.update(health=opt("health", c.get_health), sysinfo=opt("sysinfo", c.get_system_info),
+                routes=opt("routes", c.get_routing),
+                traffic_routes=opt("traffic_routes", lambda: c.get(c.v2("trafficroutes"))),
+                users=opt("users", lambda: c._data(c.get(c.api("rest/user")))))
     with_pw = str(b.get("passwords") or "") in ("1", "true", "yes")
     html_text = handbook.build(data, p["name"], p["host"], include_passwords=with_pw,
                                changes=changelog.list(limit=40, connection_id=p["id"]), app_version=APP_VERSION)
