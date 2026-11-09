@@ -15,6 +15,7 @@ you silently talking to the wrong box (or a man-in-the-middle) after moving to a
 different network where the same IP belongs to something else.
 """
 
+import copy
 import functools
 import hashlib
 import http.client
@@ -151,6 +152,7 @@ class UniFiClient:
         self.csrf_token = None
         self.logged_in  = False
         self._routes = {}                    # endpoint variant that worked, per feature
+        self._cache = {}                     # path -> (monotonic time, response): see cached_get()
         self._lock = threading.RLock()
         # Sign-in circuit breaker. UniFi locks sign-ins after repeated failures, so a
         # rejected login is NEVER retried automatically: it stays blocked until the
@@ -342,8 +344,29 @@ class UniFiClient:
             self.logged_in = True
             return True
 
+    # The device and client lists are read by several tools in one answer (topology, port map,
+    # unknown clients, scorecard, get_devices/get_clients). For a few seconds they are served from
+    # memory: fewer round trips to the console, and identical data lets the agent tell the AI "same
+    # as before" instead of sending it again. Any change sent to the console empties the cache.
+    CACHE_TTL = 20
+
+    def cached_get(self, path):
+        with self._lock:
+            hit = self._cache.get(path)
+            if hit and time.monotonic() - hit[0] < self.CACHE_TTL:
+                return copy.deepcopy(hit[1])
+            resp = self.get(path)
+            self._cache[path] = (time.monotonic(), resp)
+            return copy.deepcopy(resp)
+
+    def clear_cache(self):
+        with self._lock:
+            self._cache.clear()
+
     def request(self, method, path, data=None, _retry=True):
         with self._lock:
+            if method != "GET":
+                self._cache.clear()          # a change: cached lists may now be wrong
             if not self.logged_in:
                 self.login()
             try:
@@ -420,8 +443,8 @@ class UniFiClient:
                 for s in sites if isinstance(s, dict)]
 
     # ── READ ──────────────────────────────────────────────────────────────────
-    def get_devices(self):         return self._data(self.get(self.api("stat/device")))
-    def get_clients(self):         return self._data(self.get(self.api("stat/sta")))
+    def get_devices(self):         return self._data(self.cached_get(self.api("stat/device")))
+    def get_clients(self):         return self._data(self.cached_get(self.api("stat/sta")))
     def get_health(self):          return self._data(self.get(self.api("stat/health")))
     def get_wlans(self):           return self._data(self.get(self.api("rest/wlanconf")))
     def get_networks(self):        return self._data(self.get(self.api("rest/networkconf")))

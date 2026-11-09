@@ -15,6 +15,7 @@ Safety model
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -32,7 +33,7 @@ import scorecard
 from rollback import is_secret_key, mask
 from ssh_client import SSHError, is_read_only
 from topology import build_model
-from unifi_client import UniFiError
+from unifi_client import UniFiError, summarize_event
 
 MAX_TOOL_CHARS    = 30_000    # per tool result sent to the model (~7.5k tokens)
 MAX_HISTORY_CHARS = 400_000   # whole conversation (~100k tokens) before trimming
@@ -41,6 +42,11 @@ MAX_FILES         = 5         # attachments (text files + images) per message
 MAX_FILE_CHARS    = 150_000   # all text attachments in one message (~37k tokens); kept in memory only
 MAX_IMAGE_BYTES   = 5_000_000 # per image, decoded (Anthropic's limit; OpenAI allows more)
 IMAGE_CHARS       = 6_000     # what one image counts as when trimming history (~1,500 tokens)
+# Tool results from questions before the last KEEP_RESULT_TURNS are replaced with a short stub when
+# a new question starts: they would otherwise be re-sent (and re-billed) on every later AI call.
+# Done once per question, so the prompt cache breaks only at the newly shortened turn.
+KEEP_RESULT_TURNS = 1
+ELIDE_MIN_CHARS   = 1_500     # small results (errors, confirmations) are kept as they are
 # Image formats both providers accept, with the bytes a real file of that kind starts with.
 IMAGE_TYPES = {"image/png": (b"\x89PNG\r\n\x1a\n",), "image/jpeg": (b"\xff\xd8\xff",),
                "image/gif": (b"GIF87a", b"GIF89a"), "image/webp": (b"RIFF",)}
@@ -49,6 +55,10 @@ IMAGE_TYPES = {"image/png": (b"\x89PNG\r\n\x1a\n",), "image/jpeg": (b"\xff\xd8\x
 _EMPTY = {"type": "object", "properties": {}, "required": []}
 _MAC   = {"type": "object", "properties": {"mac": {"type": "string", "description": "MAC address"}},
           "required": ["mac"]}
+_MAC_FULL = {"type": "object", "properties": {
+    "mac":  {"type": "string", "description": "MAC address"},
+    "full": {"type": "boolean", "description": "Return the console's raw record instead of the summary (much larger)",
+             "default": False}}, "required": ["mac"]}
 _LIST  = {"type": "object", "properties": {
     "search": {"type": "string", "description": "Optional case-insensitive filter on name, hostname, MAC, IP, model or SSID"},
     "offset": {"type": "integer", "description": "Skip this many results (for paging)", "default": 0},
@@ -59,7 +69,7 @@ READ_TOOLS = [
     ("get_devices",         "List UniFi devices (gateways, switches, APs) with status, model, IP, firmware, uptime, client count, radio stats. Supports search/paging.", _LIST),
     ("get_clients",         "List connected clients with name, IP, MAC, SSID/port, signal, rates, retries, satisfaction and usage. Supports search/paging.", _LIST),
     ("get_health",          "Network health per subsystem (WAN, LAN, WLAN, VPN).", _EMPTY),
-    ("get_alerts",          "Active alerts. On UniFi Network 9.x+ these are the 'Critical' system-log entries (fields like key, message_raw, severity, status, category); on older firmware, unarchived alarms. For wider history use get_events.", _EMPTY),
+    ("get_alerts",          "Active alerts: {title, key, severity, status, category, at (local time)}. On UniFi Network 9.x+ these are the 'Critical' system-log entries; on older firmware, unarchived alarms. For wider history use get_events.", _EMPTY),
     ("get_events",          "Recent system-log entries, newest first. Use within_hours to look further back and categories to filter.", {
         "type": "object", "properties": {
             "limit":        {"type": "integer", "description": "Number of entries (default 50, max 500)", "default": 50},
@@ -73,15 +83,17 @@ READ_TOOLS = [
     ("get_firewall_groups", "Firewall IP/port groups.", _EMPTY),
     ("get_port_forwards",   "Port forwarding rules.", _EMPTY),
     ("get_system_info",     "Controller/console version and system info.", _EMPTY),
-    ("get_rogue_aps",       "Neighbouring / rogue access points the APs can hear.", _EMPTY),
+    ("get_rogue_aps",       "Neighbouring / rogue access points the APs can hear, strongest first. Supports search/paging.", _LIST),
     ("get_dpi_stats",       "Deep Packet Inspection traffic stats per client (if DPI is enabled).", _EMPTY),
     ("get_routing",         "Static routes.", _EMPTY),
     ("get_topology",        "The network as a tree: which UniFi device is plugged into which (with port numbers), plus ONLY the clients that currently have a problem (weak signal, high Wi-Fi retries, low satisfaction, switch-port errors, flapping in the last 24 h) under the device they are on. Best first call for 'what is wrong?' questions.", _EMPTY),
     ("get_port_map",        "Every switch port on every UniFi switch/gateway: link speed, PoE watts, errors, port name/profile, and what is plugged in (UniFi devices, LLDP neighbours, wired clients with name/IP/MAC). Use for 'what is on port 5', cabling, PoE or port-error questions.", _EMPTY),
     ("get_unknown_clients", "Clients that have no name or appeared in the last 7 days, with every clue to what they are: UniFi's fingerprint guess, MAC maker, private/random MAC, hostname pattern, where connected. Use to identify devices; then propose names with set_client_name.", _EMPTY),
     ("get_security_scorecard", "Rule-based security review of the configuration (Wi-Fi security, firmware, UPnP, IPS, port forwards, broad firewall policies, IoT segmentation) with a 0-100 score. Read-only.", _EMPTY),
-    ("get_device",          "Full detail for one device by MAC (ports, radios, uplink, temps).", _MAC),
-    ("get_client",          "Full detail for one client by MAC.", _MAC),
+    ("get_device",          "Detail for one device by MAC (ports, radios, uplink, temps, port overrides). Set full=true only "
+                            "if a field you need is missing from the summary.", _MAC_FULL),
+    ("get_client",          "Detail for one client by MAC (empty fields left out). Set full=true only if a field you "
+                            "need is missing.", _MAC_FULL),
 ]
 
 WRITE_TOOLS = [
@@ -219,24 +231,25 @@ def _executors():
     return {
         "get_devices":          lambda c, i: _paged(slim_devices(c.get_devices()), i),
         "get_clients":          lambda c, i: _paged(slim_clients(c.get_clients()), i),
-        "get_health":           lambda c, i: c.get_health(),
-        "get_alerts":           lambda c, i: c.get_alerts(),
-        "get_events":           lambda c, i: c.get_events(i.get("limit", 50), i.get("within_hours", 720), i.get("categories")),
-        "get_wlans":            lambda c, i: c.get_wlans(),
-        "get_networks":         lambda c, i: c.get_networks(),
-        "get_firewall_rules":   lambda c, i: c.get_firewall_rules(),
-        "get_firewall_groups":  lambda c, i: c.get_firewall_groups(),
-        "get_port_forwards":    lambda c, i: c.get_port_forwards(),
-        "get_system_info":      lambda c, i: c.get_system_info(),
-        "get_rogue_aps":        lambda c, i: c.get_rogue_aps(),
-        "get_dpi_stats":        lambda c, i: c.get_dpi_stats(),
-        "get_routing":          lambda c, i: c.get_routing(),
+        "get_health":           lambda c, i: compact(c.get_health()),
+        "get_alerts":           lambda c, i: slim_events(c.get_alerts(), keep=("status",)),
+        "get_events":           lambda c, i: slim_events(c.get_events(i.get("limit", 50), i.get("within_hours", 720),
+                                                                     i.get("categories"))),
+        "get_wlans":            lambda c, i: compact(c.get_wlans()),
+        "get_networks":         lambda c, i: compact(c.get_networks()),
+        "get_firewall_rules":   lambda c, i: compact(c.get_firewall_rules()),
+        "get_firewall_groups":  lambda c, i: compact(c.get_firewall_groups()),
+        "get_port_forwards":    lambda c, i: compact(c.get_port_forwards()),
+        "get_system_info":      lambda c, i: compact(c.get_system_info()),
+        "get_rogue_aps":        lambda c, i: _paged(slim_rogue_aps(c.get_rogue_aps()), i),
+        "get_dpi_stats":        lambda c, i: compact(c.get_dpi_stats()),
+        "get_routing":          lambda c, i: compact(c.get_routing()),
         "get_topology":         lambda c, i: _topology(c),
         "get_port_map":         lambda c, i: portmap.summary_for_ai(portmap.build(c.get_devices(), c.get_clients(), _safe(c.get_networks))),
         "get_unknown_clients":  lambda c, i: _unknown_clients(c),
         "get_security_scorecard": lambda c, i: _scorecard(c),
-        "get_device":           lambda c, i: c.get_device(i["mac"]),
-        "get_client":           lambda c, i: c.get_client(i["mac"]),
+        "get_device":           lambda c, i: _detail(c.get_device(i["mac"]), slim_device_detail, i),
+        "get_client":           lambda c, i: _detail(c.get_client(i["mac"]), compact, i),
         "restart_device":       lambda c, i: c.restart_device(i["mac"]),
         "provision_device":     lambda c, i: c.provision_device(i["mac"]),
         "locate_device":        lambda c, i: c.locate_device(i["mac"], i.get("enable", True)),
@@ -488,10 +501,110 @@ def slim_clients(clients):
     return out
 
 
+# Bookkeeping fields the console adds to every object; they never help an answer.
+_NOISE_KEYS = {"site_id", "attr_hidden_id", "attr_no_delete", "attr_hidden", "attr_no_edit", "external_id",
+               "setting_preference", "anon_id", "license_state", "x_aes_gcm", "provisioned_at", "cfgversion",
+               "config_network", "connect_request_ip", "connect_request_port", "inform_url", "inform_ip",
+               "x_has_ssh_hostkey", "x_fingerprint", "x_inform_authkey", "fw_caps", "hw_caps", "sys_error_caps",
+               "switch_caps", "guest_token", "known_cfgversion", "prev_non_busy_state", "syslog_key",
+               "x_authkey", "x_ssh_hostkey_fingerprint", "x_vwirekey", "unsupported_reason", "hash_id"}
+
+
+def compact(obj):
+    """Drop empty values and console bookkeeping, recursively. False and 0 are kept: they mean
+    something ("enabled": false). Secrets are still hidden later by redact()."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in _NOISE_KEYS:
+                continue
+            v = compact(v)
+            if v not in (None, "", [], {}):
+                out[k] = v
+        return out
+    if isinstance(obj, list):
+        return [x for x in (compact(v) for v in obj) if x not in (None, "", [], {})]
+    return obj
+
+
+def _detail(data, slim, inp):
+    """One device/client record: the console answers with a one-item list."""
+    rec = data[0] if isinstance(data, list) and len(data) == 1 else data
+    if inp.get("full"):
+        return compact(rec)
+    return [slim(r) for r in rec] if isinstance(rec, list) else slim(rec) if isinstance(rec, dict) else rec
+
+
+def slim_device_detail(d):
+    """get_device: the slim_devices summary plus per-port, per-radio and override detail. The raw
+    stat/device record of a 48-port switch is ~60 KB, mostly counters the model never reads."""
+    s = (slim_devices([d]) or [{}])[0]
+    s.update(_pick(d, ["serial", "board_rev", "kernel_version", "required_version", "model_in_lts", "model_in_eol",
+                       "temperatures", "fan_level", "overheating", "total_max_power", "uplink_depth",
+                       "lldp_table", "stp_priority", "led_override", "outdoor_mode_override", "connected_at",
+                       "disconnected_at", "startup_timestamp", "satisfaction_reason"]))
+    if isinstance(d.get("sys_stats"), dict):
+        s["sys_stats"] = _pick(d["sys_stats"], ["loadavg_1", "loadavg_5", "loadavg_15", "mem_total", "mem_used"])
+    ports = []
+    for p in d.get("port_table") or []:
+        if not isinstance(p, dict):
+            continue
+        x = _pick(p, ["port_idx", "name", "up", "enable", "speed", "full_duplex", "media", "is_uplink",
+                      "poe_enable", "poe_mode", "poe_power", "poe_class", "poe_good", "port_poe",
+                      "rx_errors", "tx_errors", "rx_dropped", "tx_dropped", "stp_state", "op_mode",
+                      "portconf_id", "native_networkconf_id", "autoneg", "flowctrl_rx", "flowctrl_tx",
+                      "satisfaction", "sfp_found", "sfp_vendor", "sfp_part", "sfp_temperature", "sfp_rxpower"])
+        if isinstance(p.get("lldp_table"), list) and p["lldp_table"]:
+            x["lldp"] = [_pick(n, ["lldp_system_name", "lldp_port_id", "lldp_chassis_id"]) for n in p["lldp_table"]
+                         if isinstance(n, dict)]
+        ports.append(x)
+    if ports:
+        s["ports"] = ports
+    radios = [_pick(r, ["radio", "name", "channel", "ht", "tx_power_mode", "tx_power", "min_rssi_enabled",
+                        "min_rssi", "antenna_gain", "max_txpower", "is_11ax", "is_11be"])
+              for r in d.get("radio_table") or [] if isinstance(r, dict)]
+    if radios:
+        s["radio_config"] = radios
+    if d.get("port_overrides"):
+        s["port_overrides"] = compact(d["port_overrides"])
+    return s
+
+
+def slim_rogue_aps(aps):
+    """Neighbouring APs, strongest first. A busy street can show hundreds."""
+    out = [_pick(a, ["essid", "bssid", "channel", "band", "radio", "rssi", "signal", "security", "oui",
+                     "ap_mac", "is_rogue", "is_ubnt", "age", "last_seen"])
+           for a in aps or [] if isinstance(a, dict)]
+    def strength(a):                     # rssi (SNR) and signal (dBm): larger is stronger for both
+        v = a.get("rssi", a.get("signal"))
+        return v if isinstance(v, (int, float)) else float("-inf")
+    return sorted(out, key=strength, reverse=True)
+
+
+def _local_time(ms):
+    try:
+        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def slim_events(events, keep=()):
+    """System-log entries / alarms -> {title, key, severity, category, at}. The raw v2 entries carry
+    nested parameter objects for every placeholder; summarize_event already folds them into the title."""
+    out = []
+    for e in events or []:
+        s = summarize_event(e)
+        s["at"] = _local_time(s["at"]) if s.get("at") else None
+        if isinstance(e, dict):
+            s.update(_pick(e, list(keep)))
+        out.append({k: v for k, v in s.items() if v not in (None, "")})
+    return {"total": len(out), "items": out}
+
+
 def _paged(items, inp):
     q = (inp.get("search") or "").strip().lower()
     if q:
-        fields = ("name", "hostname", "mac", "ip", "model", "essid", "oui", "network")
+        fields = ("name", "hostname", "mac", "ip", "model", "essid", "oui", "network", "bssid")
         items = [i for i in items if any(q in str(i.get(f, "")).lower() for f in fields)]
     total = len(items)
     offset = max(0, int(inp.get("offset") or 0))
@@ -550,6 +663,22 @@ def _mask_for_display(obj):
     return mask(obj)
 
 
+def _is_large(result):
+    c = result.get("content")
+    return isinstance(c, str) and len(c) >= ELIDE_MIN_CHARS
+
+
+def _same_as(result):
+    """The call id an "unchanged" result points at, or None."""
+    c = result.get("content")
+    if not (isinstance(c, str) and c.startswith('{"unchanged"')):
+        return None
+    try:
+        return json.loads(c).get("same_as")
+    except ValueError:
+        return None
+
+
 # ── the agent ─────────────────────────────────────────────────────────────────
 class _Stopped(Exception):
     """The user pressed Stop while an answer was being worked on."""
@@ -592,6 +721,7 @@ class Agent:
         self.history = []                    # the conversation record (see providers.py), any AI can read it
         self.pending = None                  # {"results", "writes", "via", "pid" (proposal id), "op" (connection)}
         self._names  = {}                    # mac -> friendly name, for approval cards
+        self._seen   = {}                    # tool+args -> (hash of result text, call id): see _unchanged_or
         self._executed = False               # did the current turn run any tool?
         self._stop   = threading.Event()     # set by stop(); checked between rounds of the tool loop
         self._live   = None                  # provider of the answer being worked on (for stop())
@@ -606,6 +736,7 @@ class Agent:
             self.pending = None
             self.fallback_offer = None
             self._names = {}
+            self._seen = {}
             self._notes = []
 
     def stop(self):
@@ -764,6 +895,7 @@ class Agent:
                                                "message instead). Do not run it unless they ask again.", True)
                     for w in self.pending["writes"]]
                 self.pending = None
+            self._elide_old_results()
             self._append_user(results, text, images)
             self._begin(provider)
             try:
@@ -1098,6 +1230,33 @@ class Agent:
         else:
             self.history.append(entry)
 
+    def _elide_old_results(self):
+        """Before a new question: shorten large tool results from all but the last KEEP_RESULT_TURNS
+        questions. The model's own answers about them stay, so it remembers what it found; it is told
+        to call the tool again for the details. New entry dicts, never edits in place: snapshots
+        taken for Stop/errors share the old ones."""
+        questions = [i for i, e in enumerate(self.history) if e["role"] == "user" and e.get("text")]
+        if len(questions) < KEEP_RESULT_TURNS:
+            return
+        cutoff = questions[-KEEP_RESULT_TURNS] if KEEP_RESULT_TURNS else len(self.history)
+        # A kept "unchanged" note points at an older result: that one must stay whole.
+        protected = {_same_as(r) for e in self.history[cutoff:] if e["role"] == "user"
+                     for r in e.get("results") or ()} - {None}
+        names = {}
+        for i, e in enumerate(self.history[:cutoff]):
+            if e["role"] == "assistant":
+                names.update((c.get("id"), c.get("name")) for c in e.get("calls") or ())
+                continue
+            res = e.get("results") or []
+            drop = [_is_large(r) and r["id"] not in protected for r in res]
+            if not any(drop):
+                continue
+            self.history[i] = dict(e, results=[
+                dict(r, content=json.dumps({"elided": f"{names.get(r['id']) or 'Tool'} result from an earlier "
+                                                      f"question, removed to save space. Call the tool again "
+                                                      f"if you need its data."}))
+                if d else r for r, d in zip(res, drop)])
+
     @staticmethod
     def _by(settings):
         return {"provider": settings["provider"], "label": PROVIDERS[settings["provider"]].label,
@@ -1154,15 +1313,51 @@ class Agent:
                 result = self._knowledge.search(str(inp.get("query") or ""), k)
             else:
                 result = EXECUTORS[name](self._client(op), inp)
+            if name == SSH_TOOL_NAME and needs_approval(name, inp):
+                self._forget_cached_reads(op)    # an approved command may have changed the console
             if track:
                 self._remember_names(name, result)
-            return self._tool_result(tool_id, to_tool_text(result)), result
+            text = to_tool_text(result)
+            if track and not needs_approval(name, inp):
+                text = self._unchanged_or(tool_id, name, inp, text)
+            return self._tool_result(tool_id, text), result
         except KeyError as e:
             return self._tool_result(tool_id, json.dumps({"error": f"Missing required input {e}"}), True), None
         except (UniFiError, SSHError) as e:
             return self._tool_result(tool_id, json.dumps({"error": str(e)}), True), None
         except Exception as e:  # keep the conversation alive on unexpected errors
             return self._tool_result(tool_id, json.dumps({"error": f"{type(e).__name__}: {e}"}), True), None
+
+    def _unchanged_or(self, tool_id, name, inp, text):
+        """Same read tool, same arguments, same answer as a call whose result is still in the
+        conversation: say so instead of sending the same (often 7k-token) result again."""
+        if len(text) < ELIDE_MIN_CHARS:
+            return text
+        key = name + json.dumps(inp, sort_keys=True, default=str)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        prev = self._seen.get(key)
+        self._seen[key] = (digest, tool_id)
+        if prev and prev[0] == digest and self._result_present(prev[1], text):
+            self._seen[key] = prev               # keep pointing at the call that holds the data
+            return json.dumps({"unchanged": True, "same_as": prev[1],
+                               "note": f"Same data as your earlier {name} call with these arguments "
+                                       f"(call id {prev[1]}), which is still above in this conversation. "
+                                       f"Use that result."})
+        return text
+
+    def _result_present(self, tool_id, text):
+        for e in self.history:
+            if e["role"] == "user":
+                for r in e.get("results") or ():
+                    if r.get("id") == tool_id:
+                        return r.get("content") == text
+        return False
+
+    def _forget_cached_reads(self, op):
+        try:
+            self._client(op).clear_cache()
+        except Exception:
+            pass
 
     def _run_ssh(self, inp, op=None):
         if not self._get_context().get("ssh_enabled") or self._get_ssh is None:

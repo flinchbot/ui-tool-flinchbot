@@ -1587,6 +1587,96 @@ class AgentTests(unittest.TestCase):
         self.assertLessEqual(len(a.history), 16)
         self.assertEqual(a.history[0]["results"], [])
 
+    # ── token savings ─────────────────────────────────────────────────────────
+    def _results_sent(self, call_no):
+        """tool_use_id -> tool_result content in the request the fake Claude got as call #call_no."""
+        return {b["tool_use_id"]: b["content"] for m in FakeAnthropic.received[call_no]["messages"]
+                if m["role"] == "user" and isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_result"}
+
+    def test_events_and_alerts_are_summarised(self):
+        r, _ = self.agent._execute("e1", "get_events", {"limit": 5})
+        ev = json.loads(r["content"])
+        self.assertEqual(ev["total"], 1)
+        self.assertEqual(ev["items"][0]["key"], "WAN_DOWN")
+        self.assertIn("title", ev["items"][0])
+        r, _ = self.agent._execute("a1", "get_alerts", {})
+        al = json.loads(r["content"])["items"][0]
+        self.assertEqual((al["title"], al["status"], al["severity"]), ("AP device is offline", "ACTIVE", "very_high"))
+        self.assertNotIn("message_raw", al)
+
+    def test_compact_drops_empties_and_bookkeeping_but_keeps_false(self):
+        out = agent_mod.compact([{"name": "Home", "enabled": False, "vlan": 0, "site_id": "s1", "note": "",
+                                  "x": None, "tags": [], "nested": {"a": {}, "b": 1}}, {}])
+        self.assertEqual(out, [{"name": "Home", "enabled": False, "vlan": 0, "nested": {"b": 1}}])
+
+    def test_device_detail_is_slim_unless_full_is_asked(self):
+        port = {"port_idx": 1, "name": "Port 1", "up": True, "speed": 1000, "rx_errors": 3, "poe_power": "4.2",
+                **{f"counter_{n}": n * 1000 for n in range(60)}}
+        raw = [{"_id": "d9", "name": "Core", "mac": "aa:bb:cc:00:00:09", "model": "USW-48", "state": 1,
+                "port_table": [dict(port, port_idx=i) for i in range(1, 49)],
+                "port_overrides": [{"port_idx": 5, "name": "Cam", "poe_mode": "off"}],
+                "x_inform_authkey": "k", "inform_url": "http://x", "stat": {"bytes": 1}}]
+        slim = agent_mod._detail(raw, agent_mod.slim_device_detail, {})
+        self.assertEqual(len(slim["ports"]), 48)
+        self.assertEqual(slim["ports"][0], {"port_idx": 1, "name": "Port 1", "up": True, "speed": 1000,
+                                            "rx_errors": 3, "poe_power": "4.2"})
+        self.assertEqual(slim["port_overrides"][0]["poe_mode"], "off")
+        self.assertLess(len(json.dumps(slim)) * 5, len(json.dumps(raw)))              # several times smaller
+        full = agent_mod._detail(raw, agent_mod.slim_device_detail, {"full": True})
+        self.assertIn("counter_59", full["port_table"][0])
+        self.assertNotIn("x_inform_authkey", full)
+
+    def test_rogue_aps_strongest_first_and_paged(self):
+        aps = [{"essid": f"n{i}", "bssid": f"b{i}", "rssi": i, "junk": "x" * 50} for i in range(300)]
+        out = agent_mod._paged(agent_mod.slim_rogue_aps(aps), {"limit": 10})
+        self.assertEqual((out["total"], out["returned"]), (300, 10))
+        self.assertEqual(out["items"][0], {"essid": "n299", "bssid": "b299", "rssi": 299})
+
+    def test_unifi_lists_are_cached_briefly_and_cleared_by_a_change(self):
+        def reads():
+            return sum(1 for m, p, _ in self.m.calls if m == "GET" and p.endswith("/stat/sta"))
+        self.client.get_clients()
+        first = self.client.get_clients()
+        self.assertEqual(reads(), 1)
+        first[0]["hostname"] = "changed by a caller"                      # callers get their own copy
+        self.assertNotEqual(self.client.get_clients()[0]["hostname"], "changed by a caller")
+        self.client.restart_device("aa:bb:cc:00:00:02")                  # any change empties the cache
+        self.client.get_clients()
+        self.assertEqual(reads(), 2)
+        self.client._cache[self.client.api("stat/sta")] = (time.monotonic() - 999, {"data": []})
+        self.client.get_clients()                                       # expired: read again
+        self.assertEqual(reads(), 3)
+
+    def test_repeat_read_with_same_data_says_unchanged(self):
+        FakeAnthropic.script = [[tool("t1", "get_clients", {})], [tool("t2", "get_clients", {})],
+                                [text("done")], [text("next")], [text("again")]]
+        self.agent.chat("how many clients?")
+        sent = self._results_sent(2)
+        self.assertGreater(len(sent["t1"]), 10_000)
+        self.assertEqual(json.loads(sent["t2"])["same_as"], "t1")
+        # The next question: t1 is from the previous question and is kept (and still pointed at).
+        self.agent.chat("and now?")
+        self.assertGreater(len(self._results_sent(3)["t1"]), 10_000)
+        # One more: t1 is now two questions back and the note pointing at it is too: both shortened.
+        self.agent.chat("again?")
+        self.assertIn("elided", json.loads(self._results_sent(4)["t1"]))
+
+    def test_old_results_are_shortened_when_a_new_question_starts(self):
+        FakeAnthropic.script = [[tool("t1", "get_clients", {})], [text("2000 clients")],
+                                [tool("t2", "get_health", {}), tool("t3", "get_devices", {})], [text("fine")],
+                                [text("ok")]]
+        self.agent.chat("how many clients?")
+        before = json.dumps(self.agent.history, default=str)
+        self.agent.chat("is it healthy?")
+        self.assertGreater(len(self._results_sent(2)["t1"]), 10_000)   # the previous question keeps its data
+        self.agent.chat("thanks")
+        sent = self._results_sent(4)
+        self.assertIn("get_clients result from an earlier question", sent["t1"])
+        self.assertNotIn("elided", sent["t3"])                         # last question's data still whole
+        self.assertIn("2000 clients", json.dumps(FakeAnthropic.received[4]["messages"]))   # the answer stays
+        self.assertNotEqual(json.dumps(self.agent.history, default=str), before)
+
 
 class KnowledgeTests(unittest.TestCase):
     """backend/knowledge.py: the documents the AI can search."""
